@@ -27,6 +27,12 @@
 //   2. CF Worker 域名配了
 //   3. 手动优选 IP 配了 + 已解析 (v2.0.32 启动时 + 5min 周期 resolve)
 // 任一不满足 → tryStart() 返回 null, 播放 URL 不走代理, 走原来的链路.
+//
+// v2.0.57: 2 阶段拨号 (host race → manual fallback → 原 host fallback).
+//   见 _connectRace 注释. 解决 "4 秒卡顿" bug: manual IP (cf.877774.xyz
+//   类的 fast CF IP) TCP 拨上快但 TLS ServerHello 慢 (500ms+), 跟 host
+//   IP 并发 race 时 manual 总是胜出 → HLS 段拉不完卡 4s. 修法: manual
+//   不参与 race, 仅在 host IP 全失败时单独拨.
 
 import 'dart:async';
 import 'dart:io';
@@ -226,6 +232,26 @@ class VideoProxyServer {
   ///   2. **每个 IP 单独详细日志** — 拨号起止时间 / 成功失败 / 字节流
   ///      方向 / 第一次数据的时间戳 / 总字节数 / socket 关闭原因. 用
   ///      player 屏幕"日记"按钮能看.
+  ///
+  /// v2.0.57 关键修复 — **manual IP 不再参与 race** (2 阶段拨号):
+  ///   之前 v2.0.46/v2.0.48 把 candidateIps 排成 [host_ips..., manual],
+  ///   但 _connectRace 仍是并发 race — 首个 TCP 拨上的胜出. 用户场景:
+  ///   配 `141.101.115.52` 手动优选 IP (cf.877774.xyz 给的 fast CF IP),
+  ///   host DNS 给 `104.x.x.x` (跟 SNI 匹配的 edge). race 同时拨:
+  ///     - host IP 104.x.x.x: TCP 80ms 拨上, TLS ServerHello 0~5ms 到 (跟 SNI 匹配)
+  ///     - manual IP 141.101.115.52: TCP 50ms 拨上, **TLS ServerHello 500ms+** 才到
+  ///   manual TCP 拨上更快 → race 选 manual → 走通后 4 秒卡顿 (HLS segment
+  ///   拉不完). 用户反馈: "可以播放了但是怎么所有视频只有 4s" + "关掉优选是正常的".
+  ///
+  ///   修法: 把 candidateIps 拆成 [host_ips, manual]:
+  ///     - **Phase 1**: host IPs 之间并发 race, 首个拨上的胜出
+  ///       (保留并发优势 — 多个 host IP 仍然比, 选最快)
+  ///     - **Phase 2**: host IPs 全失败 → 单独拨 manual IP (不参与 race,
+  ///       manual 仅是 host IP 死光后的 fallback)
+  ///     - **Phase 3**: manual 也失败 → fallback 原 host (老路径兜底)
+  ///   manual IP 不会再因 TCP 拨上快就胜出, 必须 host IPs 全死才轮
+  ///   到. 代价: manual IP 场景下, video_proxy 比 v2.0.56 慢一个 manual
+  ///   拨号时间 (~50ms), 换来 manual 永远不当 winner — 4s 卡顿消失.
   static Future<Socket> _connectRace(
     String originalHost,
     int port,
@@ -248,30 +274,114 @@ class VideoProxyServer {
     }
 
     final raceT0 = DateTime.now();
+    // v2.0.57: 分类候选 IP — 哪些是 "host IP" (跟 SNI 匹配, 跟手动优选
+    // IP 区分), 哪个是 "manual IP" (用户配的, 可能跟 SNI 不匹配).
+    // 分类依据: getResolvedManualIp() 返的就是用户当前配的 manual IP.
+    final manualIp = CfOptimizerHttpOverrides.getResolvedManualIp();
+    final hostIps = <String>[];
+    String? manualCandidate;
+    for (final ip in candidateIps) {
+      if (manualIp != null && manualIp.isNotEmpty && ip == manualIp) {
+        manualCandidate ??= ip;
+      } else {
+        hostIps.add(ip);
+      }
+    }
+    // candidateIps 里没 manual IP (极端情况: 用户改了 manual 但 race
+    // 候选是缓存的), 把 manual 也加进 phase 2
+    if (manualCandidate == null &&
+        manualIp != null &&
+        manualIp.isNotEmpty &&
+        !candidateIps.contains(manualIp)) {
+      manualCandidate = manualIp;
+    }
     // ignore: avoid_print
     VideoProxyLog.append(
-        '[VideoProxy] _connectRace: 拨 $originalHost:$port 候选 ${candidateIps.length} IP: $candidateIps (race start T+0ms)');
+        '[VideoProxy] _connectRace: 拨 $originalHost:$port 候选 ${candidateIps.length} IP (host=${hostIps.length}, manual=${manualCandidate != null ? 1 : 0}, v2.0.57 分阶段)');
 
-    // v2.0.54: 单纯 race, 首个 TCP 连上的 IP 当 winner. 透明 CONNECT
-    // 代理不终止 TLS, 不能 verify ServerHello — 等数据永远 timeout.
-    final completer = Completer<Socket>();
-    int errorCount = 0;
-    final totalCount = candidateIps.length;
-    bool winnerChosen = false;
-    String? winnerIp;
+    // Phase 1: host IPs 并发 race (跟 SNI 匹配, TLS 必成功)
+    if (hostIps.isNotEmpty) {
+      try {
+        return await _connectRaceGroup(
+          hostIps,
+          'host',
+          originalHost,
+          port,
+          raceT0,
+        );
+      } catch (e) {
+        // ignore: avoid_print
+        VideoProxyLog.append(
+            '[VideoProxy] _connectRace: Phase 1 (host IPs ${hostIps.length} 个) 全失败 ($e), 进入 Phase 2');
+      }
+    }
 
-    for (final ip in candidateIps) {
+    // Phase 2: 单独拨 manual IP (host IPs 全死才用, manual 不参与 race)
+    if (manualCandidate != null) {
       final dialT0 = DateTime.now();
       // ignore: avoid_print
       VideoProxyLog.append(
-          '[VideoProxy] _connectRace: [$ip] 开始拨号 T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
+          '[VideoProxy] _connectRace: Phase 2: 单独拨 manual IP [$manualCandidate] T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
+      try {
+        final socket = await _connectOne(manualCandidate, port);
+        try {
+          socket.setOption(SocketOption.tcpNoDelay, true);
+        } catch (_) {}
+        // ignore: avoid_print
+        VideoProxyLog.append(
+            '[VideoProxy] _connectRace: Phase 2 manual 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort} 耗时 ${DateTime.now().difference(dialT0).inMilliseconds}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
+        return socket;
+      } catch (e) {
+        // ignore: avoid_print
+        VideoProxyLog.append(
+            '[VideoProxy] _connectRace: Phase 2 manual 拨号失败 ($e) 耗时 ${DateTime.now().difference(dialT0).inMilliseconds}ms, 进入 Phase 3');
+      }
+    }
+
+    // Phase 3: 全失败 → fallback 原 host (老路径兜底, 系统 DNS 解析)
+    // ignore: avoid_print
+    VideoProxyLog.append(
+        '[VideoProxy] _connectRace: Phase 3: 全部候选失败, fallback 原 host $originalHost:$port');
+    final fallbackT0 = DateTime.now();
+    final socket = await _connectOne(originalHost, port);
+    try {
+      socket.setOption(SocketOption.tcpNoDelay, true);
+    } catch (_) {}
+    // ignore: avoid_print
+    VideoProxyLog.append(
+        '[VideoProxy] _connectRace: Phase 3 fallback 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort} 耗时 ${DateTime.now().difference(fallbackT0).inMilliseconds}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
+    return socket;
+  }
+
+  /// v2.0.57: 单组 IP 并发 race, 首个 TCP 拨上的胜出. 输的 destroy.
+  ///
+  /// 跟之前 v2.0.46+ 的 race 实现几乎一样, 拆出来是因为现在分阶段:
+  /// host IPs 一组 (race), manual IP 一组 (单拨). 这个方法负责一组
+  /// 内的并发竞争.
+  static Future<Socket> _connectRaceGroup(
+    List<String> ips,
+    String groupName,
+    String originalHost,
+    int port,
+    DateTime raceT0,
+  ) async {
+    final completer = Completer<Socket>();
+    int errorCount = 0;
+    final totalCount = ips.length;
+    bool winnerChosen = false;
+    String? winnerIp;
+
+    for (final ip in ips) {
+      final dialT0 = DateTime.now();
+      // ignore: avoid_print
+      VideoProxyLog.append(
+          '[VideoProxy] _connectRaceGroup [$groupName:$ip] 开始拨号 T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
       // ignore: unawaited_futures
-      _connectOne(ip, port)
-          .then((socket) {
+      _connectOne(ip, port).then((socket) {
         final dialMs = DateTime.now().difference(dialT0).inMilliseconds;
         // ignore: avoid_print
         VideoProxyLog.append(
-            '[VideoProxy] _connectRace: [$ip] TCP 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort} 耗时 ${dialMs}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
+            '[VideoProxy] _connectRaceGroup [$groupName:$ip] TCP 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort} 耗时 ${dialMs}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
         if (!winnerChosen) {
           winnerChosen = true;
           winnerIp = ip;
@@ -281,51 +391,34 @@ class VideoProxyServer {
             socket.destroy();
           }
         } else {
-          // 输的 socket 立即 destroy
           // ignore: avoid_print
           VideoProxyLog.append(
-              '[VideoProxy] _connectRace: [$ip] 输的 socket 销毁');
+              '[VideoProxy] _connectRaceGroup [$groupName:$ip] 输的 socket 销毁');
           socket.destroy();
         }
       }).catchError((e) {
         final dialMs = DateTime.now().difference(dialT0).inMilliseconds;
         // ignore: avoid_print
         VideoProxyLog.append(
-            '[VideoProxy] _connectRace: [$ip] 拨号失败 ($e) 耗时 ${dialMs}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
+            '[VideoProxy] _connectRaceGroup [$groupName:$ip] 拨号失败 ($e) 耗时 ${dialMs}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
         if (winnerChosen) return;
         errorCount++;
         if (errorCount == totalCount && !completer.isCompleted) {
           completer.completeError(
-            Exception('all $totalCount IPs failed: $e'),
+            Exception('all $totalCount IPs in group $groupName failed: $e'),
           );
         }
       });
     }
 
+    final socket = await completer.future;
     try {
-      final socket = await completer.future;
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] _connectRace: winner=$winnerIp → ${socket.remoteAddress.address}:${socket.remotePort} 总耗时 ${DateTime.now().difference(raceT0).inMilliseconds}ms');
-      try {
-        socket.setOption(SocketOption.tcpNoDelay, true);
-      } catch (_) {}
-      return socket;
-    } catch (e) {
-      // 全部 IP 都失败, fallback 到原 host
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] _connectRace: 全部 $totalCount IP 失败 ($e) T+${DateTime.now().difference(raceT0).inMilliseconds}ms, fallback 原 host $originalHost:$port');
-      final fallbackT0 = DateTime.now();
-      final socket = await _connectOne(originalHost, port);
-      try {
-        socket.setOption(SocketOption.tcpNoDelay, true);
-      } catch (_) {}
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] _connectRace: fallback 原 host 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort} 耗时 ${DateTime.now().difference(fallbackT0).inMilliseconds}ms');
-      return socket;
-    }
+      socket.setOption(SocketOption.tcpNoDelay, true);
+    } catch (_) {}
+    // ignore: avoid_print
+    VideoProxyLog.append(
+        '[VideoProxy] _connectRaceGroup winner=$groupName:$winnerIp 总耗时 ${DateTime.now().difference(raceT0).inMilliseconds}ms');
+    return socket;
   }
 
   void _handleConnection(Socket client) {
