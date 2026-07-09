@@ -90,9 +90,18 @@ Future<void> _warmupCfOptimizer() async {
       manualPreferredIp: manualIp,
     );
     CfOptimizerHttpOverrides.install();
-    // v2.0.32: 域名模式需要 DNS 解析, 启动时立刻解析一次
-    // 解析是 fire-and-forget, 不阻塞 app 启动
-    if (!_isIpv4(manualIp)) {
+    // v2.0.32 + v2.0.37 fix: 不管 IP 还是域名都要把 _resolvedManualIp 填上
+    //
+    // 之前: 只在域名模式下调, IP 模式直接跳过
+    // 后果: warmup() 内部把 _resolvedManualIp 清成 null, IP 模式下永远没人再设回去
+    //       → 链路图判 getResolvedManualIp() == null, 节点 3/4 全灰
+    //       → VideoProxyServer.tryStart() 守门 3 永远 fail, 视频代理起不来
+    //
+    // 现在: IP 模式 await 一下 (1ms 立即就绪), 保证 _videoProxyActive 能正确激活
+    //       域名模式 fire-and-forget, 不阻塞 5s DNS 启动, 同 v2.0.32 行为
+    if (_isIpv4(manualIp)) {
+      await CfOptimizerHttpOverrides.resolveManualPreferred();
+    } else {
       unawaited(_resolveAndSchedule(manualIp));
     }
   } else if (bestIps.isNotEmpty && storedDomain == domain && optimizerEnabled) {
