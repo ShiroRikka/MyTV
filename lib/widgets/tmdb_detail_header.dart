@@ -159,7 +159,14 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
         final g = q.substring(i, i + 2);
         if (c.contains(g)) hit++;
       }
-      if (hit / qGrams >= 0.5) return true;
+      // v2.0.52: 阈值 0.5 → 0.3. 0.5 太严, 比如:
+      //   - query "你好，李焕英" (含中文标点) → 2-grams 里有 "好，" 等, 在 candidate
+      //     "你好李焕英" (没标点) 里找不到, 命中率会被拉低
+      //   - query "你好李焕英 (2021)" → 9 grams, 4 个中文 + 5 个带数字/括号, 4/9=0.44 < 0.5
+      //   - query "复仇者联盟4" → "盟4" 这个 2-gram 在 candidate "复仇者联盟4：终局之战"
+      //     里能命中, 但短 query (1-2 字) 几乎稳过
+      // 0.3 仍然能拒掉 v2.0.47 的「搜"山村医馆"返"千香"」 (命中率 0)
+      if (hit / qGrams >= 0.3) return true;
     }
     return false;
   }
@@ -206,15 +213,27 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
         });
         return;
       }
-      // 2) v2.0.47: 校验第一个结果的标题跟 query 是否"对得上".
+      // 2) v2.0.47: 校验结果的标题跟 query 是否"对得上".
       //   短剧 / 没收录 / 拼错名的剧, TMDB 会返回"最接近"的结果
       //   (e.g. 搜「山村医馆」→ 返回「千香」), 标题不匹配, 走默认海报
       //   而不是把大头部显示成另一个完全不相关的剧.
-      final first = results.results.first;
-      if (!_isTitleMatch(first, widget.title)) {
+      // v2.0.52: 不只取第一个, 遍历前 3 个, 第一个匹配的就用.
+      //   之前只看 first, 偶尔 first 是同名前缀的近似剧 (e.g. 搜「长相思」,
+      //   first 是「长相思：千古玦尘」), 第 2 个才是真剧, 全废了
+      //   走 Douban fallback.
+      TmdbItem? matched;
+      for (final r in results.results.take(3)) {
+        if (_isTitleMatch(r, widget.title)) {
+          matched = r;
+          break;
+        }
+      }
+      if (matched == null) {
         // ignore: avoid_print
-        print('[TMDBDetailHeader] 标题不匹配: 搜 "${widget.title}" '
-            '→ "${first.title}" (${first.originalTitle}), 走默认海报');
+        print('[TMDBDetailHeader] 标题都不匹配: 搜 "${widget.title}", '
+            '前 ${results.results.take(3).length} 个结果: '
+            '${results.results.take(3).map((r) => '"${r.title}"').join(', ')}, '
+            '走默认海报');
         if (!mounted) return;
         setState(() {
           _isLoading = false;
@@ -222,16 +241,16 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
         });
         return;
       }
-      // 3) 拿第一个匹配的详情 (含 overview + backdrop)
+      // 3) 拿匹配那一个的详情 (含 overview + backdrop)
       final details = await TmdbService.getDetails(
         type: _mediaType,
-        id: first.id,
+        id: matched.id,
       );
       if (!mounted) return;
       setState(() {
         _tmdbConfig = cfg;
         // 用详情 (overview + backdrop) 优先, 拿不到用 search result (基本字段)
-        _tmdbItem = details ?? first;
+        _tmdbItem = details ?? matched;
         _isLoading = false;
         _hasError = false;
       });
