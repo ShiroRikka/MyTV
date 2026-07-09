@@ -88,6 +88,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   // 当前选中的源 / 集
   SearchResult? _selectedSource;
   int _currentEpisodeIndex = 0;
+  // v2.0.51: 选集 PageView 控制器 + notifier (给翻页 badge "1/2" 用,
+  //   滑动 PageView 时 badge 数字跟着变)
+  late final PageController _episodesPageController;
+  final ValueNotifier<PageController> _pageControllerNotifier =
+      ValueNotifier<PageController>(_EmptyPageController.instance);
 
   // 播放进度上报
   Timer? _progressTimer;
@@ -201,6 +206,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     super.initState();
     _player = Player();
     _controller = VideoController(_player);
+    // v2.0.51: 选集 PageView 初始化
+    _episodesPageController = PageController();
+    _pageControllerNotifier.value = _episodesPageController;
     // v1.0.50: 监听 AppLifecycleState, 进后台 (home 键) 时立即保存一次,
     // 避免 10s progressTimer 还没触发就被上滑/杀进程, 进度丢
     WidgetsBinding.instance.addObserver(this);
@@ -360,6 +368,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _videoParamsSub?.cancel();
     _positionSub?.cancel();
     _durationSub?.cancel();
+    // v2.0.51: 释放选集 PageView 控制器
+    _episodesPageController.dispose();
+    _pageControllerNotifier.dispose();
     WidgetsBinding.instance.removeObserver(this);
     // 恢复系统UI,方向交由系统控制
     SystemChrome.setEnabledSystemUIMode(
@@ -1394,6 +1405,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       _selectedSource = result;
       _currentEpisodeIndex = clampedIndex;
     });
+    // v2.0.51: 切源后 PageView 跳到当前 episode 所在页
+    final newPage = (clampedIndex ~/ _episodesPerPage).clamp(0, 999);
+    if (_episodesPageController.hasClients &&
+        _episodesPageController.page?.round() != newPage) {
+      _episodesPageController.jumpToPage(newPage);
+    }
   }
 
   /// 后台测速所有源：并发用 M3U8Service 测速, 并按综合分从高到低排序源列表
@@ -1935,6 +1952,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       _isBuffering = true;
       _phase = 'playing';
     });
+    // v2.0.51: 切集后 PageView 跳到当前 episode 所在页 (用 jumpToPage, 静默切)
+    final newPage = (index ~/ _episodesPerPage).clamp(0, 999);
+    if (_episodesPageController.hasClients &&
+        _episodesPageController.page?.round() != newPage) {
+      _episodesPageController.jumpToPage(newPage);
+    }
 
     // v2.0.28: 视频走 CF Worker 加速
     //   - m3u8 URL 走 worker /m3u8 端点 → worker 重写 .ts 链接走 worker
@@ -2746,6 +2769,27 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   // ---------- 集数选择 ----------
 
+  /// v2.0.51: 选集面板 — 30 集一页, PageView 左右滑翻页
+  ///
+  /// 用户反馈 (平板模式): 单 GridView 一页铺 60+ 集, 平板上列数拉到 12,
+  /// 卡片巨大 (cardW ~100dp), 视觉上"卡片大但内容少, 看着空". 同时
+  /// 30 集往上就滚不动 (GridView 嵌在 SingleChildScrollView 里, 不会
+  /// 自己滚, 要滚整页), 长剧 (60 / 80 / 100 集) 用户要一直滑滚轮.
+  ///
+  /// 改法:
+  ///   - 拆成 PageView, 每页最多 30 集, 默认显示当前 episode 所在页
+  ///   - 页数 = ceil(episodes.length / 30), 60 集 → 2 页, 100 集 → 4 页
+  ///   - 标题旁加翻页指示器 "1/2" + PageView 底部小圆点 (current page 高亮)
+  ///   - 每页内还是 GridView (列数按宽度动态, 跟旧版一致),
+  ///     shrinkWrap + NeverScrollableScrollPhysics, 不会跟外层
+  ///     SingleChildScrollView 抢手势
+  ///   - 左右滑切页, 不影响外层上下滚 (Flutter PageView 默认 PageScrollPhysics
+  ///     只接水平, vertical 由外层 SingleChildScrollView 处理)
+  ///
+  /// 兼容性: 卡片样式 / 选中渐变 / 点击 _playEpisode 逻辑全部保留.
+  /// 列数 / 卡片宽 / 字号策略跟 v2.0.43 一样, 没动.
+  static const int _episodesPerPage = 30;
+
   Widget _buildEpisodeSection(bool isDark) {
     final source = _selectedSource;
     return Padding(
@@ -2753,7 +2797,18 @@ class _PlayerScreenState extends State<PlayerScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSectionTitle('选集', isDark),
+          Row(
+            children: [
+              _buildSectionTitle('选集', isDark),
+              const Spacer(),
+              // v2.0.51: 翻页指示器 (1/2) — 用户滑动 PageView 时实时更新
+              if (source != null && source.episodes.isNotEmpty)
+                _buildEpisodePageBadge(
+                  source.episodes.length,
+                  isDark,
+                ),
+            ],
+          ),
           const SizedBox(height: 8),
           if (source == null || source.episodes.isEmpty)
             Text(
@@ -2764,109 +2819,246 @@ class _PlayerScreenState extends State<PlayerScreen>
               ),
             )
           else
-            LayoutBuilder(
-              builder: (context, constraints) {
-                // 平板上宽度很大, 写死 6 列会让每张卡片巨大、文字居中显空,
-                // 按宽度动态算列数: 手机 6 列(卡片~50dp), 平板 8~12 列
-                final width = constraints.maxWidth;
-                int crossAxisCount;
-                if (width < 600) {
-                  crossAxisCount = 6; // 手机
-                } else if (width < 900) {
-                  crossAxisCount = 8; // 小平板
-                } else if (width < 1200) {
-                  crossAxisCount = 10; // 中平板
-                } else {
-                  crossAxisCount = 12; // 大平板/PC
-                }
-                // 卡片宽度 = (width - spacing*(cols-1)) / cols
-                const spacing = 6.0;
-                final cardW =
-                    (width - spacing * (crossAxisCount - 1)) / crossAxisCount;
-                // 卡片高度按宽度等比例: 宽 < 80dp 的按 1.2 比例(略宽), 否则接近方形
-                final childAspectRatio = cardW < 80 ? 1.2 : 1.0;
-                // 字号也按卡片宽度微调: 小卡片 11, 大卡片 12
-                final fontSize = cardW < 80 ? 11.0 : 12.0;
-                return GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  padding: EdgeInsets.zero,
-                  gridDelegate:
-                      SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: crossAxisCount,
-                    childAspectRatio: childAspectRatio,
-                    mainAxisSpacing: spacing,
-                    crossAxisSpacing: spacing,
-                  ),
-                  itemCount: source.episodes.length,
-                  itemBuilder: (context, index) {
-                    final isCurrent = index == _currentEpisodeIndex;
-                    final title = index < source.episodesTitles.length
-                        ? source.episodesTitles[index]
-                        : '${index + 1}';
-                    return InkWell(
-                      onTap: () {
-                        // 点击集数直接开始播放
-                        if (index != _currentEpisodeIndex ||
-                            _phase != 'playing') {
-                          _playEpisode(index);
-                        } else {
-                          setState(() {
-                            _currentEpisodeIndex = index;
-                          });
-                        }
-                      },
-                      borderRadius: BorderRadius.circular(6),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          gradient: isCurrent
-                              ? const LinearGradient(
-                                  colors: [
-                                    Color(0xFF22C55E),
-                                    Color(0xFF10B981)
-                                  ],
-                                )
-                              : null,
-                          color: !isCurrent
-                              ? (isDark
-                                  ? Colors.white.withOpacity(0.06)
-                                  : Colors.black.withOpacity(0.04))
-                              : null,
-                          borderRadius: BorderRadius.circular(6),
-                          border: !isCurrent
-                              ? Border.all(
-                                  color: isDark
-                                      ? Colors.white.withOpacity(0.08)
-                                      : Colors.black.withOpacity(0.06),
-                                )
-                              : null,
-                        ),
-                        alignment: Alignment.center,
-                        child: Padding(
-                          padding: const EdgeInsets.all(2),
-                          child: Text(
-                            title,
-                            maxLines: 2,
-                            textAlign: TextAlign.center,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: fontSize,
-                              fontWeight: FontWeight.w600,
-                              color: isCurrent
-                                  ? Colors.white
-                                  : (isDark
-                                      ? Colors.white70
-                                      : Colors.black87),
-                            ),
-                          ),
-                        ),
-                      ),
+            _buildEpisodesPageView(source, isDark),
+        ],
+      ),
+    );
+  }
+
+  /// v2.0.51: 翻页 badge "1/2", 显示在 "选集" 标题右侧
+  Widget _buildEpisodePageBadge(int totalEpisodes, bool isDark) {
+    final pageCount =
+        (totalEpisodes + _episodesPerPage - 1) ~/ _episodesPerPage;
+    final currentPage =
+        (_currentEpisodeIndex ~/ _episodesPerPage).clamp(0, pageCount - 1);
+    if (pageCount <= 1) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: isDark ? Colors.white.withOpacity(0.08) : Colors.black.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: ValueListenableBuilder<PageController>(
+        // v2.0.51: PageController 变化时 badge "1/2" 数字跟着变
+        valueListenable: _pageControllerNotifier,
+        builder: (context, controller, _) {
+          final page = controller.hasClients
+              ? (controller.page?.round() ?? currentPage)
+              : currentPage;
+          return Text(
+            '${page + 1} / $pageCount',
+            style: TextStyle(
+              fontSize: 11,
+              color: isDark ? Colors.white60 : Colors.black54,
+              fontWeight: FontWeight.w600,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// v2.0.51: 选集 PageView (30 集/页)
+  Widget _buildEpisodesPageView(SearchResult source, bool isDark) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 列数策略: 跟 v2.0.43 一致 (手机 6 / 小平板 8 / 中平板 10 / 大平板 12)
+        final width = constraints.maxWidth;
+        int crossAxisCount;
+        if (width < 600) {
+          crossAxisCount = 6;
+        } else if (width < 900) {
+          crossAxisCount = 8;
+        } else if (width < 1200) {
+          crossAxisCount = 10;
+        } else {
+          crossAxisCount = 12;
+        }
+        const spacing = 6.0;
+        final cardW =
+            (width - spacing * (crossAxisCount - 1)) / crossAxisCount;
+        final childAspectRatio = cardW < 80 ? 1.2 : 1.0;
+        final fontSize = cardW < 80 ? 11.0 : 12.0;
+
+        // 每页最多 30 集, 算行数
+        final rows =
+            ((_episodesPerPage + crossAxisCount - 1) ~/ crossAxisCount);
+        final cardH = cardW / childAspectRatio;
+        // 网格高度 = rows * cardH + (rows-1) * spacing
+        final gridHeight = rows * cardH + (rows - 1) * spacing;
+        // 加上底部翻页小圆点的高度 (16dp + 4dp marginTop)
+        final sectionHeight = gridHeight + 20;
+
+        final totalEpisodes = source.episodes.length;
+        final pageCount =
+            (totalEpisodes + _episodesPerPage - 1) ~/ _episodesPerPage;
+        final initialPage =
+            (_currentEpisodeIndex ~/ _episodesPerPage).clamp(0, pageCount - 1);
+
+        return SizedBox(
+          height: sectionHeight,
+          child: Column(
+            children: [
+              SizedBox(
+                height: gridHeight,
+                child: PageView.builder(
+                  // v2.0.51: PageController 跟着 episode 切换 + 用户滑动更新
+                  controller: _episodesPageController,
+                  onPageChanged: (page) {
+                    // 通知 badge 数字更新 (ValueListenableBuilder)
+                    _pageControllerNotifier.value = _episodesPageController;
+                  },
+                  itemCount: pageCount,
+                  itemBuilder: (context, pageIndex) {
+                    final start = pageIndex * _episodesPerPage;
+                    final end = (start + _episodesPerPage).clamp(0, totalEpisodes);
+                    return _buildEpisodesGridPage(
+                      source,
+                      start,
+                      end,
+                      isDark,
+                      crossAxisCount,
+                      childAspectRatio,
+                      spacing,
+                      cardW,
+                      fontSize,
                     );
                   },
-                );
-              },
+                ),
+              ),
+              // v2.0.51: 翻页小圆点 (跟 badge 同步)
+              if (pageCount > 1)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: List.generate(pageCount, (i) {
+                      final isActive = i == initialPage;
+                      return AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        margin: const EdgeInsets.symmetric(horizontal: 3),
+                        width: isActive ? 16 : 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          color: isActive
+                              ? const Color(0xFF22C55E)
+                              : (isDark
+                                  ? Colors.white24
+                                  : Colors.black26),
+                          borderRadius: BorderRadius.circular(3),
+                        ),
+                      );
+                    }),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// v2.0.51: 单页 GridView (30 集以内), 卡片样式跟 v2.0.43 一致
+  Widget _buildEpisodesGridPage(
+    SearchResult source,
+    int start,
+    int end,
+    bool isDark,
+    int crossAxisCount,
+    double childAspectRatio,
+    double spacing,
+    double cardW,
+    double fontSize,
+  ) {
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      padding: EdgeInsets.zero,
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: crossAxisCount,
+        childAspectRatio: childAspectRatio,
+        mainAxisSpacing: spacing,
+        crossAxisSpacing: spacing,
+      ),
+      itemCount: end - start,
+      itemBuilder: (context, offset) {
+        final index = start + offset;
+        return _buildEpisodeCard(
+          source,
+          index,
+          isDark,
+          cardW,
+          fontSize,
+        );
+      },
+    );
+  }
+
+  /// v2.0.51: 抽出来的单集卡片 (PageView 每页 itemBuilder 复用)
+  Widget _buildEpisodeCard(
+    SearchResult source,
+    int index,
+    bool isDark,
+    double cardW,
+    double fontSize,
+  ) {
+    final isCurrent = index == _currentEpisodeIndex;
+    final title = index < source.episodesTitles.length
+        ? source.episodesTitles[index]
+        : '${index + 1}';
+    return InkWell(
+      onTap: () {
+        // 点击集数直接开始播放
+        if (index != _currentEpisodeIndex || _phase != 'playing') {
+          _playEpisode(index);
+        } else {
+          setState(() {
+            _currentEpisodeIndex = index;
+          });
+        }
+      },
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: isCurrent
+              ? const LinearGradient(
+                  colors: [
+                    Color(0xFF22C55E),
+                    Color(0xFF10B981),
+                  ],
+                )
+              : null,
+          color: !isCurrent
+              ? (isDark
+                  ? Colors.white.withOpacity(0.06)
+                  : Colors.black.withOpacity(0.04))
+              : null,
+          borderRadius: BorderRadius.circular(6),
+          border: !isCurrent
+              ? Border.all(
+                  color: isDark
+                      ? Colors.white.withOpacity(0.08)
+                      : Colors.black.withOpacity(0.06),
+                )
+              : null,
+        ),
+        alignment: Alignment.center,
+        child: Padding(
+          padding: const EdgeInsets.all(2),
+          child: Text(
+            title,
+            maxLines: 2,
+            textAlign: TextAlign.center,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: fontSize,
+              fontWeight: FontWeight.w600,
+              color: isCurrent
+                  ? Colors.white
+                  : (isDark ? Colors.white70 : Colors.black87),
             ),
-        ],
+          ),
+        ),
       ),
     );
   }
@@ -4450,4 +4642,10 @@ class _SourceSpeedInfo {
     }
     return -(loadSpeedKBps * resWeight).round() + pingMs;
   }
+}
+
+/// v2.0.51: 空 PageController placeholder (initState 之前给 notifier 占位用)
+class _EmptyPageController extends PageController {
+  _EmptyPageController._() : super();
+  static final _EmptyPageController instance = _EmptyPageController._();
 }

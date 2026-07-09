@@ -291,9 +291,15 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
       ),
       child: Stack(
         children: [
-          // 1) 背景: backdrop 大图 (16:9) + 重度渐变蒙版 (大竖海报在前景, 背景压暗)
+          // 1) 背景: backdrop 大图 + 重度渐变蒙版 (大竖海报在前景, 背景压暗)
+          // v2.0.51: 平板 (宽 >= 600) 改用 21:9, 不再 16:9 — 平板横屏 16:9
+          //   backdrop 巨高 (e.g. 1280dp 宽 → 720dp 高), 加上下面 title
+          //   / rating / 简介 / tag, 总高 800+ dp, 几乎占满整个平板横屏
+          //   高度, 把选集 (episode list) 挤到 fold 下面, 用户看不到.
+          //   21:9 比例下 1280dp 宽 → 549dp 高, 给选集 / source list 留
+          //   出 200+ dp 空间, 用户能直接在第一屏看到选集 PageView
           AspectRatio(
-            aspectRatio: 16 / 9,
+            aspectRatio: MediaQuery.of(context).size.width >= 600 ? 21 / 9 : 16 / 9,
             child: Stack(
               fit: StackFit.expand,
               children: [
