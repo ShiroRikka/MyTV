@@ -1733,10 +1733,25 @@ class _PlayerScreenState extends State<PlayerScreen>
     // v2.0.27: 默认不启视频代理 (Dart Socket 代理不可靠)
     // 用户在设置里手动开"视频代理加速"才启
     final enabled = await UserDataService.getVideoProxyEnabled();
-    if (!enabled) return;
-    if (_videoProxy != null && _videoProxy!.isRunning) return;
+    if (!enabled) {
+      // v2.0.34+: 诊断日志, 让用户能确认开关状态
+      // ignore: avoid_print
+      print('[VideoProxy] 跳过: 「视频代理加速」开关未开');
+      return;
+    }
+    if (_videoProxy != null && _videoProxy!.isRunning) {
+      // ignore: avoid_print
+      print('[VideoProxy] 跳过: 已在跑 (port=${_videoProxy!.port})');
+      return;
+    }
     final proxy = await VideoProxyServer.tryStart();
-    if (proxy == null) return;
+    if (proxy == null) {
+      // v2.0.34+: 诊断 tryStart 失败原因
+      // ignore: avoid_print
+      print('[VideoProxy] tryStart 返 null — 检查: '
+          'CF Worker 加速开关 / 域名 / 手动优选 IP 字段');
+      return;
+    }
     // v2.0.20: dart:ffi 直调 libmpv 设 http-proxy (绕开 media_kit API 限制)
     try {
       if (!MpvFFI.isAvailable) {
@@ -1759,6 +1774,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       await proxy.stop();
       return;
     }
+    // v2.0.34+: 成功时打印, 让用户 logcat 一搜就能确认代理起来了
+    // ignore: avoid_print
+    print('[VideoProxy] 启用成功: ${proxy.proxyUrl} '
+        '(libmpv --http-proxy 已设, .ts 段都走本地代理 → 优选 IP)');
     _videoProxy = proxy;
   }
 
