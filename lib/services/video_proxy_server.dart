@@ -155,6 +155,14 @@ class VideoProxyServer {
           timeout: const Duration(seconds: 5));
     }
 
+    // v2.0.40 诊断日志
+    if (candidateIps.isNotEmpty) {
+      // ignore: avoid_print
+      print('[VideoProxy] _connectRace: 拨 $originalHost:$port 候选 ${candidateIps.length} IP: $candidateIps');
+    } else {
+      // ignore: avoid_print
+      print('[VideoProxy] _connectRace: 拨 $originalHost:$port (无候选 IP, 走原 host)');
+    }
     final completer = Completer<Socket>();
     int errorCount = 0;
     final totalCount = candidateIps.length;
@@ -195,14 +203,21 @@ class VideoProxyServer {
       try {
         socket.setOption(SocketOption.tcpNoDelay, true);
       } catch (_) {}
+      // v2.0.40 诊断日志: 哪个 IP 真拨上
+      // ignore: avoid_print
+      print('[VideoProxy] _connectRace: 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort}');
       return socket;
-    } catch (_) {
+    } catch (e) {
       // 全部 IP 都失败, fallback 到原 host
+      // ignore: avoid_print
+      print('[VideoProxy] _connectRace: 全部 ${candidateIps.length} IP 失败 ($e), fallback 原 host $originalHost:$port');
       final socket = await Socket.connect(originalHost, port,
           timeout: const Duration(seconds: 5));
       try {
         socket.setOption(SocketOption.tcpNoDelay, true);
       } catch (_) {}
+      // ignore: avoid_print
+      print('[VideoProxy] _connectRace: fallback 原 host 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort}');
       return socket;
     }
   }
@@ -361,8 +376,14 @@ class VideoProxyServer {
       state.buffer = [];
 
       if (state.method == 'CONNECT') {
+        // v2.0.40 诊断日志
+        // ignore: avoid_print
+        print('[VideoProxy] CONNECT ${state.target} (从 libmpv 收到 CONNECT 头, 开始拨号)');
         _handleConnect(client, state, onBackendReady, closeAll);
       } else {
+        // v2.0.40 诊断日志
+        // ignore: avoid_print
+        print('[VideoProxy] HTTP ${state.method} ${state.target}');
         _handleHttp(client, state, onBackendReady, closeAll);
       }
     }

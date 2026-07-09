@@ -1950,16 +1950,20 @@ class _PlayerScreenState extends State<PlayerScreen>
     // v2.0.34: 保存最终播放 URL 给「加速链路」弹层用
     _currentPlayUrl = playUrl;
 
+    // v2.0.40 修: 把 _ensureVideoProxy 调时机从 _player.open 之后挪到之前
+    //   之前 v2.0.39 假设 _player.open 之后 libmpv 句柄有效, 立刻 setPropertyString http-proxy.
+    //   实际 libmpv 拿到 m3u8 之后, 第一个 .ts 段 fetch 已经 in-flight, http-proxy
+    //   property 改了但 m3u8 主文件不走代理 (走 native libmpv), 第一个 .ts 段 fetch
+    //   **可能**走新代理也可能走老的 (跟 libmpv 内部 cache 有关). 用户报告
+    //   装 v2.0.39 后链路图全绿但 0 B/s, 根因可能是这个.
+    //   修法: 提前到 _player.open 之前, libmpv 整个 open 周期内 http-proxy 一直是
+    //   本地代理, 第一个 m3u8 fetch + 后续所有 .ts 段 fetch 都强制走代理.
+    //   切集时也走这条路径, _ensureVideoProxy 内部 _videoProxy.isRunning 守门不会重起代理.
+    // ignore: unawaited_futures
+    _ensureVideoProxy();
     try {
       await _player.stop();
       await _player.open(Media(playUrl));
-      // v2.0.39 修: _ensureVideoProxy() 这个函数 v2.0.34 写了**没人调**,
-      //   全项目搜只有 1 处 = 函数定义本身, 视频代理挂了 5 个版本没人发现.
-      //   这里 _player.open() 之后 libmpv 句柄已有效, 立刻调 _ensureVideoProxy
-      //   拿 _player.handle 设 'http-proxy' 属性. 切集时也走这条路径,
-      //   _ensureVideoProxy 内部有 _videoProxy.isRunning 守门, 不会重起代理.
-      // ignore: unawaited_futures
-      _ensureVideoProxy();
       // 云记忆恢复
       //
       // v1.0.61 fix: v1.0.60 等了 position stream, 但根因是 player 在
