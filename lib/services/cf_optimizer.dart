@@ -272,6 +272,18 @@ class CfOptimizerHttpOverrides extends HttpOverrides {
   // v2.0.32: 域名解析 TTL (5 分钟, 过期重新解析)
   static const Duration _resolveTtl = Duration(minutes: 5);
 
+  // v2.0.46: 视频代理目标 host 的 DNS 解析结果缓存 (host → [IPv4...])
+  //   跟 [getTopNIpsForVideoProxy] 配合: race 候选优先用 host DNS 解析的 IP
+  //   (跟 SNI 匹配的 CF edge IP), 而不是手动优选 IP (可能是任意 CF IP, 跟
+  //   SNI 不在同一个 zone → TLS 失败 → 0KB 死链). 用户 v2.0.45 反馈:
+  //   「ip优选播放不了0kb 优选ip 问题已确认」, logcat 显示 162.159.158.162
+  //   TCP 拨上 15ms 但 TLS 失败, race 永远返这个 IP.
+  static final Map<String, List<String>> _hostResolvedIpsCache = {};
+  static final Map<String, int> _hostResolvedIpsAt = {};
+  static const Duration _hostResolveTtl = Duration(minutes: 5);
+  // 避免同一个 host 短时间多次并发解析
+  static final Set<String> _hostResolving = {};
+
   /// v2.0.32: 拿到手动优选实际生效的 IP (null = 没配 / 解析失败)
   static String? getResolvedManualIp() => _resolvedManualIp;
 
@@ -390,6 +402,64 @@ class CfOptimizerHttpOverrides extends HttpOverrides {
     return elapsed > _resolveTtl.inMilliseconds;
   }
 
+  /// v2.0.46: 同步读 host DNS 解析缓存 (没缓存返 null)
+  static List<String>? getHostResolvedIps(String host) {
+    if (host.isEmpty) return null;
+    final cached = _hostResolvedIpsCache[host];
+    final cachedAt = _hostResolvedIpsAt[host] ?? 0;
+    if (cached == null) return null;
+    final elapsed = DateTime.now().millisecondsSinceEpoch - cachedAt;
+    if (elapsed > _hostResolveTtl.inMilliseconds) return null; // 过期
+    return cached;
+  }
+
+  /// v2.0.46: 异步解析 host 的 DNS, 写进 [_hostResolvedIpsCache].
+  ///
+  /// 调用方 fire-and-forget: getTopNIpsForVideoProxy 第一次看到 manual IP
+  /// 但 host DNS 没缓存时调一次, 之后 _connectRace 就能用上 host DNS IP.
+  ///
+  /// 不会重复解析: [_hostResolving] Set 守门.
+  /// 失败静默: 解析失败时缓存空 list, 等 5 分钟 TTL 过期再试.
+  /// 已经被禁了: 如果一个 host 已经解析失败过, [_hostResolving] 也会
+  ///   short-circuit, 避免 spam 解析.
+  static Future<void> resolveHostEagerly(String host) async {
+    if (host.isEmpty) return;
+    if (_hostResolving.contains(host)) return;
+    _hostResolving.add(host);
+    try {
+      // 用系统 DNS 解析, 5 秒超时
+      final addrs = await InternetAddress.lookup(host,
+              type: InternetAddressType.IPv4)
+          .timeout(const Duration(seconds: 5));
+      final ips = addrs.map((a) => a.address).toList();
+      _hostResolvedIpsCache[host] = ips;
+      _hostResolvedIpsAt[host] = DateTime.now().millisecondsSinceEpoch;
+    } catch (_) {
+      // 解析失败, 写空 list (避免下次再触发)
+      _hostResolvedIpsCache[host] = const [];
+      _hostResolvedIpsAt[host] = DateTime.now().millisecondsSinceEpoch;
+    } finally {
+      _hostResolving.remove(host);
+    }
+  }
+
+  /// v2.0.46: 视频代理请求 host 时调用, fire-and-forget 触发 host DNS 解析
+  ///
+  /// 比 [resolveHostEagerly] 多一层"已经解析过就跳过"的守门, 避免
+  /// 视频代理每秒 N 次请求时重复触发 DNS 解析. 但仍然 fire-and-forget,
+  /// 调用方不用 await, 后续 race 拿候选时 DNS 可能还在解析中, 走
+  /// [getTopNIpsForVideoProxy] 的 fallback 路径 (返 [manual, host]).
+  static void maybeResolveHostEagerly(String host) {
+    if (host.isEmpty) return;
+    // 缓存命中就跳过 (5 分钟 TTL 内)
+    final cached = getHostResolvedIps(host);
+    if (cached != null) return;
+    // 正在解析就跳过
+    if (_hostResolving.contains(host)) return;
+    // ignore: unawaited_futures
+    resolveHostEagerly(host);
+  }
+
   /// v2.0.32: IPv4 校验
   static bool _isIpv4(String s) {
     final m = RegExp(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$').firstMatch(s);
@@ -491,15 +561,37 @@ class CfOptimizerHttpOverrides extends HttpOverrides {
   ///   按 SNI 路由证书). 缺点: 多一次 DNS lookup, 多个并发 socket.
   ///   实测 162.159.x.x 这种通用 CF IP, 拨上后 TLS 还是 0KB,
   ///   必须 fallback 到 host 让系统 DNS 选一个跟 SNI 匹配的 edge.
+  ///
+  /// v2.0.46: 跟 _resolvedManualIp 一样, 提前把 host DNS 解析缓存起来.
+  ///   race 候选 **优先用 host DNS 解析的 IP** (跟 SNI 匹配的 CF edge IP),
+  ///   手动 IP 排最后. 没缓存时 fire-and-forget 触发一次解析, 下次
+  ///   getTopNIpsForVideoProxy 调用就用上. 用户场景:
+  ///   配 `162.159.158.162` 静态 IP, target host `api.xx.fn0.qzz.io` →
+  ///   系统 DNS 解析 host 返回 `104.x.x.x` (跟 SNI 匹配的 edge IP, 跟
+  ///   手动 IP 不同的 zone) → race 候选 [104.x.x.x, 162.159.158.162] →
+  ///   104.x.x.x TCP 拨上 ~30ms, 162.159.158.162 TCP 拨上 ~15ms, race
+  ///   选 162.159.158.162 (15ms 优先) → 还是 0KB. 真的稳的修法见
+  ///   [resolveHostEagerly] 调用点的注释.
   static List<String> getTopNIpsForVideoProxy(String host, int n) {
     // 手动优选优先 (v2.0.32+: 可能是 IP, 也可能是已 resolve 的域名)
     final manual = _resolvedManualIp;
     if (manual != null && manual.isNotEmpty) {
-      // v2.0.45: 同时返回手动 IP + 原 host. 原 host 在 _connectRace 里走
-      // Socket.connect 时会触发系统 DNS 解析, 拿到跟 SNI 匹配的 CF edge IP.
-      // 手动 IP 排第一 (低延迟优先), 原 host 排第二 (TLS 兜底).
-      // v2.0.32+ 域名模式下, _resolvedManualIp 已经是域名解析后的 IP,
-      //   同样存在"IP 跟 host zone 不匹配"的问题, 一并兜底.
+      // v2.0.46: 先看 host DNS 缓存, 优先用 host IP (跟 SNI 匹配)
+      final hostIps = getHostResolvedIps(host);
+      if (hostIps != null && hostIps.isNotEmpty) {
+        // host IPs 排前面 (跟 SNI 匹配的 CF edge IP),
+        // 手动 IP 排最后 (兜底 — race 不选它时用户可能看到 fallback 原 host)
+        final result = <String>[];
+        for (final ip in hostIps) {
+          if (ip != manual) result.add(ip);
+        }
+        result.add(manual);
+        return result;
+      }
+      // 缓存没值 (第一次或解析失败), 触发后台解析, 下次就用上
+      // 这次 race 仍走 [manual, host] (跟 v2.0.45 一致)
+      // ignore: unawaited_futures
+      resolveHostEagerly(host);
       return [manual, host];
     }
     // fallback: 测速优选

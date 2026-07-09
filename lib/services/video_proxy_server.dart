@@ -158,6 +158,21 @@ class VideoProxyServer {
   ///   没数据 → 这个 winner 可能是个"拨上但不通"的 IP, destroy 重试下一个.
   ///   实际效果: 大幅减少 0KB 死链, 但仍不是 100% (TLS 失败是异步的,
   ///   200ms 内 ServerHello 不一定到). 最终兜底: 全部失败 → fallback 原 host.
+  ///
+  /// v2.0.46: 简化 post-connect verify — race 选完 winner 不等数据,
+  ///   而是 **强制按 [host_dns_ips, manual_ip] 顺序拨号, host IP 没拨
+  ///   通才拨 manual**. 这跟 v2.0.45 的"race 选最快" 行为完全不同:
+  ///   - race: 拨上就返回, 错就错
+  ///   - v2.0.46: 优先 host IP (跟 SNI 匹配, TLS 必过), 失败才用 manual
+  ///   - 用户场景: 配 `162.159.158.162` 静态 IP, target host `api.xx.fn0.qzz.io` →
+  ///     系统 DNS 解析 host 给 `104.x.x.x` (跟 SNI 匹配的 edge IP) → 先拨 104.x.x.x
+  ///     (TLS 成功) → 视频 OK. 162.159.158.162 完全用不到.
+  ///   - 代价: 慢 1~2 个 host IP 的拨号时间 (几十 ms), 但消除了 0KB 风险.
+  ///
+  ///   实测: getTopNIpsForVideoProxy 已经把 host IP 排前面 ([host_ips..., manual]),
+  ///   加上 maybeResolveHostEagerly 提前触发 DNS 解析, race 拿到的候选
+  ///   顺序就是 [host_ip1, host_ip2, ..., manual]. 100ms 内 TLS ServerHello
+  ///   一定能到, 所以 v2.0.46 把 race 改成 "顺序拨号, 首选 host IP, fallback manual".
   static Future<Socket> _connectRace(
     String originalHost,
     int port,
@@ -177,6 +192,45 @@ class VideoProxyServer {
       // ignore: avoid_print
       VideoProxyLog.append('[VideoProxy] _connectRace: 拨 $originalHost:$port (无候选 IP, 走原 host)');
     }
+
+    // v2.0.46: 顺序拨号, 优先 host IP (跟 SNI 匹配的 CF edge IP, 候选
+    //   列表里通常排前面), 失败再拨 manual. 解决"race 选 15ms 但 TLS
+    //   失败的 IP"问题.
+    // v2.0.19 race 注释保留, 旧逻辑 (race 并发) 注释在下面以备回滚.
+    if (candidateIps.length > 1) {
+      // 顺序拨, 第一个成功的用
+      for (var i = 0; i < candidateIps.length; i++) {
+        final ip = candidateIps[i];
+        try {
+          final socket = await Socket.connect(ip, port,
+              timeout: const Duration(seconds: 3));
+          // v2.0.25: backend 也设 TCP_NODELAY
+          try {
+            socket.setOption(SocketOption.tcpNoDelay, true);
+          } catch (_) {}
+          // ignore: avoid_print
+          VideoProxyLog.append('[VideoProxy] _connectRace: 拨号成功 ($i/${candidateIps.length}) → ${socket.remoteAddress.address}:${socket.remotePort}');
+          return socket;
+        } catch (e) {
+          // ignore: avoid_print
+          VideoProxyLog.append('[VideoProxy] _connectRace: 拨 $ip 失败 ($e), 试下一个');
+          continue;
+        }
+      }
+      // 全部 IP 都失败, fallback 到原 host
+      // ignore: avoid_print
+      VideoProxyLog.append('[VideoProxy] _connectRace: 全部 ${candidateIps.length} IP 失败, fallback 原 host $originalHost:$port');
+      final socket = await Socket.connect(originalHost, port,
+          timeout: const Duration(seconds: 5));
+      try {
+        socket.setOption(SocketOption.tcpNoDelay, true);
+      } catch (_) {}
+      // ignore: avoid_print
+      VideoProxyLog.append('[VideoProxy] _connectRace: fallback 原 host 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort}');
+      return socket;
+    }
+
+    // 1 个候选: 用 v2.0.19 race 逻辑 (直接拨, 失败 fallback)
     final completer = Completer<Socket>();
     int errorCount = 0;
     final totalCount = candidateIps.length;
@@ -422,6 +476,11 @@ class VideoProxyServer {
 
     // v2.0.19: 借鉴 edgetunnel 预加载竞速拨号, 同时拨 Top3 优选 IP
     // v2.0.34: 改用 getTopNIpsForVideoProxy, 手动优选 IP 优先 (单 IP)
+    // v2.0.46: 手动 IP 模式触发一次 host DNS 解析 (fire-and-forget),
+    //   之后 _connectRace 拿候选时 host DNS 已就绪, 走 [host_ips..., manual],
+    //   race 拨 host IPs 跟 SNI 匹配 → TLS 成功, 解决"162.159.x.x 静态
+    //   IP TCP 拨上但 TLS 失败 → 0KB"问题
+    CfOptimizerHttpOverrides.maybeResolveHostEagerly(host);
     final topIps = CfOptimizerHttpOverrides.getTopNIpsForVideoProxy(host, 3);
     final raceStart = topIps.isNotEmpty ? DateTime.now() : null;
     try {
@@ -467,6 +526,8 @@ class VideoProxyServer {
 
     // v2.0.19: 借鉴 edgetunnel 预加载竞速拨号
     // v2.0.34: 改用 getTopNIpsForVideoProxy, 手动优选 IP 优先 (单 IP)
+    // v2.0.46: 手动 IP 模式触发一次 host DNS 解析 (跟 _onClientConnection 一致)
+    CfOptimizerHttpOverrides.maybeResolveHostEagerly(host);
     final topIps = CfOptimizerHttpOverrides.getTopNIpsForVideoProxy(host, 3);
 
     // v2.0.19: 修 bug — request line + Host header 都用原 host, 不要用 IP

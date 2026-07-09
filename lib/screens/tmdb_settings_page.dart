@@ -1,5 +1,12 @@
 // v2.0.35: TMDB 海报墙设置页
 //
+// v2.0.46: 改 UI — 大图海报 + 渐变 hero (跟 player 大头部 / Douban 详情页风格一致).
+//   hero 区: TMDB 蓝紫渐变 (从 #1e3a8a 蓝到 #6d28d9 紫) + 标题 + 简介, 高 220px.
+//   hero 区下面: "热门电影" mini poster 3 张 (从 TMDB 实时拉取, 走
+//   已配的 CF Worker 域名), 让用户**看到** TMDB 启用后的样子 (而不是
+//   抽象的"配 key 自动启用").
+//   再下面: 状态卡片 / API Key 输入 / 测试 / 强制刷新 / 申请说明.
+//
 // 为什么单独做一个页面:
 //   - 跟"加速" (CF Worker) 是不同性质的功能 (CF 加速是网络层, TMDB 是 UI 增强)
 //   - 申请 TMDB key 需要去 https://www.themoviedb.org/settings/api 注册账号
@@ -17,6 +24,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:luna_tv/services/user_data_service.dart';
+import 'package:luna_tv/services/tmdb_service.dart';
+import 'package:luna_tv/utils/image_url.dart';
 
 class TmdbSettingsPage extends StatefulWidget {
   const TmdbSettingsPage({super.key});
@@ -32,6 +41,9 @@ class _TmdbSettingsPageState extends State<TmdbSettingsPage> {
   String? _testStatus;
   String _testMessage = '';
   bool _testing = false;
+  // v2.0.46: hero 区的样本海报 (从 TMDB 拉, 3 张热门电影)
+  List<TmdbItem> _samplePosters = [];
+  bool _sampleLoading = false;
 
   @override
   void initState() {
@@ -46,6 +58,55 @@ class _TmdbSettingsPageState extends State<TmdbSettingsPage> {
         _apiKey = v;
         _loading = false;
       });
+    }
+    if (v.isNotEmpty) {
+      // v2.0.46: 配了 key 就拉 3 张热门电影海报, 给 hero 区"看效果"
+      // ignore: unawaited_futures
+      _loadSamplePosters();
+    }
+  }
+
+  /// v2.0.46: 拉 3 张热门电影海报, 给 hero 区做 preview.
+  ///
+  /// 走 [TmdbService.getPopular] (有 1 天本地缓存), 不发额外请求.
+  /// 失败时静默 (hero 区会降级到无 preview, 文字描述保留).
+  Future<void> _loadSamplePosters() async {
+    if (_sampleLoading) return;
+    setState(() => _sampleLoading = true);
+    try {
+      final res = await TmdbService.getPopular(
+        type: TmdbMediaType.movie,
+        page: 1,
+      );
+      if (!mounted) return;
+      setState(() {
+        _samplePosters = res.results.take(3).toList();
+        _sampleLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _samplePosters = [];
+        _sampleLoading = false;
+      });
+    }
+  }
+
+  /// v2.0.46: 强制刷新 TMDB 缓存 (清掉 1 天内存缓存 + SharedPreferences 缓存)
+  Future<void> _forceRefresh() async {
+    await TmdbService.clearCache();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('TMDB 缓存已清, 下次拉取走网络 (中文版)'),
+        duration: Duration(milliseconds: 1500),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    // 重新拉样本海报, 让 hero 区刷新
+    if (_apiKey.isNotEmpty) {
+      // ignore: unawaited_futures
+      _loadSamplePosters();
     }
   }
 
@@ -282,99 +343,430 @@ class _TmdbSettingsPageState extends State<TmdbSettingsPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+              padding: const EdgeInsets.fromLTRB(0, 0, 0, 32),
               children: [
-                // 状态卡片: 已启用 / 未启用
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: hasKey
-                        ? const Color(0xFF064e3b).withOpacity(0.3)
-                        : cardBg,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: hasKey
-                          ? const Color(0xFF10b981).withOpacity(0.5)
-                          : (isDark
-                              ? const Color(0xFF374151)
-                              : const Color(0xFFE5E7EB)),
-                      width: 1,
-                    ),
-                  ),
-                  child: Row(
+                // v2.0.46: 大图海报 + 渐变 hero (替代原来"状态卡片在顶部")
+                _buildHeroSection(isDark, textPrimary, textSecondary),
+                const SizedBox(height: 16),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // 状态卡片: 已启用 / 未启用
                       Container(
-                        width: 40,
-                        height: 40,
+                        padding: const EdgeInsets.all(16),
                         decoration: BoxDecoration(
                           color: hasKey
-                              ? const Color(0xFF10b981).withOpacity(0.2)
-                              : (isDark
-                                  ? const Color(0xFF374151)
-                                  : const Color(0xFFE5E7EB)),
-                          borderRadius: BorderRadius.circular(20),
+                              ? const Color(0xFF064e3b).withOpacity(0.3)
+                              : cardBg,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: hasKey
+                                ? const Color(0xFF10b981).withOpacity(0.5)
+                                : (isDark
+                                    ? const Color(0xFF374151)
+                                    : const Color(0xFFE5E7EB)),
+                            width: 1,
+                          ),
                         ),
-                        child: Icon(
-                          hasKey
-                              ? LucideIcons.checkCircle2
-                              : LucideIcons.circleDashed,
-                          color: hasKey
-                              ? const Color(0xFF10b981)
-                              : textSecondary,
-                          size: 22,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                        child: Row(
                           children: [
-                            Text(
-                              hasKey ? '已启用' : '未启用',
-                              style: TextStyle(
-                                color: textPrimary,
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
+                            Container(
+                              width: 40,
+                              height: 40,
+                              decoration: BoxDecoration(
+                                color: hasKey
+                                    ? const Color(0xFF10b981).withOpacity(0.2)
+                                    : (isDark
+                                        ? const Color(0xFF374151)
+                                        : const Color(0xFFE5E7EB)),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Icon(
+                                hasKey
+                                    ? LucideIcons.checkCircle2
+                                    : LucideIcons.circleDashed,
+                                color: hasKey
+                                    ? const Color(0xFF10b981)
+                                    : textSecondary,
+                                size: 22,
                               ),
                             ),
-                            const SizedBox(height: 2),
-                            Text(
-                              hasKey
-                                  ? '首页热门电影 / 热门剧集 走 TMDB 海报墙'
-                                  : '填入 API Key 即可启用海报墙, 留空 = 原列表',
-                              style: TextStyle(
-                                color: textSecondary,
-                                fontSize: 12,
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    hasKey ? '已启用' : '未启用',
+                                    style: TextStyle(
+                                      color: textPrimary,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    hasKey
+                                        ? '首页热门电影 / 热门剧集 走 TMDB 海报墙'
+                                        : '填入 API Key 即可启用海报墙, 留空 = 原列表',
+                                    style: TextStyle(
+                                      color: textSecondary,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
                         ),
                       ),
+                      const SizedBox(height: 16),
+
+                      // API Key 输入行
+                      _buildTile(
+                        icon: LucideIcons.key,
+                        iconColor: const Color(0xFF10b981),
+                        title: 'API Key',
+                        value: keySummary,
+                        hint: '（点击配置）',
+                        onTap: _showInputDialog,
+                        isDark: isDark,
+                      ),
+                      const SizedBox(height: 8),
+
+                      // 测试连接 + 状态
+                      if (hasKey)
+                        _buildTestArea(isDark, textPrimary, textSecondary),
+                      const SizedBox(height: 8),
+
+                      // v2.0.46: 强制刷新 (清 1 天缓存, 拉中文版)
+                      if (hasKey)
+                        _buildForceRefreshTile(isDark),
+                      const SizedBox(height: 16),
+
+                      // 申请说明
+                      _buildHelpSection(isDark, textPrimary, textSecondary),
                     ],
                   ),
                 ),
-                const SizedBox(height: 16),
-
-                // API Key 输入行
-                _buildTile(
-                  icon: LucideIcons.key,
-                  iconColor: const Color(0xFF10b981),
-                  title: 'API Key',
-                  value: keySummary,
-                  hint: '（点击配置）',
-                  onTap: _showInputDialog,
-                  isDark: isDark,
-                ),
-                const SizedBox(height: 8),
-
-                // 测试连接 + 状态
-                if (hasKey) _buildTestArea(isDark, textPrimary, textSecondary),
-                const SizedBox(height: 16),
-
-                // 申请说明
-                _buildHelpSection(isDark, textPrimary, textSecondary),
               ],
             ),
+    );
+  }
+
+  /// v2.0.46: 大图海报 + 渐变 hero.
+  ///
+  /// 设计 (跟 player 大头部 / Douban 详情页风格一致):
+  ///   - 220px 高, 蓝紫渐变 (TMDB 品牌色)
+  ///   - 上方: TMDB logo + 标题 "TMDB 海报墙" + 副标题
+  ///   - 下方: 3 张热门电影 mini poster (从 TMDB 实时拉, 走 CF Worker)
+  ///   - 整张图底部: 黑色渐变 fade (跟 v2.0.43 player hero 一致)
+  ///
+  /// 没配 key 时: 退化成纯渐变 + 文字 "未启用", 引导用户去配 key
+  Widget _buildHeroSection(
+    bool isDark,
+    Color textPrimary,
+    Color textSecondary,
+  ) {
+    final hasKey = _apiKey.isNotEmpty;
+    return Container(
+      height: 220,
+      decoration: const BoxDecoration(
+        // 蓝紫渐变 (跟 TMDB logo 蓝紫一致)
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFF1e3a8a), // 深蓝
+            Color(0xFF6d28d9), // 紫
+            Color(0xFF0ea5e9), // 青 (淡入)
+          ],
+        ),
+      ),
+      child: Stack(
+        children: [
+          // 上方: 标题区
+          Positioned(
+            top: 20,
+            left: 20,
+            right: 20,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(LucideIcons.film,
+                              size: 14, color: Colors.white),
+                          SizedBox(width: 4),
+                          Text(
+                            'TMDB',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.0,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: hasKey
+                            ? const Color(0xFF10b981).withOpacity(0.9)
+                            : Colors.white.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        hasKey ? '已启用' : '未启用',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  '海报墙',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.0,
+                    height: 1.1,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  hasKey
+                      ? '首页热门电影 / 剧集 自动横滚海报 + 评分'
+                      : '填入 API Key 即可启用 · 中文标题 · 评分',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.9),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // 下方: 3 张 mini poster (从 TMDB 拉)
+          if (hasKey) ...[
+            if (_sampleLoading)
+              const Positioned(
+                bottom: 24,
+                left: 20,
+                right: 20,
+                child: SizedBox(
+                  height: 80,
+                  child: Center(
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 2,
+                      ),
+                    ),
+                  ),
+                ),
+              )
+            else if (_samplePosters.isNotEmpty)
+              Positioned(
+                bottom: 16,
+                left: 20,
+                right: 20,
+                child: SizedBox(
+                  height: 110,
+                  child: Row(
+                    children: _samplePosters.asMap().entries.map((entry) {
+                      final idx = entry.key;
+                      final item = entry.value;
+                      return Expanded(
+                        flex: idx == 1 ? 2 : 1, // 中间大
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            right: idx < 2 ? 8 : 0,
+                            left: idx == 1 ? 4 : 0,
+                          ),
+                          child: _buildHeroPosterCard(item, isDark),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// v2.0.46: hero 区的 mini poster 卡 (横滚预览)
+  Widget _buildHeroPosterCard(TmdbItem item, bool isDark) {
+    final posterUrl = item.posterPath != null
+        ? 'https://image.tmdb.org/t/p/w300${item.posterPath}'
+        : null;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // 背景 (默认海报兜底)
+          Container(
+            color: const Color(0xFF1e293b),
+            child: Center(
+              child: Icon(
+                LucideIcons.film,
+                color: Colors.white.withOpacity(0.2),
+                size: 24,
+              ),
+            ),
+          ),
+          if (posterUrl != null)
+            Image.network(
+              posterUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              loadingBuilder: (_, child, progress) =>
+                  progress == null ? child : const SizedBox.shrink(),
+            ),
+          // 渐变 fade 文字
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(6, 12, 6, 6),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.transparent,
+                    Colors.black.withOpacity(0.7),
+                  ],
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    item.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (item.voteAverage > 0)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(LucideIcons.star,
+                            size: 9, color: Color(0xFFfbbf24)),
+                        const SizedBox(width: 2),
+                        Text(
+                          item.voteAverage.toStringAsFixed(1),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// v2.0.46: 强制刷新按钮 (清 TMDB 1 天缓存, 重新拉中文版)
+  Widget _buildForceRefreshTile(bool isDark) {
+    return Material(
+      color: isDark ? const Color(0xFF1F2937) : Colors.white,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: _forceRefresh,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          child: Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0ea5e9).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(LucideIcons.refreshCw,
+                    color: Color(0xFF0ea5e9), size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '强制刷新 TMDB 缓存',
+                      style: TextStyle(
+                        color: isDark
+                            ? Colors.white.withOpacity(0.85)
+                            : const Color(0xFF1F2937),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '看到英文就点这个, 清掉 1 天缓存, 重新拉中文',
+                      style: TextStyle(
+                        color: isDark
+                            ? Colors.white.withOpacity(0.5)
+                            : Colors.black.withOpacity(0.5),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.chevron_right,
+                color: isDark
+                    ? Colors.white.withOpacity(0.3)
+                    : Colors.black.withOpacity(0.3),
+                size: 18,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 

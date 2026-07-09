@@ -1,24 +1,30 @@
 // v2.0.38: TMDB 详情大头部 — 给 player_screen「选源播放」详情页用
 //
 // 背景:
-//   - 配了 TMDB key 的用户在 player_screen 详情页看到 TMDB 大背景 + 大海报 + 简介 + 评分
-//   - 没配 key → 走 fallback: 用原 douban 海报, 跟 v2.0.37 一样
+//   - 配了 TMDB key 的用户在 player_screen 详情页看到 TMDB 大背景 + 大海报 + 简介
+//   - 没配 key / 拿不到结果 / 短剧 → 走默认海报 (灰色电影 icon + 标题)
 //
 // 数据流:
 //   1. TmdbService.search(type, title, year) → 拿第一个匹配结果的 ID
 //   2. TmdbService.getDetails(type, id) → 拿完整 metadata (overview, backdrop, voteAverage)
 //   3. 1 天本地缓存兜底, 重复打开详情页几乎零网络
 //
-// 配了 key 拿不到结果 (TMDB 没收录 / 标题不一样) → 退化为原 douban 海报,
-// 不影响播放, 只是没海报墙效果.
+// 配了 key 拿不到结果 (TMDB 没收录 / 标题不一样) → 退化为默认海报
+// (灰色电影 icon + 标题), 不展示 douban 海报 (避免封面/标题不符时
+// 给用户错误的视觉暗示). 短剧 (sourceName == '') → 直接走默认海报,
+// 不发 TMDB 请求, 因为 TMDB 几乎没收录短剧.
+//
+// v2.0.46: 短剧 / TMDB 没资源 → 统一用默认海报 (灰色 icon + 标题),
+//   不再用 douban 海报 (douban 海报跟实际视频可能差很多, 反而误导).
 //
 // 用法 (player_screen 调用):
 //   TmdbDetailHeader(
 //     title: widget.videoInfo.title,
 //     year: widget.videoInfo.year,
 //     kind: widget.kind ?? (widget.videoInfo.sourceName == '豆瓣' ? 'movie' : 'tv'),
-//     fallbackCover: widget.videoInfo.cover,
+//     fallbackCover: widget.videoInfo.cover,  // v2.0.46 起不再使用, 保留兼容
 //     fallbackSource: widget.videoInfo.source,
+//     sourceName: widget.videoInfo.sourceName,  // 短剧 = '' 自动用默认海报
 //   )
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -26,19 +32,21 @@ import 'package:flutter/material.dart';
 import 'package:luna_tv/services/theme_service.dart';
 import 'package:luna_tv/services/tmdb_service.dart';
 import 'package:luna_tv/services/user_data_service.dart';
-import 'package:luna_tv/utils/image_url.dart';
 import 'package:provider/provider.dart';
 
 /// v2.0.38: TMDB 详情大头部
 /// 配了 TMDB key: 用 TMDB 大背景 + 大海报 + 评分 + 简介
-/// 没配 key 或拿不到结果: 用原 douban 海报 (fallback, 行为跟 v2.0.37 一样)
+/// 没配 key 或拿不到结果: 默认海报 (灰色电影 icon + 标题, v2.0.46 起)
+/// 短剧 (sourceName == ''): 直接走默认海报, 不发 TMDB 请求
 class TmdbDetailHeader extends StatefulWidget {
   final String title;
   final String? year; // LunaTV 存的是字符串 (e.g. "2024" 或 "2024-01")
   final String kind; // 'movie' / 'tv'
-  final String fallbackCover; // 原 douban / bangumi 海报
+  final String fallbackCover; // 原 douban / bangumi 海报 (v2.0.46 起不再使用, 保留兼容)
   final String fallbackSource; // 'douban' / 'bangumi' (for getImageUrl)
   final String? sourceName; // 「默认: 豆瓣」那行, 透传下来
+  // v2.0.46: 短剧标识 — 空 sourceName 也算, 这里支持显式传入避免歧义
+  final bool isShortDrama;
 
   const TmdbDetailHeader({
     super.key,
@@ -48,6 +56,7 @@ class TmdbDetailHeader extends StatefulWidget {
     required this.fallbackCover,
     required this.fallbackSource,
     this.sourceName,
+    this.isShortDrama = false,
   });
 
   @override
@@ -85,12 +94,30 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
   TmdbMediaType get _mediaType =>
       widget.kind == 'movie' ? TmdbMediaType.movie : TmdbMediaType.tv;
 
+  // v2.0.46: 短剧 = 显式 isShortDrama || sourceName 为空 (短剧入口 sourceName='')。
+  // TMDB 几乎没收录短剧, 不发请求直接走默认海报。
+  bool get _isShortDrama {
+    if (widget.isShortDrama) return true;
+    final name = widget.sourceName;
+    if (name == null || name.isEmpty) return true;
+    return false;
+  }
+
   Future<void> _loadTmdb() async {
     if (!UserDataService.isTmdbApiKeyConfigured() || widget.title.isEmpty) {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
         _hasError = false; // 没配 key 不算 error, 是 fallback
+      });
+      return;
+    }
+    // v2.0.46: 短剧不查 TMDB, 直接默认海报
+    if (_isShortDrama) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _hasError = false;
       });
       return;
     }
@@ -156,7 +183,7 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
     final item = _tmdbItem;
     final cfg = _tmdbConfig;
     if (item == null || cfg == null || _hasError) {
-      // fallback: 用原 douban 海报 (跟 v2.0.37 一样)
+      // v2.0.46: fallback = 默认海报 (灰色电影 icon + 标题, 不再用 douban 海报).
       return _buildPosterFallback(isDark);
     }
     return _buildTmdbHero(item, cfg, isDark);
@@ -385,60 +412,44 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
     );
   }
 
-  /// Fallback: 用原 douban 海报 (跟 v2.0.37 _buildPosterHeader 一样, 110x150 小海报)
+  /// v2.0.46: 默认海报 — 短剧 / TMDB 没资源统一走这里.
+  ///
+  /// 之前 v2.0.38 ~ v2.0.45 用原 douban 海报当 fallback, 但 douban 海报跟实际视频
+  /// 经常差很远 (TMDB 拿不到结果时, douban 也不一定对得上), 用户看着会觉得
+  /// "这是另一个电影", 反而误导. 改成纯灰色电影 icon + 标题, 直白地告诉
+  /// 用户"没匹配到 TMDB 资源".
+  ///
+  /// 布局: 110x150 占位 (内含 lucide film icon) + 标题 + 年份/类型 tag + sourceName.
   Widget _buildPosterFallback(bool isDark) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // 110x150 占位: 灰色背景 + lucide film icon
           ClipRRect(
             borderRadius: BorderRadius.circular(12),
-            child: SizedBox(
+            child: Container(
               width: 110,
               height: 150,
-              child: widget.fallbackCover.isNotEmpty
-                  ? FutureBuilder<String>(
-                      future: getImageUrl(widget.fallbackCover, widget.fallbackSource),
-                      builder: (context, snapshot) {
-                        final imageUrl =
-                            snapshot.data ?? widget.fallbackCover;
-                        final headers = getImageRequestHeaders(
-                            imageUrl, widget.fallbackSource);
-                        return CachedNetworkImage(
-                          imageUrl: imageUrl,
-                          fit: BoxFit.cover,
-                          width: 110,
-                          height: 150,
-                          httpHeaders: headers,
-                          memCacheWidth: (110 *
-                                  MediaQuery.of(context).devicePixelRatio)
-                              .round(),
-                          memCacheHeight: (150 *
-                                  MediaQuery.of(context).devicePixelRatio)
-                              .round(),
-                          placeholder: (c, u) => Container(
-                            color: isDark
-                                ? const Color(0xFF1F2937)
-                                : const Color(0xFFE5E7EB),
-                          ),
-                          errorWidget: (c, u, e) => Container(
-                            color: isDark
-                                ? const Color(0xFF1F2937)
-                                : const Color(0xFFE5E7EB),
-                            child: const Icon(Icons.movie_outlined,
-                                color: Colors.grey, size: 40),
-                          ),
-                        );
-                      },
-                    )
-                  : Container(
-                      color: isDark
-                          ? const Color(0xFF1F2937)
-                          : const Color(0xFFE5E7EB),
-                      child: const Icon(Icons.movie_outlined,
-                          color: Colors.grey, size: 40),
-                    ),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: isDark
+                      ? const [Color(0xFF374151), Color(0xFF1F2937)]
+                      : const [Color(0xFFE5E7EB), Color(0xFFD1D5DB)],
+                ),
+              ),
+              child: Center(
+                child: Icon(
+                  Icons.movie_outlined,
+                  color: isDark
+                      ? Colors.white.withOpacity(0.4)
+                      : Colors.black.withOpacity(0.35),
+                  size: 48,
+                ),
+              ),
             ),
           ),
           const SizedBox(width: 12),
@@ -464,6 +475,10 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
                   children: [
                     if (widget.year != null && widget.year!.isNotEmpty)
                       _buildFallbackTag(widget.year!, isDark),
+                    // v2.0.46: 短剧标识 tag
+                    if (_isShortDrama)
+                      _buildFallbackTag('短剧', isDark,
+                          color: const Color(0xFFf59e0b)),
                   ],
                 ),
                 if (widget.sourceName != null &&
@@ -597,20 +612,26 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
     );
   }
 
-  Widget _buildFallbackTag(String text, bool isDark) {
+  Widget _buildFallbackTag(String text, bool isDark, {Color? color}) {
+    final bg = color != null
+        ? color.withOpacity(0.15)
+        : (isDark
+            ? Colors.white.withOpacity(0.08)
+            : Colors.black.withOpacity(0.06));
+    final fg = color ??
+        (isDark ? Colors.white70 : Colors.black87);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: isDark
-            ? Colors.white.withOpacity(0.08)
-            : Colors.black.withOpacity(0.06),
+        color: bg,
         borderRadius: BorderRadius.circular(4),
       ),
       child: Text(
         text,
         style: TextStyle(
           fontSize: 11,
-          color: isDark ? Colors.white70 : Colors.black87,
+          color: fg,
+          fontWeight: color != null ? FontWeight.w600 : FontWeight.normal,
         ),
       ),
     );
