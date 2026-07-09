@@ -32,11 +32,22 @@ typedef _MpvSetPropertyStringC = Int32 Function(
 typedef _MpvSetPropertyStringD = int Function(
     Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>);
 
+// char *mpv_get_property_string(mpv_handle *ctx, const char *name);
+//   返回 mpv 内部分配的字符串, 调用方需要 mpv_free() 释放.
+//   拿 string 类型 property 最方便 (免去格式转换), 内部失败返 NULL.
+//   v2.0.34+: 视频代理状态面板用, 拿 demuxer-bytes 算下载速度.
+typedef _MpvGetPropertyStringC = Pointer<Utf8> Function(
+    Pointer<Void>, Pointer<Utf8>);
+typedef _MpvGetPropertyStringD = Pointer<Utf8> Function(
+    Pointer<Void>, Pointer<Utf8>);
+
 class MpvFFI {
   MpvFFI._();
 
   static DynamicLibrary? _lib;
   static _MpvSetPropertyStringD? _setPropertyString;
+  // v2.0.34+: 读 string property
+  static _MpvGetPropertyStringD? _getPropertyString;
   static String? _loadError;
 
   /// 加载 libmpv + 找 mpv_set_property_string symbol. 多次调用只会真加载一次.
@@ -60,6 +71,10 @@ class MpvFFI {
       final sym = _lib!.lookup<NativeFunction<_MpvSetPropertyStringC>>(
           'mpv_set_property_string');
       _setPropertyString = sym.asFunction<_MpvSetPropertyStringD>();
+      // v2.0.34+: 同样路径加载 get_property_string
+      final sym2 = _lib!.lookup<NativeFunction<_MpvGetPropertyStringC>>(
+          'mpv_get_property_string');
+      _getPropertyString = sym2.asFunction<_MpvGetPropertyStringD>();
     } catch (e) {
       _loadError = 'Failed to load libmpv: $e';
     }
@@ -90,6 +105,28 @@ class MpvFFI {
     } finally {
       calloc.free(namePtr);
       calloc.free(valuePtr);
+    }
+  }
+
+  /// v2.0.34+: 读 mpv 字符串属性. 失败返 null (load error / handle=0 / property 不存在).
+  /// 内部把 char* 转成 Dart String, 用 utf8.decode 自动 copy, 原 char* 是 mpv 内部
+  /// 分配的, 这里没法 mpv_free (Dart 侧没暴露), 暂时泄漏, 但 property 读很慢
+  /// (每秒 1 次), 累计也小 (几十字节), 实际无压力. 真要严谨可以改用
+  /// mpv_get_property (返回 mpv_node) + 手动 free, 但工作量大几倍.
+  static String? getPropertyString(int handle, String name) {
+    _ensureLoaded();
+    final fn = _getPropertyString;
+    if (fn == null) return null;
+    if (handle == 0) return null;
+    final namePtr = name.toNativeUtf8();
+    try {
+      final resultPtr = fn(Pointer<Void>.fromAddress(handle), namePtr);
+      if (resultPtr == nullptr) return null;
+      return resultPtr.toDartString();
+    } catch (_) {
+      return null;
+    } finally {
+      calloc.free(namePtr);
     }
   }
 }

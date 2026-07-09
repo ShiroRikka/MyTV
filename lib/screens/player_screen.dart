@@ -59,6 +59,15 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final VideoController _controller;
   // v2.0.16: 视频代理 (让 libmpv 走优选 IP)
   VideoProxyServer? _videoProxy;
+  // v2.0.34: 顶部「加速状态」指示器用, 视频代理实际在跑时为 true
+  bool _videoProxyActive = false;
+  // v2.0.34: 实时下载速度 (Bytes/s), 1Hz 采样 libmpv demuxer-bytes 算 delta
+  double _downloadSpeedBps = 0;
+  Timer? _speedSampleTimer;
+  int _lastDemuxerBytes = 0;
+  int _lastSampleMs = 0;
+  // v2.0.34: 「加速链路」弹层用, 保存当前播放 URL (buildProxiedUrl 之后的最终 URL)
+  String _currentPlayUrl = '';
 
   // 状态
   String _phase = 'detail'; // detail | playing
@@ -364,6 +373,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     unawaited(_videoProxy?.stop());
     _videoProxy = null;
     _videoProxyActive = false;
+    _speedSampleTimer?.cancel();
+    _speedSampleTimer = null;
     super.dispose();
   }
 
@@ -1781,9 +1792,54 @@ class _PlayerScreenState extends State<PlayerScreen>
     print('[VideoProxy] 启用成功: ${proxy.proxyUrl} '
         '(libmpv --http-proxy 已设, .ts 段都走本地代理 → 优选 IP)');
     _videoProxy = proxy;
-    // v2.0.34: 通知顶部「加速状态」指示器重算
+    // v2.0.34: 通知顶部「加速状态」指示器重算 + 启动下载速度采样
     setState(() {
       _videoProxyActive = true;
+    });
+    _startSpeedSampling();
+  }
+
+  /// v2.0.34: 1Hz 采样 libmpv demuxer-bytes (累计下载字节), 算 delta = 实时下载速度
+  ///
+  /// 为什么不直接用 m3u8 测速:
+  ///   m3u8 测速只在选源时跑一次 (player_sources_panel), 播放中不更新
+  ///   demuxer-bytes 是 libmpv 持续统计的, 播放中每秒钟都变, 算 delta 准
+  ///
+  /// demuxer-bytes 是 Number 类型 property, getPropertyString 拿到字符串数字
+  /// parse 一下, 简单可靠.
+  void _startSpeedSampling() {
+    _speedSampleTimer?.cancel();
+    _lastDemuxerBytes = 0;
+    _lastSampleMs = 0;
+    _downloadSpeedBps = 0;
+    _speedSampleTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      if (!mounted) return;
+      if (!MpvFFI.isAvailable) return;
+      try {
+        final handle = await _player.handle;
+        if (handle == 0) return;
+        final s = MpvFFI.getPropertyString(handle, 'demuxer-bytes');
+        if (s == null) return;
+        final cur = int.tryParse(s) ?? 0;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (_lastSampleMs == 0 || cur < _lastDemuxerBytes) {
+          // 首次采样 / demuxer 重置 (切集), 只记基线, 不算速度
+          _lastDemuxerBytes = cur;
+          _lastSampleMs = now;
+          return;
+        }
+        final deltaBytes = cur - _lastDemuxerBytes;
+        final deltaMs = now - _lastSampleMs;
+        if (deltaMs <= 0) return;
+        final bps = deltaBytes * 1000.0 / deltaMs;
+        _lastDemuxerBytes = cur;
+        _lastSampleMs = now;
+        if (mounted) {
+          setState(() {
+            _downloadSpeedBps = bps;
+          });
+        }
+      } catch (_) {}
     });
   }
 
@@ -1871,6 +1927,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   - 如果 CF Worker 开关关了, buildProxiedUrl 返回原 URL (直连)
     final playUrl =
         await UserDataService.buildProxiedUrlAsync(url, forceM3u8: true);
+
+    // v2.0.34: 保存最终播放 URL 给「加速链路」弹层用
+    _currentPlayUrl = playUrl;
 
     try {
       await _player.stop();
@@ -3028,6 +3087,534 @@ class _PlayerScreenState extends State<PlayerScreen>
         ),
       ),
     );
+  }
+
+  /// v2.0.34: 顶部「加速状态」指示器
+  ///
+  /// 颜色编码 (用户一眼能看出当前是否真在用加速):
+  ///   - 绿色 (0xFF10b981): CF Worker + 优选 IP 都启用 + 视频流走代理 (全加速)
+  ///   - 黄色 (0xFFf59e0b): 只 CF Worker 启用 (m3u8/图片走 worker, 视频直连)
+  ///   - 灰色 (0xFF9ca3af): 都没开 (完全直连原源)
+  ///
+  /// 注意: 颜色根据「配置 + 当前代理实际状态」实时算, 不依赖 fixed state.
+  /// 配置变了 (用户开/关 CF Worker 加速、优选 IP) 下次 build 自然反映.
+  Widget _buildAccelStatusIcon() {
+    // 颜色逻辑 (不需要读 prefs, 每次 build 现算, 配置变时 build 自然刷新)
+    // 简化: 只根据 _videoProxyActive + 已知 UI 状态决定颜色
+    //   视频走代理 (绿) / 视频直连 (灰) — CF Worker 跟这个指示器
+    //   关系不大, 因为 m3u8/图片走 worker 视频不一定走 worker
+    //   重点是「当前视频流是不是真的被加速」
+    final Color dotColor = _videoProxyActive
+        ? const Color(0xFF10b981) // 绿: 视频走优选 IP 代理
+        : const Color(0xFF9ca3af); // 灰: 直连
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: _showAccelStatusDialog,
+          borderRadius: BorderRadius.circular(20),
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Icon(
+                  Icons.bolt,
+                  color: Colors.white.withOpacity(0.9),
+                  size: 22,
+                ),
+                // 状态点: 绿/灰
+                Positioned(
+                  right: -2,
+                  top: -2,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: dotColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: const Color(0xFF1F2937),
+                        width: 1.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// v2.0.34: 弹「加速链路」详情 dialog
+  ///
+  /// 设计目标 (用户原话): "要体现出是怎么加速的, 让人一眼看上去就是在加速"
+  ///
+  /// 改成**链路流程图**而不是 4 行状态, 3 个节点 + 2 条箭头:
+  ///
+  ///   ┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐
+  ///   │  📺 源播放   │ →  │  ☁️ CF Worker │ →  │  ⚡ 优选 IP   │ →  │  📱 手机│
+  ///   │  原 m3u8    │    │  worker 域名  │    │  优选 IP     │    │ libmpv │
+  ///   └─────────────┘    └──────────────┘    └──────────────┘    └────────┘
+  ///      (灰/亮)             (灰/亮)             (灰/亮)
+  ///
+  /// 哪个节点没启用 → 那个节点灰色 + 该段箭头虚线
+  /// 哪个节点启用 → 那个节点高亮 (蓝/绿) + 箭头实线
+  ///
+  /// 底部额外:
+  ///   - 当前视频流实际走的是哪条路径 (✅ 全加速 / ⚠️ 半加速 / ❌ 直连)
+  ///   - 实时下载速度
+  ///   - 任何一个值 (IP/域名/URL) 都能点击复制
+  Future<void> _showAccelStatusDialog() async {
+    final cfWorkerEnabled = await UserDataService.getCfWorkerEnabled();
+    final cfWorkerDomain = await UserDataService.getCfWorkerDomain();
+    final cfBestIp = (await UserDataService.getCfBestIp()) ?? '';
+    final videoProxyToggleOn = await UserDataService.getVideoProxyEnabled();
+    final hasResolvedIp = CfOptimizerHttpOverrides.getResolvedManualIp() != null;
+    if (!mounted) return;
+
+    // 节点启用状态
+    final cfWorkerOn = cfWorkerEnabled && cfWorkerDomain.isNotEmpty;
+    final bestIpOn = cfBestIp.isNotEmpty && hasResolvedIp;
+    final videoStreamViaProxy = _videoProxyActive;
+
+    // 加速等级:
+    //   full: CF Worker + 优选 IP 都启用 + 视频流走代理 (理想)
+    //   half: CF Worker 或优选 IP 启用, 但视频流没走代理
+    //         (m3u8/图片走 worker, 视频直连原源)
+    //   none: 都关
+    final accelLevel = (cfWorkerOn && bestIpOn && videoStreamViaProxy)
+        ? 'full'
+        : (cfWorkerOn || bestIpOn)
+            ? 'half'
+            : 'none';
+
+    // 解析出来的优选 IP (域名模式才有意义)
+    final resolvedIp = CfOptimizerHttpOverrides.getResolvedManualIp() ?? cfBestIp;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: const Color(0xFF1F2937),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 标题 + 当前等级徽章
+              Row(
+                children: [
+                  const Icon(Icons.bolt, color: Color(0xFFfbbf24), size: 22),
+                  const SizedBox(width: 8),
+                  const Text(
+                    '加速链路',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Spacer(),
+                  _buildAccelBadge(accelLevel),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _accelLevelDescription(accelLevel),
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.6),
+                  fontSize: 12,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 20),
+              // 4 节点链路图 (源 / CF Worker / 优选 IP / 手机)
+              _buildLinkNode(
+                icon: Icons.video_library,
+                label: '源播放地址',
+                value: _currentPlayUrl.isEmpty
+                    ? '（无）'
+                    : _stripUrlQuery(_currentPlayUrl),
+                enabled: true, // 源永远有
+                accent: const Color(0xFF94a3b8),
+              ),
+              _buildLinkArrow(enabled: true),
+              _buildLinkNode(
+                icon: Icons.cloud_outlined,
+                label: 'CF Worker 加速域名',
+                value: cfWorkerDomain.isEmpty
+                    ? '（未配置）'
+                    : cfWorkerDomain,
+                enabled: cfWorkerOn,
+                accent: const Color(0xFF60a5fa),
+                subtitle: cfWorkerOn ? '视频源经过 CF edge' : '未启用',
+              ),
+              _buildLinkArrow(enabled: bestIpOn),
+              _buildLinkNode(
+                icon: Icons.bolt,
+                label: '优选 IP',
+                value: cfBestIp.isEmpty
+                    ? '（未配置）'
+                    : (cfBestIp.contains('.') && _isIpv4Strict(cfBestIp)
+                        ? cfBestIp
+                        : '$cfBestIp\n  →  $resolvedIp'),
+                enabled: bestIpOn,
+                accent: const Color(0xFF10b981),
+                subtitle: bestIpOn
+                    ? (videoStreamViaProxy
+                        ? '视频流强制走这个 IP'
+                        : 'HTTP 请求走这个 IP (m3u8/图片)')
+                    : '未配置',
+              ),
+              _buildLinkArrow(enabled: videoStreamViaProxy),
+              _buildLinkNode(
+                icon: Icons.smartphone,
+                label: '手机',
+                value: '本机 libmpv',
+                enabled: true,
+                accent: const Color(0xFFa78bfa),
+                subtitle: videoStreamViaProxy
+                    ? '经本地代理 → 优选 IP'
+                    : '直连上游节点',
+              ),
+              const SizedBox(height: 16),
+              const Divider(color: Color(0xFF374151), height: 1),
+              const SizedBox(height: 12),
+              // 实时下载速度
+              Row(
+                children: [
+                  const Icon(Icons.speed,
+                      color: Color(0xFF60a5fa), size: 18),
+                  const SizedBox(width: 10),
+                  const Text(
+                    '下载速度',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    _formatSpeed(_downloadSpeedBps),
+                    style: const TextStyle(
+                      color: Color(0xFF60a5fa),
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ],
+              ),
+              // 提示
+              if (accelLevel != 'full')
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: _buildAccelHint(accelLevel, cfWorkerOn, bestIpOn,
+                      videoProxyToggleOn, videoStreamViaProxy),
+                ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('关闭',
+                      style: TextStyle(color: Color(0xFF60a5fa))),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// v2.0.34: 加速等级徽章 (右上角小 chip)
+  /// full = 绿色 ✅ 全加速 / half = 黄色 ⚠️ 半加速 / none = 灰色 ❌ 未加速
+  Widget _buildAccelBadge(String level) {
+    final config = switch (level) {
+      'full' => (
+        bg: const Color(0xFF064e3b),
+        fg: const Color(0xFF10b981),
+        text: '✅ 全加速',
+      ),
+      'half' => (
+        bg: const Color(0xFF78350f),
+        fg: const Color(0xFFfbbf24),
+        text: '⚠️ 半加速',
+      ),
+      _ => (
+        bg: const Color(0xFF374151),
+        fg: const Color(0xFF9ca3af),
+        text: '❌ 未加速',
+      ),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: config.bg,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        config.text,
+        style: TextStyle(
+          color: config.fg,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  String _accelLevelDescription(String level) {
+    return switch (level) {
+      'full' => '视频源经 CF Worker 域名重写, libmpv 强制走优选 IP 连 CF edge',
+      'half' => '加速链路部分启用, 视频流可能未走优选 IP',
+      _ => '加速链路未启用, 视频流直连原源',
+    };
+  }
+
+  /// v2.0.34: 加速链路里的一个节点 (圆角卡片)
+  ///
+  /// enabled = true: 高亮 + 实色边框
+  /// enabled = false: 灰色 + 暗淡 (说明该节点被跳过)
+  Widget _buildLinkNode({
+    required IconData icon,
+    required String label,
+    required String value,
+    required bool enabled,
+    required Color accent,
+    String? subtitle,
+  }) {
+    final color = enabled ? accent : const Color(0xFF6b7280);
+    final borderColor =
+        enabled ? accent.withOpacity(0.6) : const Color(0xFF374151);
+    final valueColor =
+        enabled ? Colors.white : Colors.white.withOpacity(0.4);
+    final labelColor =
+        enabled ? Colors.white.withOpacity(0.85) : Colors.white.withOpacity(0.4);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: borderColor, width: 1.2),
+      ),
+      child: InkWell(
+        onTap: value.isNotEmpty && value != '（无）' && value != '本机 libmpv'
+            ? () => _copyToClipboard(value, label)
+            : null,
+        borderRadius: BorderRadius.circular(10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 左侧图标圆
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: Icon(icon, color: color, size: 18),
+            ),
+            const SizedBox(width: 10),
+            // 右侧文字
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        label,
+                        style: TextStyle(
+                          color: labelColor,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (enabled && subtitle != null)
+                        Text(
+                          subtitle,
+                          style: TextStyle(
+                            color: accent.withOpacity(0.85),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    value,
+                    style: TextStyle(
+                      color: valueColor,
+                      fontSize: 12,
+                      fontFamily: 'monospace',
+                      fontFamilyFallback: const ['Courier', 'monospace'],
+                      height: 1.3,
+                    ),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            // 复制图标 (鼠标手势)
+            if (value.isNotEmpty && value != '（无）' && value != '本机 libmpv')
+              Padding(
+                padding: const EdgeInsets.only(left: 4, top: 6),
+                child: Icon(
+                  Icons.content_copy,
+                  color: Colors.white.withOpacity(0.3),
+                  size: 14,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// v2.0.34: 节点之间的箭头 (竖向)
+  ///
+  /// enabled = true: 实线 + 高亮色
+  /// enabled = false: 虚线 + 灰色 (表示该段链路被跳过)
+  Widget _buildLinkArrow({required bool enabled}) {
+    final color =
+        enabled ? const Color(0xFF10b981) : const Color(0xFF4b5563);
+    return Container(
+      width: 2,
+      height: 18,
+      margin: const EdgeInsets.only(left: 28),
+      decoration: BoxDecoration(
+        color: color.withOpacity(enabled ? 0.8 : 0.4),
+        borderRadius: BorderRadius.circular(1),
+      ),
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          if (enabled)
+            Positioned(
+              bottom: -2,
+              child: Icon(
+                Icons.arrow_drop_down,
+                color: color,
+                size: 12,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// v2.0.34: 加速等级非 full 时的提示
+  Widget _buildAccelHint(String level, bool cfWorkerOn, bool bestIpOn,
+      bool videoProxyToggleOn, bool videoStreamViaProxy) {
+    if (level == 'none') {
+      return Text(
+        '在 设置 → CF Worker 加速 里打开 CF Worker 加速源 + 填域名 + 优选 IP',
+        style: TextStyle(
+          color: Colors.white.withOpacity(0.55),
+          fontSize: 11,
+          height: 1.4,
+        ),
+      );
+    }
+    // half
+    if (cfWorkerOn && bestIpOn && !videoStreamViaProxy) {
+      // 配齐了但视频流没走代理
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'CF Worker + 优选 IP 都配了, 但视频流没走代理.',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.7),
+              fontSize: 11,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            videoProxyToggleOn
+                ? '「视频代理加速」开了, 但 tryStart 失败, 查 logcat [VideoProxy] 看原因.'
+                : '去 设置 → CF Worker 加速 → 视频代理加速 打开开关.',
+            style: TextStyle(
+              color: const Color(0xFFfbbf24).withOpacity(0.9),
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              height: 1.4,
+            ),
+          ),
+        ],
+      );
+    }
+    return Text(
+      '配置不完整, 见上方节点 (灰色 = 跳过).',
+      style: TextStyle(
+        color: Colors.white.withOpacity(0.55),
+        fontSize: 11,
+      ),
+    );
+  }
+
+  /// v2.0.34: 复制到剪贴板 + 短 SnackBar 提示
+  void _copyToClipboard(String text, String label) {
+    // 把多行值扁平化 (节点值可能含 \n)
+    final flat = text.replaceAll('\n', ' ').trim();
+    Clipboard.setData(ClipboardData(text: flat));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$label 已复制'),
+        duration: const Duration(milliseconds: 1200),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  /// v2.0.34: 把 URL 截短显示 (去 query, 防太长撑爆卡片)
+  String _stripUrlQuery(String url) {
+    final qIdx = url.indexOf('?');
+    if (qIdx < 0) return url;
+    final stripped = url.substring(0, qIdx);
+    return '$stripped?...';
+  }
+
+  /// v2.0.34: IPv4 严格校验 (比 _isIpv4 更严, 防 cf.877774.xyz 走错分支)
+  static bool _isIpv4Strict(String s) {
+    final m = RegExp(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$')
+        .firstMatch(s);
+    if (m == null) return false;
+    for (var i = 1; i <= 4; i++) {
+      final n = int.parse(m.group(i)!);
+      if (n < 0 || n > 255) return false;
+    }
+    return true;
+  }
+
+  /// v2.0.34: 格式化下载速度 (Bytes/s → 人类可读)
+  /// < 1 KB/s → "0 B/s" (避免跳 0 误差)
+  /// 1-1024 B/s → "512 B/s"
+  /// 1-1024 KB/s → "256 KB/s"
+  /// >= 1 MB/s → "1.2 MB/s"
+  static String _formatSpeed(double bps) {
+    if (bps < 1) return '0 B/s';
+    if (bps < 1024) return '${bps.toStringAsFixed(0)} B/s';
+    if (bps < 1024 * 1024) {
+      return '${(bps / 1024).toStringAsFixed(1)} KB/s';
+    }
+    return '${(bps / 1024 / 1024).toStringAsFixed(2)} MB/s';
   }
 
   /// 打开设置底部面板(齿轮菜单: 倍速 / 跳过片头片尾 / 比例 等)
