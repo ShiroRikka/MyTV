@@ -86,7 +86,7 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
       widget.kind == 'movie' ? TmdbMediaType.movie : TmdbMediaType.tv;
 
   Future<void> _loadTmdb() async {
-    if (!isTmdbPosterWallEnabled() || widget.title.isEmpty) {
+    if (!UserDataService.isTmdbApiKeyConfigured() || widget.title.isEmpty) {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
