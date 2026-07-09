@@ -2,12 +2,14 @@
 //
 // 背景:
 //   - 配了 TMDB key 的用户在 player_screen 详情页看到 TMDB 大背景 + 大海报 + 简介
-//   - 没配 key / 拿不到结果 / 短剧 → 走默认海报 (灰色电影 icon + 标题)
+//   - 没配 key / 拿不到结果 / 短剧 / 标题不匹配 → 走默认海报 (灰色电影 icon + 标题)
 //
 // 数据流:
 //   1. TmdbService.search(type, title, year) → 拿第一个匹配结果的 ID
-//   2. TmdbService.getDetails(type, id) → 拿完整 metadata (overview, backdrop, voteAverage)
-//   3. 1 天本地缓存兜底, 重复打开详情页几乎零网络
+//   2. v2.0.47: 校验 result 标题跟 query 是否对得上 (2-gram 相似度),
+//      不匹配 → 走默认海报 (避免大头部显示成另一个完全不相关的剧)
+//   3. TmdbService.getDetails(type, id) → 拿完整 metadata (overview, backdrop, voteAverage)
+//   4. 1 天本地缓存兜底, 重复打开详情页几乎零网络
 //
 // 配了 key 拿不到结果 (TMDB 没收录 / 标题不一样) → 退化为默认海报
 // (灰色电影 icon + 标题), 不展示 douban 海报 (避免封面/标题不符时
@@ -16,6 +18,8 @@
 //
 // v2.0.46: 短剧 / TMDB 没资源 → 统一用默认海报 (灰色 icon + 标题),
 //   不再用 douban 海报 (douban 海报跟实际视频可能差很多, 反而误导).
+// v2.0.47: TMDB 搜不到精准匹配时 (返回"最接近"的结果), 标题相似度校验
+//   不过也走默认海报, 不显示错的剧 (e.g. 搜「山村医馆」返回「千香」).
 //
 // 用法 (player_screen 调用):
 //   TmdbDetailHeader(
@@ -103,6 +107,57 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
     return false;
   }
 
+  // v2.0.47: 校验 TMDB search 返回的第一条结果跟用户搜的标题是否"对得上".
+  //
+  // 背景: TMDB 搜不到完全匹配时, 会返回"最接近"的结果 (e.g. 搜「山村医馆」
+  // 短剧, TMDB 没收录, 返回第一条「千香」). 之前 v2.0.46 直接用 first
+  // 当作正确结果, 大头部显示「千香」海报/标题, 跟实际视频完全不符.
+  //
+  // 校验策略: 看 result.title / originalTitle 跟 query 有没有"足够多"的
+  // 公共子串. 算法简单粗暴但够用 (中文 2-gram 匹配):
+  //   1. 提取 query 的 2-字符子串集合 (e.g. "山村医馆" → {山村, 村医, 医馆})
+  //   2. 跟 result.title 的 2-gram 集合求交集
+  //   3. 交集 / query 2-gram 总数 >= 0.5 算"匹配上"
+  //
+  // 例外: query 长度 < 2 (不可能) 跳过; title 含完整 query (substring) 直接算匹配.
+  //
+  // 返回 true = 标题大致对得上, 可以用 TMDB 数据.
+  // 返回 false = 标题不匹配, 走默认海报 (避免大头部显示错误的剧).
+  bool _isTitleMatch(TmdbItem item, String query) {
+    final q = query.trim();
+    if (q.isEmpty) return false;
+    final candidates = <String>[
+      item.title,
+      item.originalTitle,
+    ].where((s) => s.isNotEmpty).toList();
+    if (candidates.isEmpty) return false;
+
+    // 1) substring 检查 (任一 candidate 包含完整 query 就算匹配)
+    for (final c in candidates) {
+      if (c.contains(q) || q.contains(c)) return true;
+    }
+
+    // 2) 2-gram 相似度
+    int qGrams;
+    if (q.length <= 1) {
+      qGrams = 1;
+    } else {
+      qGrams = q.length - 1;
+    }
+    if (qGrams <= 0) return false;
+
+    for (final c in candidates) {
+      if (c.length < 2) continue;
+      int hit = 0;
+      for (var i = 0; i < q.length - 1; i++) {
+        final g = q.substring(i, i + 2);
+        if (c.contains(g)) hit++;
+      }
+      if (hit / qGrams >= 0.5) return true;
+    }
+    return false;
+  }
+
   Future<void> _loadTmdb() async {
     if (!UserDataService.isTmdbApiKeyConfigured() || widget.title.isEmpty) {
       if (!mounted) return;
@@ -145,8 +200,23 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
         });
         return;
       }
-      // 2) 拿第一个匹配的详情 (含 overview + backdrop)
+      // 2) v2.0.47: 校验第一个结果的标题跟 query 是否"对得上".
+      //   短剧 / 没收录 / 拼错名的剧, TMDB 会返回"最接近"的结果
+      //   (e.g. 搜「山村医馆」→ 返回「千香」), 标题不匹配, 走默认海报
+      //   而不是把大头部显示成另一个完全不相关的剧.
       final first = results.results.first;
+      if (!_isTitleMatch(first, widget.title)) {
+        // ignore: avoid_print
+        print('[TMDBDetailHeader] 标题不匹配: 搜 "${widget.title}" '
+            '→ "${first.title}" (${first.originalTitle}), 走默认海报');
+        if (!mounted) return;
+        setState(() {
+          _isLoading = false;
+          _hasError = false; // 标题不匹配不算 error, 走 fallback
+        });
+        return;
+      }
+      // 3) 拿第一个匹配的详情 (含 overview + backdrop)
       final details = await TmdbService.getDetails(
         type: _mediaType,
         id: first.id,
