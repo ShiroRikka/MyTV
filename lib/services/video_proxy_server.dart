@@ -173,6 +173,48 @@ class VideoProxyServer {
   ///   加上 maybeResolveHostEagerly 提前触发 DNS 解析, race 拿到的候选
   ///   顺序就是 [host_ip1, host_ip2, ..., manual]. 100ms 内 TLS ServerHello
   ///   一定能到, 所以 v2.0.46 把 race 改成 "顺序拨号, 首选 host IP, fallback manual".
+  ///
+  /// v2.0.50: 强制 IPv4 拨号 — 候选是 hostname 时, 不让
+  ///   `Socket.connect` 自己 Happy Eyeballs 选 IPv6, 显式按 IPv4 列表
+  ///   顺序拨. 详注释见 [_connectOne].
+  static Future<Socket> _connectOne(String target, int port) async {
+    if (InternetAddress.tryParse(target) != null) {
+      // 候选是 IP (v4 或 v6), 直接拨, 不解析
+      return await Socket.connect(target, port,
+          timeout: const Duration(seconds: 3));
+    }
+    // 候选是 hostname — 显式解析到 IPv4 (避免 Happy Eyeballs 选 IPv6,
+    // CF anycast IPv6 edge 跟 IPv4 cert 池不通用, 自定义 CF Worker
+    // 域名常只有 IPv4 cert, IPv6 edge 没 cert → TLS 失败 → 0KB).
+    // IPv4 解析失败 → 退而求其次, 让 Socket.connect 自己处理 (会用
+    // IPv6 或其他 fallback).
+    try {
+      final addrs = await InternetAddress.lookup(target,
+              type: InternetAddressType.IPv4)
+          .timeout(const Duration(seconds: 3));
+      if (addrs.isEmpty) {
+        throw Exception('no IPv4 address for $target');
+      }
+      // 顺序拨, 第一个成功即返回
+      Socket? lastError;
+      for (final addr in addrs) {
+        try {
+          return await Socket.connect(addr, port,
+              timeout: const Duration(seconds: 3));
+        } catch (e) {
+          lastError = e is Exception ? e : Exception(e.toString());
+          continue;
+        }
+      }
+      throw lastError ?? Exception('all IPv4 addrs failed for $target');
+    } catch (e) {
+      // IPv4 解析失败 / 全部拨不上, fallback 到 Socket.connect 直接拨
+      // (允许 IPv6, 至少给个机会)
+      return await Socket.connect(target, port,
+          timeout: const Duration(seconds: 3));
+    }
+  }
+
   static Future<Socket> _connectRace(
     String originalHost,
     int port,
@@ -202,8 +244,18 @@ class VideoProxyServer {
       for (var i = 0; i < candidateIps.length; i++) {
         final ip = candidateIps[i];
         try {
-          final socket = await Socket.connect(ip, port,
-              timeout: const Duration(seconds: 3));
+          // v2.0.50: 强制 IPv4 — `Socket.connect(hostname, port)` 默认
+          //   会同时返回 IPv4 + IPv6, 系统按 Happy Eyeballs 选最快,
+          //   IPv6 经常赢 (用户网络 IPv6 优先). 但 CF anycast IPv6
+          //   edge 跟 IPv4 不是同一组 cert 池, 自定义 CF Worker
+          //   域名 (e.g. api.xx.fn0.qzz.io) 的 cert 经常只在 IPv4
+          //   edge 上, IPv6 edge 没那个 SNI 的 cert → TLS 失败 →
+          //   libmpv 0KB. 修法: 候选是 hostname 时, 显式做
+          //   `InternetAddress.lookup(host, type: IPv4)` 拿到 IPv4
+          //   列表, 按顺序拨, 不让 Happy Eyeballs 选 IPv6.
+          //   候选是 IP (v4 或 v6) 时, 不解析, 直接拨 — 用户
+          //   配的 优选 IP 可能是 v4 也可能是 v6, 保持原行为.
+          final socket = await _connectOne(ip, port);
           // v2.0.25: backend 也设 TCP_NODELAY
           try {
             socket.setOption(SocketOption.tcpNoDelay, true);
@@ -220,8 +272,7 @@ class VideoProxyServer {
       // 全部 IP 都失败, fallback 到原 host
       // ignore: avoid_print
       VideoProxyLog.append('[VideoProxy] _connectRace: 全部 ${candidateIps.length} IP 失败, fallback 原 host $originalHost:$port');
-      final socket = await Socket.connect(originalHost, port,
-          timeout: const Duration(seconds: 5));
+      final socket = await _connectOne(originalHost, port);
       try {
         socket.setOption(SocketOption.tcpNoDelay, true);
       } catch (_) {}
@@ -237,8 +288,9 @@ class VideoProxyServer {
     bool winnerChosen = false;
 
     for (final ip in candidateIps) {
+      // v2.0.50: 用 _connectOne, hostname 强制 IPv4
       // ignore: unawaited_futures
-      Socket.connect(ip, port, timeout: const Duration(seconds: 5))
+      _connectOne(ip, port)
           .then((socket) {
         if (!winnerChosen) {
           winnerChosen = true;
@@ -279,8 +331,7 @@ class VideoProxyServer {
       // 全部 IP 都失败, fallback 到原 host
       // ignore: avoid_print
       VideoProxyLog.append('[VideoProxy] _connectRace: 全部 ${candidateIps.length} IP 失败 ($e), fallback 原 host $originalHost:$port');
-      final socket = await Socket.connect(originalHost, port,
-          timeout: const Duration(seconds: 5));
+      final socket = await _connectOne(originalHost, port);
       try {
         socket.setOption(SocketOption.tcpNoDelay, true);
       } catch (_) {}
