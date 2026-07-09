@@ -18,14 +18,21 @@ class UserDataService {
   static const String _videoProxyEnabledKey = 'video_proxy_enabled';
   // v2.0.31: 用户手动填的优选 IP, 优先级高于测速结果
   static const String _cfBestIpKey = 'cf_best_ip';
+  // v2.0.35: TMDB API Key (v3 auth), 留空 = 关闭 TMDB 海报墙, 有 = 首页 2 个
+  //   section (热门电影 / 热门剧集) 自动切 TMDB 横滚海报墙 + 评分
+  //   申请地址 https://www.themoviedb.org/settings/api (免费, 立即审核)
+  static const String _tmdbApiKeyKey = 'tmdb_api_key';
 
   // 内存缓存
   static bool? _isLocalModeCache;
   static bool? _cfWorkerEnabledCache;
   static String? _cfWorkerDomainCache;
+  static bool? _videoProxyEnabledCache;
   static String? _bangumiDataSourceCache;
   static String? _bangumiImageSourceCache;
   static String? _cfBestIpCache;
+  // v2.0.35
+  static String? _tmdbApiKeyCache;
 
   // 保存用户登录信息
   static Future<void> saveUserData({
@@ -392,6 +399,43 @@ class UserDataService {
     }
     _cfBestIpCache = v;
     return v;
+  }
+
+  // ===== TMDB API Key (v2.0.35) =====
+
+  /// 异步读 TMDB API key. 没填 = null.
+  ///
+  /// 配 key 即等价于「启用 TMDB 海报墙」开关. 首页 _buildHomeTabContent 在 build 时
+  /// 同步读 [getTmdbApiKeySync], 配了走 TmdbPosterWall, 没配走原 HotMoviesSection / HotTvSection.
+  static Future<String?> getTmdbApiKey() async {
+    if (_tmdbApiKeyCache != null) return _tmdbApiKeyCache;
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getString(_tmdbApiKeyKey);
+    if (v == null || v.isEmpty) {
+      _tmdbApiKeyCache = null;
+      return null;
+    }
+    _tmdbApiKeyCache = v;
+    return v;
+  }
+
+  /// 同步读 TMDB API key (build 时用, 避免 Future). null = 未配 / 未初始化.
+  static String? getTmdbApiKeySync() => _tmdbApiKeyCache;
+
+  /// 保存 TMDB API key. trim + 非空校验. 传 null 或空字符串 = 删除.
+  ///
+  /// 不做严格格式校验 (v3 key 32 字符 hex / v4 JWT 长字符串),
+  /// 等调用 TMDB API 失败时再提示用户重填.
+  static Future<void> saveTmdbApiKey(String? input) async {
+    final cleaned = (input ?? '').trim();
+    final prefs = await SharedPreferences.getInstance();
+    if (cleaned.isEmpty) {
+      await prefs.remove(_tmdbApiKeyKey);
+      _tmdbApiKeyCache = null;
+    } else {
+      await prefs.setString(_tmdbApiKeyKey, cleaned);
+      _tmdbApiKeyCache = cleaned;
+    }
   }
 
   /// 同步读 (启动 warmup 后用)

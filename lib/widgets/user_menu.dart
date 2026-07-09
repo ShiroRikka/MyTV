@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:luna_tv/services/user_data_service.dart';
 import 'package:luna_tv/services/cf_optimizer.dart';
 import 'package:luna_tv/screens/cf_acceleration_page.dart';
+import 'package:luna_tv/screens/tmdb_settings_page.dart';
 import 'package:luna_tv/screens/login_screen.dart';
 import 'package:luna_tv/services/douban_cache_service.dart';
 import 'package:luna_tv/services/page_cache_service.dart';
@@ -44,6 +45,9 @@ class _UserMenuState extends State<UserMenu> {
   String _cfWorkerDomain = '';
   // v2.0.30: 砍掉 IP 优选, 只留 CF Worker 开关, 摘要也简化
   String _cfSummary = '未配置';
+  // v2.0.35: TMDB API key, 跟"加速"section 并列, 单独做一个 section "海报墙"
+  String _tmdbApiKey = '';
+  String _tmdbSummary = '未配置 (首页用原列表)';
 
   @override
   void initState() {
@@ -79,6 +83,8 @@ class _UserMenuState extends State<UserMenu> {
     final cfWorkerEnabled = await UserDataService.getCfWorkerEnabled();
     final cfWorkerDomain = await UserDataService.getCfWorkerDomain();
     final cfBestIp = await UserDataService.getCfBestIp();
+    // v2.0.35: TMDB 海报墙 (单独 section, 配 key 启用首页海报墙)
+    final tmdbApiKey = await UserDataService.getTmdbApiKey();
 
     if (mounted) {
       setState(() {
@@ -100,6 +106,8 @@ class _UserMenuState extends State<UserMenu> {
           bestIp: cfBestIp,
           resolvedIp: CfOptimizerHttpOverrides.getResolvedManualIp(),
         );
+        _tmdbApiKey = tmdbApiKey ?? '';
+        _tmdbSummary = _computeTmdbSummary(tmdbApiKey);
       });
     }
   }
@@ -172,6 +180,29 @@ class _UserMenuState extends State<UserMenu> {
         resolvedIp: CfOptimizerHttpOverrides.getResolvedManualIp(),
       );
     });
+  }
+
+  // v2.0.35: push TMDB 海报墙 子页面, 返回时刷新入口行摘要
+  Future<void> _openTmdbSettingsPage() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const TmdbSettingsPage()),
+    );
+    if (!mounted) return;
+    final key = await UserDataService.getTmdbApiKey();
+    if (!mounted) return;
+    setState(() {
+      _tmdbApiKey = key ?? '';
+      _tmdbSummary = _computeTmdbSummary(key);
+    });
+  }
+
+  /// v2.0.35: 入口行一行摘要 (跟 _cfSummary 风格一致, 显示在用户菜单入口)
+  static String _computeTmdbSummary(String? key) {
+    if (key == null || key.isEmpty) return '未配置 (首页用原列表)';
+    if (key.length > 12) {
+      return '已配置: ${key.substring(0, 4)}...${key.substring(key.length - 4)}';
+    }
+    return '已配置: ****';
   }
 
   String _parseRoleFromCookies(String? cookies) {
@@ -1169,6 +1200,23 @@ class _UserMenuState extends State<UserMenu> {
                 onTap: _openCfAccelerationPage,
                 icon: LucideIcons.rocket,
                 iconColor: const Color(0xFFf59e0b),
+              ),
+            ],
+          ),
+          // ===== 海报墙 (v2.0.35) =====
+          //   跟"加速"是不同性质的功能 (CF 加速是网络层, TMDB 是 UI 增强)
+          //   单独做一个 section, 跟"加速"视觉同等级, 跟"其他"杂项分开
+          //   点进去是独立子页面 TMDB API Key 输入 + 测试 + 清除
+          //   配 key = 自动启用首页海报墙, 不配 = 保持原样 (无 toggle, key 字段就是开关)
+          _buildSectionHeader('海报墙'),
+          _buildCard(
+            children: [
+              _buildInputOption(
+                title: 'TMDB 海报墙',
+                currentValue: _tmdbSummary,
+                onTap: _openTmdbSettingsPage,
+                icon: LucideIcons.layoutGrid,
+                iconColor: const Color(0xFF10b981),
               ),
             ],
           ),
