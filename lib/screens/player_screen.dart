@@ -1758,12 +1758,29 @@ class _PlayerScreenState extends State<PlayerScreen>
       print('[VideoProxy] 跳过: 已在跑 (port=${_videoProxy!.port})');
       return;
     }
-    final proxy = await VideoProxyServer.tryStart();
-    if (proxy == null) {
-      // v2.0.34+: 诊断 tryStart 失败原因
+    // v2.0.39 修: 加重试. v2.0.34 假设进播放页时 _resolvedManualIp 一定就绪,
+    //   但实际有冷启动竞态: 启动走 _resolveAndSchedule fire-and-forget 5s 内 resolve,
+    //   用户启动后秒进播放页, _player.open 后 _resolvedManualIp 还没值, tryStart
+    //   守门 3 fail, _videoProxyActive 永远 false. 之后 _ensureVideoProxy 也不会被重调.
+    //   修法: 失败时若 _resolvedManualIp 还没值, 等 1s 重试一次, 最多 3 次 (3s 内)
+    VideoProxyServer? proxy;
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      proxy = await VideoProxyServer.tryStart();
+      if (proxy != null) break;
+      final resolvedIp = CfOptimizerHttpOverrides.getResolvedManualIp();
+      if (resolvedIp != null && resolvedIp.isNotEmpty) {
+        // 有 IP 但 tryStart 还是 null → bind() 失败, 不要再 retry
+        // ignore: avoid_print
+        print('[VideoProxy] tryStart 第 $attempt 次返 null 但 IP 已有 ($resolvedIp) → bind 失败, 不再 retry');
+        return;
+      }
       // ignore: avoid_print
-      print('[VideoProxy] tryStart 返 null — 检查: '
-          'CF Worker 加速开关 / 域名 / 手动优选 IP 字段');
+      print('[VideoProxy] tryStart 第 $attempt 次返 null — 冷启动 _resolvedManualIp 还没值, 等 1s 重试');
+      await Future.delayed(const Duration(seconds: 1));
+    }
+    if (proxy == null) {
+      // ignore: avoid_print
+      print('[VideoProxy] 3 次都失败, 视频代理不起, libmpv 走原 URL');
       return;
     }
     // v2.0.20: dart:ffi 直调 libmpv 设 http-proxy (绕开 media_kit API 限制)
@@ -1935,6 +1952,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       await _player.stop();
       await _player.open(Media(playUrl));
+      // v2.0.39 修: _ensureVideoProxy() 这个函数 v2.0.34 写了**没人调**,
+      //   全项目搜只有 1 处 = 函数定义本身, 视频代理挂了 5 个版本没人发现.
+      //   这里 _player.open() 之后 libmpv 句柄已有效, 立刻调 _ensureVideoProxy
+      //   拿 _player.handle 设 'http-proxy' 属性. 切集时也走这条路径,
+      //   _ensureVideoProxy 内部有 _videoProxy.isRunning 守门, 不会重起代理.
+      // ignore: unawaited_futures
+      _ensureVideoProxy();
       // 云记忆恢复
       //
       // v1.0.61 fix: v1.0.60 等了 position stream, 但根因是 player 在

@@ -79,8 +79,17 @@ class VideoProxyServer {
     try {
       final s = VideoProxyServer._();
       await s._bind();
+      // ignore: avoid_print
+      print('[VideoProxy] tryStart 成功: bind 127.0.0.1:${s._port}');
       return s;
-    } catch (e) {
+    } catch (e, st) {
+      // v2.0.39: 不再静默吞, 打印详细原因. _bind() 失败一般是:
+      //   - 端口被占 (极少见, 0 是系统分配空闲端口)
+      //   - 系统限制 ServerSocket (Android 14+ 沙箱)
+      //   - 已有 _videoProxy 没释放 (跨页面残留, _ensureVideoProxy 守门)
+      //   - 异常 OS 资源耗尽
+      // ignore: avoid_print
+      print('[VideoProxy] tryStart bind 失败: $e\n$st');
       return null;
     }
   }
