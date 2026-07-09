@@ -1,0 +1,510 @@
+// v2.0.36: TMDB (The Movie Database) API client
+//
+// 核心: 通过 CF Worker CORSAPI 加速 TMDB 请求
+//   原始: https://api.themoviedb.org/3/movie/popular?api_key=xxx
+//   加速: https://{cf-worker}/?url=https%3A%2F%2Fapi.themoviedb.org%2F3%2Fmovie%2Fpopular%3Fapi_key%3Dxxx
+//
+// 为什么需要加速: TMDB 国内/某些地区访问慢, 走 CF Worker 代理后:
+//   - 你设备 -> CF edge (快)
+//   - CF edge -> TMDB origin (快, 走 CF 骨干网)
+//   - 整条链路在国内/海外都比直连 api.themoviedb.org 快
+//
+// 配置要求 (v2.0.35 配):
+//   1. 设置页 → 海报墙 → TMDB API Key (v3 auth, 免费)
+//   2. 设置页 → 加速 → CF Worker 域名 + 开关
+// 任一缺失 → 走 fallback:
+//   - 无 key → TmdbException(NO_KEY)
+//   - 无 CF Worker 域名 → _wrap 直接返回原 URL (走直连, 慢但能用)
+//
+// 缓存: 1 天本地缓存, 跟 TMDB 自己数据更新周期匹配
+//   - SharedPreferences 存 JSON, key = tmdb_cache_{path}_{params_hash}
+//   - 内存二级缓存避免每次都读 prefs
+//
+// 设计参考:
+//   - 跟 CfOptimizerHttpOverrides 一样的全局静态方法模式
+//   - 走 Dart HttpClient, 触发 CfOptimizerHttpOverrides 全局 hook,
+//     HTTP 请求也走优选 IP (跟 v2.0.31 手动优选 IP 字段联动)
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:luna_tv/services/user_data_service.dart';
+
+/// v2.0.36: TMDB API 异常
+class TmdbException implements Exception {
+  final String message;
+  final String code; // NO_KEY / INVALID_KEY / NETWORK / HTTP_xxx
+  final int? httpStatus;
+
+  const TmdbException(this.message,
+      {required this.code, this.httpStatus});
+
+  @override
+  String toString() => 'TmdbException($code): $message';
+
+  /// 翻译成中文给用户看
+  String toUserMessage() {
+    switch (code) {
+      case 'NO_KEY':
+        return '未配置 TMDB API Key. 去 设置 → 海报墙 申请并填入.';
+      case 'INVALID_KEY':
+        return 'TMDB API Key 无效 (401). 重新去 themoviedb.org/settings/api 复制.';
+      case 'NETWORK':
+        return '网络异常: $message. 检查网络 / CF Worker 域名是否配对.';
+      default:
+        if (httpStatus != null) {
+          return 'TMDB 错误 $httpStatus: $message';
+        }
+        return message;
+    }
+  }
+}
+
+/// v2.0.36: 媒体类型
+enum TmdbMediaType {
+  movie('movie'),
+  tv('tv'),
+  person('person');
+
+  final String value;
+  const TmdbMediaType(this.value);
+
+  static TmdbMediaType fromString(String s) {
+    for (final t in TmdbMediaType.values) {
+      if (t.value == s) return t;
+    }
+    return TmdbMediaType.movie;
+  }
+}
+
+/// v2.0.36: trending 时间窗
+enum TmdbTimeWindow {
+  day('day'),
+  week('week');
+
+  final String value;
+  const TmdbTimeWindow(this.value);
+}
+
+/// v2.0.36: 一个 TMDB 媒体条目 (movie 或 tv)
+class TmdbItem {
+  final int id;
+  final TmdbMediaType mediaType;
+  final String title; // movie: title, tv: name
+  final String originalTitle;
+  final String? posterPath;
+  final String? backdropPath;
+  final String overview;
+  final double voteAverage; // 0-10
+  final int voteCount;
+  final String? releaseDate; // movie: release_date, tv: first_air_date
+  final List<int> genreIds;
+
+  const TmdbItem({
+    required this.id,
+    required this.mediaType,
+    required this.title,
+    required this.originalTitle,
+    required this.posterPath,
+    required this.backdropPath,
+    required this.overview,
+    required this.voteAverage,
+    required this.voteCount,
+    required this.releaseDate,
+    required this.genreIds,
+  });
+
+  /// 从 TMDB JSON 解析. 兼容 movie / tv / trending 混合响应.
+  factory TmdbItem.fromJson(Map<String, dynamic> json) {
+    final type = json['media_type'] != null
+        ? TmdbMediaType.fromString(json['media_type'] as String)
+        : (json['title'] != null
+            ? TmdbMediaType.movie
+            : TmdbMediaType.tv);
+    final title = (type == TmdbMediaType.movie
+            ? json['title']
+            : json['name']) as String? ??
+        '';
+    final original = (type == TmdbMediaType.movie
+            ? json['original_title']
+            : json['original_name']) as String? ??
+        '';
+    final date = (type == TmdbMediaType.movie
+            ? json['release_date']
+            : json['first_air_date']) as String?;
+    final genres = (json['genre_ids'] as List?)
+            ?.map((e) => (e as num).toInt())
+            .toList() ??
+        const [];
+    final vote = (json['vote_average'] as num?)?.toDouble() ?? 0;
+    final votes = (json['vote_count'] as num?)?.toInt() ?? 0;
+
+    return TmdbItem(
+      id: (json['id'] as num).toInt(),
+      mediaType: type,
+      title: title,
+      originalTitle: original,
+      posterPath: json['poster_path'] as String?,
+      backdropPath: json['backdrop_path'] as String?,
+      overview: (json['overview'] as String?) ?? '',
+      voteAverage: vote,
+      voteCount: votes,
+      releaseDate: date,
+      genreIds: genres,
+    );
+  }
+
+  /// 年份 (从 release_date 截前 4 字符)
+  int? get year {
+    if (releaseDate == null || releaseDate!.length < 4) return null;
+    return int.tryParse(releaseDate!.substring(0, 4));
+  }
+
+  /// 评分百分比 (0-100)
+  int get votePercent => (voteAverage * 10).round();
+}
+
+/// v2.0.36: 分页结果
+class TmdbPagedResult<T> {
+  final int page;
+  final List<T> results;
+  final int totalPages;
+  final int totalResults;
+
+  const TmdbPagedResult({
+    required this.page,
+    required this.results,
+    required this.totalPages,
+    required this.totalResults,
+  });
+
+  factory TmdbPagedResult.fromJson(Map<String, dynamic> json,
+      T Function(Map<String, dynamic>) parseItem) {
+    final results = (json['results'] as List?)
+            ?.map((e) => parseItem(e as Map<String, dynamic>))
+            .toList() ??
+        const [];
+    return TmdbPagedResult(
+      page: (json['page'] as num?)?.toInt() ?? 1,
+      results: results,
+      totalPages: (json['total_pages'] as num?)?.toInt() ?? 0,
+      totalResults: (json['total_results'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+/// v2.0.36: TMDB 配置 (含图片 CDN base url)
+class TmdbConfiguration {
+  final String imageBaseUrl; // e.g. https://image.tmdb.org/t/p/
+  final List<String> posterSizes;
+  final List<String> backdropSizes;
+
+  const TmdbConfiguration({
+    required this.imageBaseUrl,
+    required this.posterSizes,
+    required this.backdropSizes,
+  });
+
+  /// 海报图完整 URL
+  ///   size: 'w92' / 'w154' / 'w185' / 'w342' / 'w500' / 'w780' / 'original'
+  String posterUrl(String? path, {String size = 'w500'}) {
+    if (path == null || path.isEmpty) return '';
+    return '$imageBaseUrl$size$path';
+  }
+
+  String backdropUrl(String? path, {String size = 'w1280'}) {
+    if (path == null || path.isEmpty) return '';
+    return '$imageBaseUrl$size$path';
+  }
+
+  factory TmdbConfiguration.fromJson(Map<String, dynamic> json) {
+    final images = json['images'] as Map<String, dynamic>?;
+    final baseUrl = (images?['secure_base_url'] as String?) ??
+        (images?['base_url'] as String?) ??
+        'https://image.tmdb.org/t/p/';
+    final poster = (images?['poster_sizes'] as List?)
+            ?.map((e) => e.toString())
+            .toList() ??
+        const ['w185', 'w500', 'original'];
+    final backdrop = (images?['backdrop_sizes'] as List?)
+            ?.map((e) => e.toString())
+            .toList() ??
+        const ['w1280', 'original'];
+    return TmdbConfiguration(
+      imageBaseUrl: baseUrl,
+      posterSizes: poster,
+      backdropSizes: backdrop,
+    );
+  }
+}
+
+/// v2.0.36: 缓存条目
+class _CacheEntry {
+  final DateTime savedAt;
+  final dynamic data;
+  const _CacheEntry(this.savedAt, this.data);
+}
+
+class TmdbService {
+  TmdbService._();
+
+  static const String _baseUrl = 'https://api.themoviedb.org/3';
+  static const Duration _cacheTtl = Duration(days: 1);
+  // TMDB free API: 40 req/10s, 1 天缓存命中率应该 90%+, 压力很小
+
+  // 内存缓存 (path + params 序列化 -> entry)
+  static final Map<String, _CacheEntry> _memoryCache = {};
+
+  // ===== 公共 API =====
+
+  /// v2.0.36: 拿 TMDB 配置 (含图片 CDN base url)
+  ///
+  /// 这个调用频次很低 (App 启动一次, 或 key 变了一次), 1 天缓存
+  static Future<TmdbConfiguration> getConfiguration() async {
+    final json = await _httpGet('/configuration', const {}, useCache: true);
+    return TmdbConfiguration.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// v2.0.36: 热门 (按 type 分)
+  ///
+  /// [type] 限定 movie 或 tv, person 不接
+  /// [page] 默认 1
+  static Future<TmdbPagedResult<TmdbItem>> getPopular({
+    required TmdbMediaType type,
+    int page = 1,
+  }) async {
+    assert(type == TmdbMediaType.movie || type == TmdbMediaType.tv,
+        'getPopular only supports movie/tv');
+    final json = await _httpGet(
+      '/${type.value}/popular',
+      {'page': '$page'},
+      useCache: true,
+    );
+    return TmdbPagedResult.fromJson(
+        json as Map<String, dynamic>, TmdbItem.fromJson);
+  }
+
+  /// v2.0.36: 趋势 (今日/本周), 不分 movie/tv 混合返回
+  static Future<TmdbPagedResult<TmdbItem>> getTrending({
+    required TmdbMediaType type,
+    TmdbTimeWindow window = TmdbTimeWindow.day,
+    int page = 1,
+  }) async {
+    final json = await _httpGet(
+      '/trending/${type.value}/${window.value}',
+      {'page': '$page'},
+      useCache: true,
+    );
+    return TmdbPagedResult.fromJson(
+        json as Map<String, dynamic>, TmdbItem.fromJson);
+  }
+
+  /// v2.0.36: 搜剧 (剧名 + 年份可选)
+  static Future<TmdbPagedResult<TmdbItem>> search({
+    required TmdbMediaType type,
+    required String query,
+    int? year,
+    int page = 1,
+  }) async {
+    final params = <String, String>{
+      'query': query,
+      'page': '$page',
+    };
+    if (year != null) {
+      params[type == TmdbMediaType.movie ? 'year' : 'first_air_date_year'] =
+          '$year';
+    }
+    final json = await _httpGet(
+      '/search/${type.value}',
+      params,
+      useCache: true,
+    );
+    return TmdbPagedResult.fromJson(
+        json as Map<String, dynamic>, TmdbItem.fromJson);
+  }
+
+  /// v2.0.36: 详情 (movie 或 tv)
+  static Future<TmdbItem?> getDetails({
+    required TmdbMediaType type,
+    required int id,
+  }) async {
+    try {
+      final json = await _httpGet(
+        '/${type.value}/$id',
+        const {},
+        useCache: true,
+      );
+      // 详情返回不带 media_type, 根据 type 字段缺失推断
+      final map = json as Map<String, dynamic>;
+      map['media_type'] ??= type.value;
+      return TmdbItem.fromJson(map);
+    } on TmdbException catch (e) {
+      if (e.httpStatus == 404) return null;
+      rethrow;
+    }
+  }
+
+  /// v2.0.36: 清缓存 (测试用, 或用户主动重置)
+  static Future<void> clearCache() async {
+    _memoryCache.clear();
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getKeys().where((k) => k.startsWith('tmdb_cache_'));
+    for (final k in keys) {
+      await prefs.remove(k);
+    }
+  }
+
+  // ===== 内部 =====
+
+  /// v2.0.36: 拼 URL + 走 CORSAPI 包装
+  ///
+  ///   tmdb_url -> https://{cf-worker}/?url={encoded(tmdb_url)}
+  ///   如果 CF Worker 不可用 (没配域名 / 开关关) -> 返回原 URL (直连)
+  static Future<String> _wrap(String tmdbUrl) async {
+    // 走 buildProxiedUrlAsync, 内部会判断 CF Worker 是否可用
+    // 不可用时 buildProxiedUrl 直接返回原 URL (跟现有 buildProxiedUrl 行为一致)
+    return await UserDataService.buildProxiedUrlAsync(tmdbUrl);
+  }
+
+  /// v2.0.36: HTTP GET + 1 天本地缓存
+  ///
+  /// useCache: false 用于调试 (强制走网络)
+  static Future<dynamic> _httpGet(
+    String path,
+    Map<String, String> params, {
+    bool useCache = true,
+  }) async {
+    final key = await UserDataService.getTmdbApiKey();
+    if (key == null || key.isEmpty) {
+      throw const TmdbException('未配置 TMDB API Key', code: 'NO_KEY');
+    }
+
+    // 拼 query string, 保留原始顺序方便缓存命中
+    final orderedParams = <String, String>{'api_key': key, ...params};
+    final qs = orderedParams.entries
+        .map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}')
+        .join('&');
+    final cacheKey = useCache ? _cacheKey(path, qs) : null;
+
+    // 1) 内存缓存
+    if (cacheKey != null) {
+      final mem = _memoryCache[cacheKey];
+      if (mem != null &&
+          DateTime.now().difference(mem.savedAt) < _cacheTtl) {
+        return mem.data;
+      }
+    }
+    // 2) SharedPreferences 缓存
+    if (cacheKey != null) {
+      final cached = await _readFromPrefs(cacheKey);
+      if (cached != null) {
+        // 写回内存缓存
+        _memoryCache[cacheKey] = _CacheEntry(DateTime.now(), cached);
+        return cached;
+      }
+    }
+
+    // 3) 真发请求
+    final tmdbUrl = '$_baseUrl$path?$qs';
+    final url = await _wrap(tmdbUrl);
+    // ignore: avoid_print
+    print('[TMDB] GET $path -> ${url.substring(0, url.length > 80 ? 80 : url.length)}...');
+
+    final client = HttpClient();
+    client.connectionTimeout = const Duration(seconds: 10);
+    try {
+      final req = await client.getUrl(Uri.parse(url));
+      req.headers.set('Accept', 'application/json');
+      req.headers.set('User-Agent', 'LunaTV-Mobile/2.0.36');
+      final resp = await req.close();
+      final body = await resp.transform(utf8.decoder).join();
+
+      if (resp.statusCode == 401) {
+        throw const TmdbException(
+          'TMDB API Key 无效 (401). 去 themoviedb.org/settings/api 重新复制.',
+          code: 'INVALID_KEY',
+          httpStatus: 401,
+        );
+      }
+      if (resp.statusCode == 404) {
+        throw const TmdbException(
+          'TMDB 资源不存在 (404)',
+          code: 'HTTP_404',
+          httpStatus: 404,
+        );
+      }
+      if (resp.statusCode >= 400) {
+        throw TmdbException(
+          'TMDB HTTP ${resp.statusCode}: ${body.substring(0, body.length > 200 ? 200 : body.length)}',
+          code: 'HTTP_${resp.statusCode}',
+          httpStatus: resp.statusCode,
+        );
+      }
+
+      final dynamic json = jsonDecode(body);
+
+      // 写缓存
+      if (cacheKey != null) {
+        _memoryCache[cacheKey] = _CacheEntry(DateTime.now(), json);
+        await _saveToPrefs(cacheKey, json);
+      }
+
+      return json;
+    } on SocketException catch (e) {
+      throw TmdbException('Socket: ${e.message}', code: 'NETWORK');
+    } on HttpException catch (e) {
+      throw TmdbException('HTTP: ${e.message}', code: 'NETWORK');
+    } on TimeoutException {
+      throw const TmdbException('请求超时 (10s)', code: 'NETWORK');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// v2.0.36: 缓存 key (path + queryString 的 base64 摘要, 取前 16 字符)
+  ///
+  /// 不用 crypto 包, 走 dart:convert.base64Url 自带.
+  /// 16 字符 base64 足够避免冲突 (1M 缓存 key 碰撞概率 ~10^-7).
+  static String _cacheKey(String path, String queryString) {
+    final full = '$path?$queryString';
+    final b64 = base64Url.encode(utf8.encode(full));
+    final digest = b64.length > 16 ? b64.substring(0, 16) : b64;
+    return 'tmdb_cache_${path.replaceAll('/', '_')}_$digest';
+  }
+
+  /// v2.0.36: 从 SharedPreferences 读缓存
+  static Future<dynamic> _readFromPrefs(String key) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(key);
+      if (raw == null) return null;
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      final ts = (map['ts'] as num?)?.toInt() ?? 0;
+      if (DateTime.now().millisecondsSinceEpoch - ts > _cacheTtl.inMilliseconds) {
+        // 过期
+        await prefs.remove(key);
+        return null;
+      }
+      return map['data'];
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// v2.0.36: 写 SharedPreferences 缓存
+  static Future<void> _saveToPrefs(String key, dynamic data) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = jsonEncode({
+        'ts': DateTime.now().millisecondsSinceEpoch,
+        'data': data,
+      });
+      await prefs.setString(key, raw);
+    } catch (_) {
+      // 缓存失败无所谓, 反正能 fallback 网络
+    }
+  }
+}
