@@ -259,8 +259,13 @@ class TmdbService {
   //   之前没传 → 英文标题 + 英文 overview, 跟"海报墙"墙不匹配.
   static const String _language = 'zh-CN';
   static const String _region = 'CN';
+  // v2.0.76: 搜索缓存 1天 → 6小时
+  //   原 1 天缓存: 新片 (刚上 TMDB 几小时) 经常搜不到, 用户被迫等 1 天
+  //   6 小时: 新片基本能搜到, 旧片命中率仍高, TMDB API 40 req/10s 限流下
+  //   多打几十次请求没压力
+  //   (popular / trending / detail / configuration 仍是 1 天, 那几个变化慢)
+  static const Duration _searchCacheTtl = Duration(hours: 6);
   static const Duration _cacheTtl = Duration(days: 1);
-  // TMDB free API: 40 req/10s, 1 天缓存命中率应该 90%+, 压力很小
 
   // 内存缓存 (path + params 序列化 -> entry)
   static final Map<String, _CacheEntry> _memoryCache = {};
@@ -318,6 +323,8 @@ class TmdbService {
   }
 
   /// v2.0.36: 搜剧 (剧名 + 年份可选)
+  /// v2.0.76: 用 6 小时缓存 (_searchCacheTtl), 其他端点还是 1 天.
+  ///   避免新片 (刚上 TMDB 几小时) 搜不到的情况.
   static Future<TmdbPagedResult<TmdbItem>> search({
     required TmdbMediaType type,
     required String query,
@@ -337,6 +344,7 @@ class TmdbService {
       '/search/${type.value}',
       params,
       useCache: true,
+      cacheTtl: _searchCacheTtl,
     );
     return TmdbPagedResult.fromJson(
         json as Map<String, dynamic>, TmdbItem.fromJson);
@@ -368,6 +376,20 @@ class TmdbService {
     _memoryCache.clear();
     final prefs = await SharedPreferences.getInstance();
     final keys = prefs.getKeys().where((k) => k.startsWith('tmdb_cache_'));
+    for (final k in keys) {
+      await prefs.remove(k);
+    }
+  }
+
+  /// v2.0.76: 只清搜索缓存 (popular/trending/detail/configuration 保留).
+  /// 详情页 fallback 上"重新搜索"按钮用, 避免清掉热门榜单等长缓存.
+  static Future<void> clearSearchCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    // 内存: 砍掉 path 含 /search/ 的 entries
+    _memoryCache.removeWhere((key, _) => key.contains('_search_'));
+    // prefs: 共享同一套 _cacheKey 命名 (tmdb_cache_/search/xxx), 同样靠路径区分
+    final keys = prefs.getKeys().where((k) =>
+        k.startsWith('tmdb_cache_') && k.contains('_search_'));
     for (final k in keys) {
       await prefs.remove(k);
     }
@@ -405,6 +427,8 @@ class TmdbService {
     String path,
     Map<String, String> params, {
     bool useCache = true,
+    // v2.0.76: 搜索类 (search) 用 6 小时, 其他用 1 天
+    Duration? cacheTtl,
   }) async {
     final key = await UserDataService.getTmdbApiKey();
     if (key == null || key.isEmpty) {
@@ -419,14 +443,15 @@ class TmdbService {
         .map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}')
         .join('&');
     final cacheKey = useCache ? _cacheKey(path, qs) : null;
+    // v2.0.76: 调用方传 cacheTtl 用调用方的, 否则默认 1 天
+    final ttl = cacheTtl ?? _cacheTtl;
     // ignore: avoid_print
-    VideoProxyLog.append('[TMDB] 准备 GET $path (cacheKey=$cacheKey)');
+    VideoProxyLog.append('[TMDB] 准备 GET $path (cacheKey=$cacheKey, ttl=$ttl)');
 
     // 1) 内存缓存
     if (cacheKey != null) {
       final mem = _memoryCache[cacheKey];
-      if (mem != null &&
-          DateTime.now().difference(mem.savedAt) < _cacheTtl) {
+      if (mem != null && DateTime.now().difference(mem.savedAt) < ttl) {
         final ageMin = DateTime.now().difference(mem.savedAt).inMinutes;
         // ignore: avoid_print
         VideoProxyLog.append('[TMDB] 命中内存缓存 (${ageMin} 分钟前存)');
@@ -435,7 +460,7 @@ class TmdbService {
     }
     // 2) SharedPreferences 缓存
     if (cacheKey != null) {
-      final cached = await _readFromPrefs(cacheKey);
+      final cached = await _readFromPrefs(cacheKey, ttl: ttl);
       if (cached != null) {
         // ignore: avoid_print
         VideoProxyLog.append('[TMDB] 命中 SharedPreferences 缓存');
@@ -679,14 +704,14 @@ class TmdbService {
   }
 
   /// v2.0.36: 从 SharedPreferences 读缓存
-  static Future<dynamic> _readFromPrefs(String key) async {
+  static Future<dynamic> _readFromPrefs(String key, {Duration ttl = _cacheTtl}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(key);
       if (raw == null) return null;
       final map = jsonDecode(raw) as Map<String, dynamic>;
       final ts = (map['ts'] as num?)?.toInt() ?? 0;
-      if (DateTime.now().millisecondsSinceEpoch - ts > _cacheTtl.inMilliseconds) {
+      if (DateTime.now().millisecondsSinceEpoch - ts > ttl.inMilliseconds) {
         // 过期
         await prefs.remove(key);
         return null;

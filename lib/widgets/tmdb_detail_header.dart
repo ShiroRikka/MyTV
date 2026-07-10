@@ -114,8 +114,8 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
     return false;
   }
 
-  // v2.0.47: 校验 TMDB search 返回的第一条结果跟用户搜的标题是否"对得上".
-  //
+  /// v2.0.47: 校验 TMDB search 返回的第一条结果跟用户搜的标题是否"对得上".
+  ///
   // 背景: TMDB 搜不到完全匹配时, 会返回"最接近"的结果 (e.g. 搜「山村医馆」
   // 短剧, TMDB 没收录, 返回第一条「千香」). 之前 v2.0.46 直接用 first
   // 当作正确结果, 大头部显示「千香」海报/标题, 跟实际视频完全不符.
@@ -226,7 +226,9 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
     return sb.toString();
   }
 
-  Future<void> _loadTmdb() async {
+  /// v2.0.76: 加 [forceRefresh] 参数 — fallback 上"重新搜索"按钮用,
+  ///   清掉 6 小时内的搜索缓存, 重新发请求 (避免缓存里"0 结果"或"错的标题"卡住).
+  Future<void> _loadTmdb({bool forceRefresh = false}) async {
     if (!UserDataService.isTmdbApiKeyConfigured() || widget.title.isEmpty) {
       if (!mounted) return;
       setState(() {
@@ -243,6 +245,11 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
         _hasError = false;
       });
       return;
+    }
+    if (forceRefresh) {
+      // v2.0.76: 只清搜索缓存 (popular/trending/detail/configuration 保留)
+      VideoProxyLog.append('[TMDBHeader] 强制刷新: 清掉 /search/* 缓存');
+      await TmdbService.clearSearchCache();
     }
     if (!mounted) return;
     setState(() {
@@ -707,6 +714,12 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
                     ],
                   ),
                 ],
+                // v2.0.76: 重新搜索按钮 — 只在配了 TMDB key + 不是短剧 + 不是 "no key" fallback 时显示.
+                //   短剧 / 没配 key 这两种 fallback 上加按钮没意义, 会让 UI 看起来像"可以重试"但点了也没用.
+                if (UserDataService.isTmdbApiKeyConfigured() && !_isShortDrama) ...[
+                  const SizedBox(height: 10),
+                  _buildRetryButton(isDark),
+                ],
               ],
             ),
           ),
@@ -736,6 +749,46 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
               ? Colors.white.withOpacity(0.4)
               : Colors.black.withOpacity(0.35),
           size: 48,
+        ),
+      ),
+    );
+  }
+
+  /// v2.0.76: "重新搜索"按钮 — fallback 上 TMDB 没找到时给用户一条手动重试的路.
+  ///   场景: 缓存里"0 结果"卡住 / 缓存的标题不匹配 (e.g. "野狗骨头" → "千香" 缓存了 4 分钟前).
+  ///   点了之后清掉 6 小时内的 /search/* 缓存, 重新发请求, 重新走搜索+标题匹配.
+  ///   不会清 popular / trending / detail / configuration 那些长缓存.
+  Widget _buildRetryButton(bool isDark) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: _isLoading ? null : () => _loadTmdb(forceRefresh: true),
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _isLoading ? Icons.hourglass_empty : Icons.refresh,
+                size: 13,
+                color: _isLoading
+                    ? (isDark ? Colors.white38 : Colors.black38)
+                    : const Color(0xFF60a5fa),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                _isLoading ? '搜索中' : '重新搜索',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: _isLoading
+                      ? (isDark ? Colors.white38 : Colors.black38)
+                      : const Color(0xFF60a5fa),
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
