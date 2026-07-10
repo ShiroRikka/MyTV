@@ -327,14 +327,13 @@ class CfOptimizer {
       // 1. TCP 连 IP:443
       rawSocket = await Socket.connect(ip, 443, timeout: timeout);
       // 2. TLS 升级, SNI=worker 域名
-      //    v2.0.83b: 去掉 onBadCertificate 参数 (dart 不同版本签名 1 vs 3 参数
-      //    不兼容). CF edge 看到 SNI=worker 域名时返 worker 域名的证书 (CF
-      //    自动发 Let's Encrypt), 移动端 system trust 信任, 不需要跳过.
+      //    v2.0.83d: SecureSocket.secure 没有 named `timeout` 参数
+      //      (之前 v2.0.83c 编译错 No named parameter with the name 'timeout')
+      //      超时用外层 .timeout() 包裹, SSL 阶段也算进 timeout
       final secureSocket = await SecureSocket.secure(
         rawSocket,
         host: host,
-        timeout: timeout,
-      );
+      ).timeout(timeout);
       // 3. 写 HTTP/1.1 GET
       final request = 'GET /speed?size=$testMB HTTP/1.1\r\n'
           'Host: $host\r\n'
@@ -347,10 +346,11 @@ class CfOptimizer {
       // 4. 收完整 response (Connection: close 让 server 关连接 = stream 结束)
       //    v2.0.83c: 改用 await for + 字节累加, 不在 listen 闭包内解析
       //      headers (避免闭包变量捕获 / StreamSubscription 类型问题)
+      //    v2.0.83d: 收 response 也包 .timeout, 万一 server 不关连接会卡死
       int firstByteMs = -1;
       int bytes = 0;
       final buf = <int>[];
-      await for (final Uint8List chunk in secureSocket) {
+      await for (final Uint8List chunk in secureSocket.timeout(timeout)) {
         if (firstByteMs < 0) {
           firstByteMs = sw.elapsedMilliseconds;
         }
