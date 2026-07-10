@@ -143,32 +143,77 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
       if (c.contains(q) || q.contains(c)) return true;
     }
 
-    // 2) 2-gram 相似度
+    // v2.0.58: 2-gram 前清洗 query + candidate, 去掉标点/空格/括号年份.
+    //   之前 v2.0.52 降阈值到 0.3 仍不够, 因为 query "你好，李焕英 (2021)"
+    //   的 2-grams 里有大量 "好，" "，李" " (2" "20" "01" "21" "1)" 等标点/数字
+    //   gram, 在纯中文 candidate "你好李焕英" 里全找不到, 9 grams 只命中 3 个
+    //   = 0.33 勉强过 0.3, 再短一点的就挂了. 清洗后 "你好李焕英2021" vs
+    //   "你好李焕英": substring 兜住 (q.contains(c)); 即使 substring 没兜住,
+    //   2-gram 也只算有效字符, 命中率不被标点稀释.
+    final qClean = _normalizeForGram(q);
+    if (qClean.isEmpty) return false;
+    final cCleans = candidates.map(_normalizeForGram).where((s) => s.isNotEmpty).toList();
+    if (cCleans.isEmpty) return false;
+
+    // substring 再查一遍清洗后的 (去掉标点后可能命中)
+    for (final c in cCleans) {
+      if (c.contains(qClean) || qClean.contains(c)) return true;
+    }
+
+    // 2) 2-gram 相似度 (基于清洗后的字符串)
     int qGrams;
-    if (q.length <= 1) {
+    if (qClean.length <= 1) {
       qGrams = 1;
     } else {
-      qGrams = q.length - 1;
+      qGrams = qClean.length - 1;
     }
     if (qGrams <= 0) return false;
 
-    for (final c in candidates) {
+    for (final c in cCleans) {
       if (c.length < 2) continue;
       int hit = 0;
-      for (var i = 0; i < q.length - 1; i++) {
-        final g = q.substring(i, i + 2);
+      for (var i = 0; i < qClean.length - 1; i++) {
+        final g = qClean.substring(i, i + 2);
         if (c.contains(g)) hit++;
       }
-      // v2.0.52: 阈值 0.5 → 0.3. 0.5 太严, 比如:
-      //   - query "你好，李焕英" (含中文标点) → 2-grams 里有 "好，" 等, 在 candidate
-      //     "你好李焕英" (没标点) 里找不到, 命中率会被拉低
-      //   - query "你好李焕英 (2021)" → 9 grams, 4 个中文 + 5 个带数字/括号, 4/9=0.44 < 0.5
-      //   - query "复仇者联盟4" → "盟4" 这个 2-gram 在 candidate "复仇者联盟4：终局之战"
-      //     里能命中, 但短 query (1-2 字) 几乎稳过
-      // 0.3 仍然能拒掉 v2.0.47 的「搜"山村医馆"返"千香"」 (命中率 0)
-      if (hit / qGrams >= 0.3) return true;
+      // v2.0.52: 阈值 0.5 → 0.3.
+      // v2.0.58: 清洗后阈值回到 0.4 (清洗掉了标点稀释, 0.4 更准, 仍能拒掉
+      //   「搜"山村医馆"返"千香"」命中率 0)
+      if (hit / qGrams >= 0.4) return true;
     }
     return false;
+  }
+
+  /// v2.0.58: 清洗字符串用于 2-gram 匹配.
+  /// 去掉: 空白 + 全/半角标点 + 括号及其内容 (年份) + 其他非中文/字母/数字符号.
+  /// 保留: 中文 + 字母 + 数字. 这样 "你好，李焕英 (2021)" → "你好李焕英2021".
+  static String _normalizeForGram(String s) {
+    final sb = StringBuffer();
+    var skipParen = 0;
+    for (final ch in s.runes) {
+      // 跳过括号内容 (年份等): ( [ 【 「 进 skip
+      if (ch == 0x28 || ch == 0x5B || ch == 0x3010 || ch == 0x300C) {
+        skipParen++;
+        continue;
+      }
+      if (ch == 0x29 || ch == 0x5D || ch == 0x3011 || ch == 0x300D) {
+        if (skipParen > 0) skipParen--;
+        continue;
+      }
+      if (skipParen > 0) continue;
+      // 空白
+      if (ch <= 0x20) continue;
+      // ASCII 标点
+      if (ch >= 0x21 && ch <= 0x2F) continue;
+      if (ch >= 0x3A && ch <= 0x40) continue;
+      if (ch >= 0x5B && ch <= 0x60) continue;
+      if (ch >= 0x7B && ch <= 0x7E) continue;
+      // 中文标点 (常用区间)
+      if (ch >= 0x3000 && ch <= 0x303F) continue; // CJK Symbols and Punctuation
+      if (ch >= 0xFF00 && ch <= 0xFFEF) continue; // Halfwidth and Fullwidth Forms 标点
+      sb.writeCharCode(ch);
+    }
+    return sb.toString();
   }
 
   Future<void> _loadTmdb() async {
@@ -197,16 +242,35 @@ class _TmdbDetailHeaderState extends State<TmdbDetailHeader> {
     try {
       // 1) 拿 config (图片 CDN base) + 搜剧 (拿 ID)
       final cfgFuture = TmdbService.getConfiguration();
-      final searchFuture = TmdbService.search(
-        type: _mediaType,
-        query: widget.title,
-        year: _yearInt,
-        page: 1,
-      );
+      // v2.0.58: 搜索兜底链 — 4 步, 任一步搜到就停. 之前只搜 1 次 (带 year 的
+      //   当前 mediaType), 源给的 year / totalEpisodes 不准时直接搜空 → 不刮削:
+      //   - year 不准: 源给采集年, TMDB 是首播年, 差 1 年 → 带 year 搜空
+      //   - kind 误判: totalEpisodes 给 0/1, 实际多集剧被当 movie 搜, TMDB movie 搜不到
+      //   兜底链: 当前类型+year → 当前类型去year → 换类型去year → fallback
+      Future<TmdbPagedResult<TmdbItem>> doSearch(TmdbMediaType t, int? y) =>
+          TmdbService.search(type: t, query: widget.title, year: y, page: 1);
+
+      var results = await doSearch(_mediaType, _yearInt);
       final cfg = await cfgFuture;
-      final results = await searchFuture;
       if (!mounted) return;
+      if (results.results.isEmpty && _yearInt != null) {
+        // ignore: avoid_print
+        print('[TMDBDetailHeader] 带 year=$_yearInt 搜 "${widget.title}" (${_mediaType.value}) 空, 去 year 重搜');
+        results = await doSearch(_mediaType, null);
+        if (!mounted) return;
+      }
       if (results.results.isEmpty) {
+        final other = _mediaType == TmdbMediaType.movie
+            ? TmdbMediaType.tv
+            : TmdbMediaType.movie;
+        // ignore: avoid_print
+        print('[TMDBDetailHeader] ${_mediaType.value} 搜 "${widget.title}" 空, 换 ${other.value} 重搜 (kind 可能误判)');
+        results = await doSearch(other, null);
+        if (!mounted) return;
+      }
+      if (results.results.isEmpty) {
+        // ignore: avoid_print
+        print('[TMDBDetailHeader] 搜不到 "${widget.title}" (movie+tv 都试过), 走默认海报');
         setState(() {
           _isLoading = false;
           _hasError = false; // 搜不到不算 error, 走 fallback
