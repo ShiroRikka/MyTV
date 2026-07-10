@@ -22,6 +22,7 @@ import 'package:luna_tv/models/video_info.dart';
 import 'package:luna_tv/services/theme_service.dart';
 import 'package:luna_tv/services/cf_optimizer.dart';
 import 'package:luna_tv/utils/image_url.dart';
+import 'package:luna_tv/widgets/douban_detail_header.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -2342,10 +2343,27 @@ class _PlayerScreenState extends State<PlayerScreen>
               children: [
                 // v2.0.38: 配了 TMDB key → 大头部 (TMDB backdrop + 海报 + 简介),
                 //            没配 → 原 110x150 小海报 + 标题/年份
-                // v2.0.77: 删 TMDB, 统一走 _buildPosterHeader.
-                //   登录豆瓣后, 详情页用的豆瓣 cover URL 会自动升到
-                //   l_ratio_poster (高清), 见 image_url.dart → getImageUrl.
-                _buildPosterHeader(isDark),
+                // v2.0.78: 登录豆瓣 → 大头部 (DoubanDetailHeader)
+                //   - 手机: 2:3 竖版海报当背景 + 渐变压暗 + 底部标题
+                //   - 平板: 21:9 横版 + 左侧 150x225 大竖海报 + 右侧标题
+                // v2.0.77 (之前): 走 _buildPosterHeader (110x150 小海报)
+                //   只升了图片质量, 没大头部布局. 用户反馈"豆瓣大海报在
+                //   哪和 tmdb 一样啊" → 加这个.
+                //   海报 URL 通过 getImageUrl 自动升 l_ratio_poster
+                //   (登录态, 见 image_url.dart).
+                // 没登录 = 走 _buildPosterHeader (现有 110x150 小海报,
+                //   行为完全不变, 跟用户要求一致).
+                if (UserDataService.isDoubanLoggedIn() &&
+                    widget.videoInfo.cover.isNotEmpty)
+                  DoubanDetailHeader(
+                    title: widget.videoInfo.title,
+                    year: widget.videoInfo.year,
+                    cover: widget.videoInfo.cover,
+                    source: widget.videoInfo.source,
+                    sourceName: widget.videoInfo.sourceName,
+                  )
+                else
+                  _buildPosterHeader(isDark),
                 // 集数 (放在源上面,LunaTV Web 风格)
                 _buildEpisodeSection(isDark),
                 // 源 + 测速
