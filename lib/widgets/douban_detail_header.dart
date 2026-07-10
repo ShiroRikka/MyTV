@@ -1,26 +1,22 @@
-// v2.0.78: 豆瓣大头部 — 给 player_screen「选源播放」详情页用
+// v2.0.79: 豆瓣大头部 — 给 player_screen「选源播放」详情页用
 //
-// 背景 (v2.0.77 → v2.0.78 演化):
+// 演化:
 //   v2.0.77: 删了 TMDB, 只把豆瓣 cover URL 升到 l_ratio_poster, 详情页
 //            还是走 _buildPosterHeader (110x150 小海报布局). 用户反馈
 //            "豆瓣大海报在哪和 tmdb 一样啊" — 期望像 TMDB 那种大头部
-//            视觉 (大背景 + 大海报 + 标题/年份/简介).
-//   v2.0.78: 加这个 DoubanDetailHeader, 沿用 v2.0.43 TMDB hero 的
-//            布局思路 (rounded 容器 + 大背景 + 前景 150x225 海报 +
-//            右侧文字), 但去掉 TMDB 依赖:
-//              - **手机 (< 600)**: 2:3 竖版海报整张当背景, 渐变
-//                压暗 (top 0.2 → bottom 0.85 black), 标题/年份/源
-//                浮在底部. 海报本身就是主体, 没有前景"大竖海报"
-//                元素 (省得跟背景重复).
-//              - **平板 (>= 600)**: 21:9 横版, 左侧 150x225 大竖海报
-//                (前景主体) + 右侧渐变背景 + 标题/年份/源.
-//              - **共用**: 数据源还是 widget.videoInfo (标题/年份/
-//                sourceName/cover), 不发额外 API 请求 — 豆瓣没公开
-//                API 能拿 overview/集数, 之前 TMDB 那部分在 v2.0.77
-//                删了, 没必要再为豆瓣接一个.
-//              - **登录豆瓣后** (cookie 有效) → isDoubanLoggedIn() = true
-//                → 走这个大头部; **没登录** → 走回 _buildPosterHeader
-//                (110x150 小海报, 行为完全不变).
+//            视觉 (大背景 + 大海报 + 标题/年份).
+//   v2.0.78: 加 DoubanDetailHeader, 沿用 v2.0.43 TMDB hero 思路:
+//              - 手机: 2:3 整张海报当背景 + 渐变 + 底部标题
+//              - 平板: 21:9 横版 + 前景 150x225 大竖海报 + 右侧标题
+//            用户反馈"手机版那个大海报太丑了和之前 tmdb 风格一样吧" —
+//            2:3 整张海报 + 底部标题的布局跟 TMDB hero 风格不一致.
+//   v2.0.79: 手机也改成跟 TMDB hero 完全一致:
+//              - 16:9 大背景 (海报 + 渐变)
+//              - 前景左侧 150x225 大竖海报 (主元素, 跟背景同一张图,
+//                memCache 复用) + 右侧标题/年份/源
+//              - 平板: 21:9 (跟 v2.0.51 TMDB hero 一致, 给选集留空间)
+//            整体结构跟 v2.0.43 TMDB hero 一模一样, 只差"没 TMDB API
+//            拿 overview / 评分 / 集数" (豆瓣没公开 API, 没必要接).
 //
 // 数据流 (无网络):
 //   1. widget.videoInfo.cover  → getImageUrl(cover, source) 自动
@@ -102,17 +98,23 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
     );
   }
 
-  /// v2.0.78: 手机 — 2:3 竖版海报整张当背景 + 渐变压暗 + 底部标题
+  /// v2.0.79: 手机 — 16:9 TMDB hero 风格 (跟 v2.0.43 TMDB 完全一致)
   ///
-  /// 海报本身就是主体元素, 没有前景"大竖海报"重复展示.
-  /// 渐变让标题清晰可读, 同时保留海报的视觉冲击.
+  /// v2.0.78 第一版走的是「2:3 整张海报当背景 + 渐变 + 底部标题」,
+  /// 用户反馈「手机版那个大海报太丑了和之前 tmdb 风格一样吧」, 改回
+  /// 跟 v2.0.43 ~ v2.0.76 TMDB 详情大头部完全一致的布局:
+  ///   - 16:9 大背景 (海报 + 渐变)
+  ///   - 前景左侧 150x225 大竖海报 (主元素, 跟背景海报同一张图,
+  ///     用 memCache 复用, 跟 v2.0.43 一致)
+  ///   - 前景右侧: 大标题 + 年份/源
+  /// 平板 21:9 (v2.0.78 沿用): 跟手机结构一样, 比例更宽给选集留空间.
   Widget _buildPhoneLayout(bool isDark) {
     return AspectRatio(
-      aspectRatio: 2 / 3, // 标准海报比例 (跟 l_ratio_poster 一致)
+      aspectRatio: 16 / 9, // v2.0.43 TMDB hero 手机比例
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // 1) 背景: 整张海报 (登录态下, getImageUrl 自动升 l_ratio)
+          // 1) 背景: 整张海报 + 重度渐变 (跟 v2.0.43 TMDB hero 一致)
           FutureBuilder<String>(
             future: getImageUrl(widget.cover, widget.source),
             builder: (context, snapshot) {
@@ -131,34 +133,76 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
                   color: isDark
                       ? const Color(0xFF1F2937)
                       : const Color(0xFFE5E7EB),
-                  child: const Icon(Icons.movie_outlined,
-                      color: Colors.grey, size: 48),
                 ),
               );
             },
           ),
-          // 2) 渐变蒙版: 顶部 0.2 → 底部 0.85 (黑色), 让底部标题清晰
-          //    中间留 0.45 过渡区给海报"主体"留出可见空间
           DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Colors.black.withOpacity(0.20),
-                  Colors.black.withOpacity(0.45),
-                  Colors.black.withOpacity(0.85),
+                  Colors.black.withOpacity(0.35),
+                  Colors.black.withOpacity(0.65),
+                  Colors.black.withOpacity(0.90),
                 ],
-                stops: const [0.0, 0.45, 1.0],
+                stops: const [0.0, 0.55, 1.0],
               ),
             ),
           ),
-          // 3) 底部: 标题 + 年份 + 源
-          Positioned(
-            left: 16,
-            right: 16,
-            bottom: 16,
-            child: _buildMetaColumn(alignEnd: false),
+          // 2) 前景: 左侧 150x225 大竖海报 (主元素) + 右侧标题/年份/源
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 左侧大竖海报 (主元素, 跟 v2.0.43 TMDB hero 一致)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: SizedBox(
+                    width: 150,
+                    height: 225,
+                    child: FutureBuilder<String>(
+                      future: getImageUrl(widget.cover, widget.source),
+                      builder: (context, snapshot) {
+                        final imageUrl = snapshot.data ?? widget.cover;
+                        final headers =
+                            getImageRequestHeaders(imageUrl, widget.source);
+                        return CachedNetworkImage(
+                          imageUrl: imageUrl,
+                          fit: BoxFit.cover,
+                          httpHeaders: headers,
+                          memCacheWidth: (150 *
+                                  MediaQuery.of(context).devicePixelRatio)
+                              .round(),
+                          memCacheHeight: (225 *
+                                  MediaQuery.of(context).devicePixelRatio)
+                              .round(),
+                          placeholder: (c, u) => Container(
+                            color: isDark
+                                ? const Color(0xFF1F2937)
+                                : const Color(0xFFE5E7EB),
+                          ),
+                          errorWidget: (c, u, e) => Container(
+                            color: isDark
+                                ? const Color(0xFF1F2937)
+                                : const Color(0xFFE5E7EB),
+                            child: const Icon(Icons.movie_outlined,
+                                color: Colors.grey, size: 48),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                // 右侧: 标题 + 年份 + 源
+                Expanded(
+                  child: _buildMetaColumn(alignEnd: false),
+                ),
+              ],
+            ),
           ),
         ],
       ),
