@@ -327,11 +327,13 @@ class CfOptimizer {
       // 1. TCP 连 IP:443
       rawSocket = await Socket.connect(ip, 443, timeout: timeout);
       // 2. TLS 升级, SNI=worker 域名
+      //    v2.0.83b: 去掉 onBadCertificate 参数 (dart 不同版本签名 1 vs 3 参数
+      //    不兼容). CF edge 看到 SNI=worker 域名时返 worker 域名的证书 (CF
+      //    自动发 Let's Encrypt), 移动端 system trust 信任, 不需要跳过.
       final secureSocket = await SecureSocket.secure(
         rawSocket,
         host: host,
         timeout: timeout,
-        onBadCertificate: (_) => true, // 跳过证书验证
       );
       // 3. 写 HTTP/1.1 GET
       final request = 'GET /speed?size=$testMB HTTP/1.1\r\n'
@@ -342,105 +344,40 @@ class CfOptimizer {
       secureSocket.write(request);
       await secureSocket.flush();
 
-      // 4. 读 response (status + headers + body), byte 累计
+      // 4. 收完整 response (Connection: close 让 server 关连接 = stream 结束)
+      //    v2.0.83c: 改用 await for + 字节累加, 不在 listen 闭包内解析
+      //      headers (避免闭包变量捕获 / StreamSubscription 类型问题)
       int firstByteMs = -1;
       int bytes = 0;
-      int httpCode = 0;
-      int contentLength = 0;
-      int bodyRead = 0;
-      final headerBuf = <int>[];
-      bool headersDone = false;
-      final completer = Completer<void>();
-      // v2.0.83: SecureSocket 是 Stream<Uint8List>, 不是 Stream<List<int>>
-      StreamSubscription<Uint8List>? sub;
-      sub = secureSocket.listen(
-        (Uint8List chunk) {
-          if (!headersDone) {
-            for (final b in chunk) {
-              headerBuf.add(b);
-            }
-            // 找 \r\n\r\n 分隔 headers / body
-            final sep = List<int>.from([13, 10, 13, 10]);
-            int sepIdx = -1;
-            for (int i = 0; i + 4 <= headerBuf.length; i++) {
-              bool match = true;
-              for (int j = 0; j < 4; j++) {
-                if (headerBuf[i + j] != sep[j]) {
-                  match = false;
-                  break;
-                }
-              }
-              if (match) {
-                sepIdx = i;
-                break;
-              }
-            }
-            if (sepIdx >= 0) {
-              final headerBytes = headerBuf.sublist(0, sepIdx);
-              final headerStr = utf8.decode(headerBytes);
-              // 解析 status line: HTTP/1.1 200 OK
-              final firstLineEnd = headerStr.indexOf('\r\n');
-              if (firstLineEnd > 0) {
-                final statusLine = headerStr.substring(0, firstLineEnd);
-                final m = RegExp(r'HTTP/\S+\s+(\d+)').firstMatch(statusLine);
-                if (m != null) httpCode = int.parse(m.group(1)!);
-              }
-              // 解析 Content-Length
-              final clMatch =
-                  RegExp(r'(?i)content-length:\s*(\d+)').firstMatch(headerStr);
-              if (clMatch != null) {
-                contentLength = int.parse(clMatch.group(1)!);
-              }
-              // headersDone 后剩余的 byte 算 body
-              final bodyStart = sepIdx + 4;
-              if (bodyStart < headerBuf.length) {
-                final bodyBytes = headerBuf.sublist(bodyStart);
-                if (firstByteMs < 0) {
-                  firstByteMs = sw.elapsedMilliseconds;
-                }
-                bytes += bodyBytes.length;
-                bodyRead += bodyBytes.length;
-              }
-              headersDone = true;
-            }
-          } else {
-            if (firstByteMs < 0) {
-              firstByteMs = sw.elapsedMilliseconds;
-            }
-            bytes += chunk.length;
-            bodyRead += chunk.length;
-          }
-          // Content-Length 收够就停
-          if (contentLength > 0 && bodyRead >= contentLength) {
-            if (!completer.isCompleted) completer.complete();
-            sub?.cancel();
-          }
-        },
-        onDone: () {
-          if (!completer.isCompleted) completer.complete();
-        },
-        onError: (e) {
-          if (!completer.isCompleted) completer.complete();
-        },
-        cancelOnError: false,
-      );
-      await completer.future.timeout(timeout);
-      await sub?.cancel();
+      final buf = <int>[];
+      await for (final Uint8List chunk in secureSocket) {
+        if (firstByteMs < 0) {
+          firstByteMs = sw.elapsedMilliseconds;
+        }
+        bytes += chunk.length;
+        buf.addAll(chunk);
+      }
       sw.stop();
-
+      // 5. 解析 response
+      final responseStr = utf8.decode(buf, allowMalformed: true);
+      final statusMatch =
+          RegExp(r'HTTP/\S+\s+(\d+)').firstMatch(responseStr);
+      final httpCode =
+          statusMatch != null ? int.parse(statusMatch.group(1)!) : 0;
       if (httpCode == 0) {
-        // 解析不到 status, 算失败
         return (ip: ip, latencyMs: -1, mbPerSec: 0.0, httpCode: -3);
       }
       if (httpCode != 200) {
         return (ip: ip, latencyMs: -1, mbPerSec: 0.0, httpCode: httpCode);
       }
-      if (bytes == 0) {
-        // 200 但 body 为空, 也算失败
+      // 算 body bytes (减去 header 段)
+      final headerEnd = responseStr.indexOf('\r\n\r\n');
+      final bodyBytes = headerEnd < 0 ? bytes : bytes - (headerEnd + 4);
+      if (bodyBytes <= 0) {
         return (ip: ip, latencyMs: -1, mbPerSec: 0.0, httpCode: -3);
       }
       final secs = sw.elapsedMilliseconds / 1000.0;
-      final mb = bytes / 1024.0 / 1024.0;
+      final mb = bodyBytes / 1024.0 / 1024.0;
       final mbps = secs > 0 ? mb / secs : 0.0;
       return (
         ip: ip,
