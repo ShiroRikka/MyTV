@@ -551,9 +551,9 @@ class TmdbService {
     final pathQuery = uri.path.isEmpty
         ? '/${uri.query.isEmpty ? "" : "?${uri.query}"}'
         : (uri.query.isEmpty ? uri.path : '${uri.path}?${uri.query}');
-    final preferIp =
-        await UserDataService.getVideoProxyEnabled().then((_) =>
-            CfOptimizerHttpOverrides.getResolvedManualIp());
+    // v2.0.72: TMDB/Bangumi/图片 走 worker 时始终用优选 IP (只要 IP 填了),
+    //   不看「优选 IP 启用」开关 — 那个开关只控制视频流.
+    final preferIp = CfOptimizerHttpOverrides.getResolvedManualIp();
 
     late SecureSocket upstream;
     try {

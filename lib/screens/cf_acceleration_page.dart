@@ -769,8 +769,8 @@ class _CfAccelerationPageState extends State<CfAccelerationPage> {
                     _buildToggleTile(
                       title: '优选 IP 启用（视频流）',
                       subtitle: _videoProxyEnabled
-                          ? '视频流走优选 IP + Worker（需配优选 IP, 图片/TMDB 不受影响）'
-                          : '视频流走 Worker (系统 DNS), 不走优选 IP',
+                          ? '视频流走优选 IP + Worker（图片/TMDB/Bangumi 始终走优选 IP, 不受此开关控制）'
+                          : '视频流走 Worker (系统 DNS); 图片/TMDB/Bangumi 仍走优选 IP',
                       value: _videoProxyEnabled,
                       onChanged: _setVideoProxyEnabled,
                       icon: LucideIcons.video,
