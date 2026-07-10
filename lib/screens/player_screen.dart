@@ -1836,29 +1836,16 @@ class _PlayerScreenState extends State<PlayerScreen>
       VideoProxyLog.append('[VideoProxy] 3 次都失败, 视频代理不起, libmpv 走原 URL');
       return;
     }
-    // v2.0.20: dart:ffi 直调 libmpv 设 http-proxy (绕开 media_kit API 限制)
-    try {
-      if (!MpvFFI.isAvailable) {
-        VideoProxyLog.append('[VideoProxy] FFI libmpv 不可用: ${MpvFFI.loadError ?? "unknown"}');
-        await proxy.stop();
-        return;
-      }
-      final handle = await _player.handle;
-      final rc = MpvFFI.setPropertyString(handle, 'http-proxy', proxy.proxyUrl);
-      if (rc < 0) {
-        VideoProxyLog.append('[VideoProxy] mpv_set_property_string 返 $rc, 停代理走原 URL');
-        await proxy.stop();
-        return;
-      }
-    } catch (e) {
-      VideoProxyLog.append('[VideoProxy] 设 http-proxy 异常: $e');
-      await proxy.stop();
-      return;
-    }
-    // v2.0.34+: 成功时打印, 让用户 logcat 一搜就能确认代理起来了
-    // v2.0.58: 同步到 VideoProxyLog, 记 manual IP 帮助分析 4s bug
-    VideoProxyLog.append('[VideoProxy] 启用成功: ${proxy.proxyUrl} '
-        'manualIp=$manualIp (libmpv --http-proxy 已设, .ts 段都走本地代理 → 优选 IP)');
+    // v2.0.65: 不再设 libmpv --http-proxy!
+    //   之前设 --http-proxy 让 libmpv 走 CONNECT 隧道, 但 libmpv 的 CONNECT
+    //   实现有 bug (ffmpeg 通过同一代理能播, libmpv 不能 → "Failed to
+    //   recognize file format"). 现在 v2.0.65 改成本地 HTTP 反向代理:
+    //   播放 URL 改成 http://127.0.0.1:PORT/m3u8?url=..., 代理自己 fetch
+    //   worker 返回. libmpv 直接 HTTP 连本地代理, 不走 CONNECT 隧道.
+    //   代理服务器还是要启动 (VideoProxyServer._handleLocalHttp 处理).
+    VideoProxyLog.append('[VideoProxy] 启用成功 (v2.0.65 本地 HTTP 代理): '
+        'http://127.0.0.1:${proxy.port} '
+        'manualIp=$manualIp (播放 URL 走本地代理 → HttpClient 走优选 IP → worker)');
     _videoProxy = proxy;
     // v2.0.34: 通知顶部「加速状态」指示器重算 + 启动下载速度采样
     setState(() {
@@ -2091,36 +2078,31 @@ class _PlayerScreenState extends State<PlayerScreen>
       _episodesPageController.jumpToPage(newPage);
     }
 
-    // v2.0.28: 视频走 CF Worker 加速
-    //   - m3u8 URL 走 worker /m3u8 端点 → worker 重写 .ts 链接走 worker
-    //   - .ts 段走 worker /?url= → worker 流式转发
-    //   - worker 在 CF edge, CF backbone 到视频源的路由已优化
-    //   - 测试: worker+优选IP 比直连快 16% (189 vs 163 KB/s)
-    //   - 不用 VideoProxyServer (Dart Socket 代理不可靠)
-    //   - libmpv 直接连 worker URL, 走 CF 默认路由
-    //   - 如果 CF Worker 开关关了, buildProxiedUrl 返回原 URL (直连)
-    final playUrl =
-        await UserDataService.buildProxiedUrlAsync(url, forceM3u8: true);
+    // v2.0.65: 先 await _ensureVideoProxy (以前是 unawaited), 拿到代理端口
+    //   再构造播放 URL. 代理起成功 → 播放 URL 走 http://127.0.0.1:PORT/m3u8?url=...
+    //   代理没起 → 播放 URL 走原来的 buildProxiedUrl (https://worker/m3u8?url=...)
+    await _ensureVideoProxy();
+    final proxyOn = _videoProxy?.isRunning == true;
+    final proxyPort = _videoProxy?.port ?? 0;
+
+    // v2.0.65: 代理起成功时, 播放 URL 走本地 HTTP 代理 (不走 CONNECT 隧道).
+    //   代理没起时, 走原来的 buildProxiedUrl (libmpv 直连 worker).
+    final String playUrl;
+    if (proxyOn && proxyPort > 0) {
+      // 播放 URL = http://127.0.0.1:PORT/m3u8?url=原URL
+      // 代理收到 GET /m3u8?url=原URL 后, fetch https://worker/m3u8?url=原URL 返回
+      playUrl = 'http://127.0.0.1:$proxyPort/m3u8?url=${Uri.encodeComponent(url)}';
+    } else {
+      playUrl = await UserDataService.buildProxiedUrlAsync(url, forceM3u8: true);
+    }
 
     // v2.0.34: 保存最终播放 URL 给「加速链路」弹层用
     _currentPlayUrl = playUrl;
 
-    // v2.0.40 修: 把 _ensureVideoProxy 调时机从 _player.open 之后挪到之前
-    //   之前 v2.0.39 假设 _player.open 之后 libmpv 句柄有效, 立刻 setPropertyString http-proxy.
-    //   实际 libmpv 拿到 m3u8 之后, 第一个 .ts 段 fetch 已经 in-flight, http-proxy
-    //   property 改了但 m3u8 主文件不走代理 (走 native libmpv), 第一个 .ts 段 fetch
-    //   **可能**走新代理也可能走老的 (跟 libmpv 内部 cache 有关). 用户报告
-    //   装 v2.0.39 后链路图全绿但 0 B/s, 根因可能是这个.
-    //   修法: 提前到 _player.open 之前, libmpv 整个 open 周期内 http-proxy 一直是
-    //   本地代理, 第一个 m3u8 fetch + 后续所有 .ts 段 fetch 都强制走代理.
-    //   切集时也走这条路径, _ensureVideoProxy 内部 _videoProxy.isRunning 守门不会重起代理.
-    // ignore: unawaited_futures
-    _ensureVideoProxy();
     // v2.0.58: 记录实际播放 URL + 代理状态, 分析 "4s/6s 时长" bug 的关键信号.
     //   原 URL vs playUrl (buildProxiedUrl 之后) 能看出 CF Worker 是否介入;
     //   代理是否起能看出 .ts 段是否走优选 IP.
-    final proxyOn = _videoProxy?.isRunning == true;
-    VideoProxyLog.append('[VideoProxy] _player.open: 代理=${proxyOn ? "ON port=${_videoProxy!.port}" : "OFF"}, '
+    VideoProxyLog.append('[VideoProxy] _player.open: 代理=${proxyOn ? "ON port=$proxyPort" : "OFF"}, '
         '原URL=${_shortenUrl(url)}');
     VideoProxyLog.append('[VideoProxy] _player.open: 播放URL=${_shortenUrl(playUrl)}');
     try {

@@ -35,6 +35,7 @@
 //   不参与 race, 仅在 host IP 全失败时单独拨.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:luna_tv/services/video_proxy_log.dart';
@@ -774,12 +775,147 @@ class VideoProxyServer {
         // ignore: avoid_print
         VideoProxyLog.append('[VideoProxy] CONNECT ${state.target} (从 libmpv 收到 CONNECT 头, 开始拨号)');
         _handleConnect(client, state, onBackendReady, closeAll);
+      } else if (state.target!.startsWith('/')) {
+        // v2.0.65: 本地 HTTP 反向代理模式.
+        //   libmpv 直接请求 http://127.0.0.1:PORT/m3u8?url=... (origin-form),
+        //   代理自己 fetch https://worker/m3u8?url=... 返回内容.
+        //   解决 libmpv 通过 --http-proxy CONNECT 隧道播放 HTTPS 失败的问题
+        //   (libmpv 的 CONNECT 实现有 bug, ffmpeg 通过同一代理能播).
+        // ignore: avoid_print
+        VideoProxyLog.append('[VideoProxy] LOCAL ${state.method} ${state.target}');
+        _handleLocalHttp(client, state, closeAll);
       } else {
         // v2.0.40 诊断日志
         // ignore: avoid_print
         VideoProxyLog.append('[VideoProxy] HTTP ${state.method} ${state.target}');
         _handleHttp(client, state, onBackendReady, closeAll);
       }
+    }
+  }
+
+  /// v2.0.65: 本地 HTTP 反向代理.
+  ///
+  /// libmpv 直接请求 `http://127.0.0.1:PORT/m3u8?url=XXX` (origin-form,
+  /// target 以 / 开头). 代理自己用 HttpClient fetch
+  /// `https://worker_domain/m3u8?url=XXX`, 把响应原样返回给 libmpv.
+  ///
+  /// 优势 (vs CONNECT 隧道):
+  ///   - libmpv 不需要建 TLS 隧道, 避免 libmpv CONNECT bug
+  ///   - HttpClient 走 CfOptimizerHttpOverrides, 自动用优选 IP 连 worker
+  ///   - 响应是明文 HTTP, libmpv 直接解析, 不需要解密
+  ///
+  /// 劣势:
+  ///   - m3u8 里的 .ts 链接是 https://worker/?url=..., libmpv 请求 .ts 时
+  ///     会走 CONNECT (HTTPS), 又回到 libmpv 的 bug. 但 .ts 链接可以重写成
+  ///     http://127.0.0.1:PORT/?url=... 让 libmpv 走本地代理.
+  ///   → 代理在返回 m3u8 前, 把里面的 https://worker/ 链接全改成
+  ///     http://127.0.0.1:PORT/
+  Future<void> _handleLocalHttp(
+    Socket client,
+    _ProxyState state,
+    void Function() closeAll,
+  ) async {
+    final target = state.target!; // e.g. /m3u8?url=XXX or /?url=XXX
+    final workerDomain = await UserDataService.getCfWorkerDomain();
+    if (workerDomain.isEmpty) {
+      _sendHttpError(client, 502, 'worker domain not set', closeAll);
+      return;
+    }
+
+    final upstreamUrl = 'https://$workerDomain$target';
+    // ignore: avoid_print
+    VideoProxyLog.append(
+        '[VideoProxy] LOCAL 代理 fetch: $upstreamUrl');
+
+    try {
+      final httpClient = HttpClient();
+      // 连接超时 10s, 响应超时 30s (.ts 段可能几 MB)
+      httpClient.connectionTimeout = const Duration(seconds: 10);
+
+      final req = await httpClient.getUrl(Uri.parse(upstreamUrl));
+      // 透传部分请求头 (UA 等, 但不含 host/proxy 相关)
+      final ua = state.headers['user-agent'];
+      if (ua != null && ua.isNotEmpty) {
+        req.headers.set('User-Agent', ua);
+      }
+      final range = state.headers['range'];
+      if (range != null && range.isNotEmpty) {
+        req.headers.set('Range', range);
+      }
+
+      final resp = await req.close().timeout(
+        const Duration(seconds: 30),
+      );
+
+      // 判断 Content-Type — m3u8 需要重写链接, 其他 (.ts / .mp4) 直接流式转发
+      final contentType = resp.headers.value('content-type') ?? '';
+      final isM3u8 = contentType.contains('mpegurl') ||
+          contentType.contains('m3u8') ||
+          target.contains('/m3u8');
+
+      if (isM3u8) {
+        // m3u8: 完整读取, 重写 https://worker/ → http://127.0.0.1:PORT/
+        final body = await resp.transform(const Utf8Decoder()).join();
+        final port = _port;
+        final localBase = 'http://127.0.0.1:$port';
+        final workerBase = 'https://$workerDomain';
+        final rewritten = body.replaceAll(workerBase, localBase);
+
+        final bodyBytes = utf8.encode(rewritten);
+        final headerBuf = StringBuffer();
+        headerBuf.write('HTTP/1.1 ${resp.statusCode} ${resp.reasonPhrase}\r\n');
+        headerBuf.write('Content-Type: $contentType\r\n');
+        headerBuf.write('Content-Length: ${bodyBytes.length}\r\n');
+        headerBuf.write('Access-Control-Allow-Origin: *\r\n');
+        headerBuf.write('Connection: close\r\n');
+        headerBuf.write('\r\n');
+        client.add(utf8.encode(headerBuf.toString()));
+        client.add(bodyBytes);
+        await client.flush();
+        VideoProxyLog.append(
+            '[VideoProxy] LOCAL m3u8 重写完成: ${body.length}B → ${rewritten.length}B (worker→local)');
+      } else {
+        // 非 m3u8 (.ts / .mp4 等): 流式转发, 不重写
+        final headerBuf = StringBuffer();
+        headerBuf.write('HTTP/1.1 ${resp.statusCode} ${resp.reasonPhrase}\r\n');
+        final contentLength = resp.headers.value('content-length');
+        if (contentLength != null) {
+          headerBuf.write('Content-Length: $contentLength\r\n');
+        } else {
+          headerBuf.write('Transfer-Encoding: chunked\r\n');
+        }
+        final ct = resp.headers.value('content-type');
+        if (ct != null) headerBuf.write('Content-Type: $ct\r\n');
+        final ce = resp.headers.value('content-range');
+        if (ce != null) headerBuf.write('Content-Range: $ce\r\n');
+        headerBuf.write('Access-Control-Allow-Origin: *\r\n');
+        headerBuf.write('Connection: close\r\n');
+        headerBuf.write('\r\n');
+        client.add(utf8.encode(headerBuf.toString()));
+        await client.flush();
+
+        // 流式转发 body
+        int totalBytes = 0;
+        await for (final chunk in resp) {
+          totalBytes += chunk.length;
+          client.add(chunk);
+          await client.flush();
+        }
+        VideoProxyLog.append(
+            '[VideoProxy] LOCAL 流式转发完成: $totalBytes bytes');
+      }
+
+      httpClient.close();
+      // 关闭 client (发 FIN, libmpv 读完就结束)
+      try {
+        await client.flush();
+        client.close();
+      } catch (_) {}
+      // 不调 closeAll — client.onDone 会触发
+    } catch (e) {
+      // ignore: avoid_print
+      VideoProxyLog.append('[VideoProxy] LOCAL 代理 fetch 失败: $e');
+      _sendHttpError(client, 502, 'Local proxy error: $e', closeAll);
     }
   }
 
