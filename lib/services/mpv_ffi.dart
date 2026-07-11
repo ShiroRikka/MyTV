@@ -112,17 +112,14 @@ class MpvFFI {
   static _MpvGetPropertyDoubleD? _getPropertyDouble;
   // v2.0.87+: 通用 mpv_get_property (接受 format 枚举, 拿任意 type)
   static _MpvGetPropertyD? _getProperty;
-  // v2.0.87+: 加载状态 / symbol 状态 / 最后一次 property 读结果 (供 UI 诊断用)
-  static String _loadStatus = '未加载';
-  static String _lastError = '';
-  static String _lastPropertyRead = '(从未读)';
+  // v2.0.91: 删诊断字段 (_loadStatus / _lastError / _lastPropertyRead), 用户要求删 log UI
   static String? _loadError;
 
   /// 加载 libmpv + 找所有 symbol. 多次调用只会真加载一次.
   ///
-  /// v2.0.87: 加诊断字段 (_loadStatus / _lastError / _lastPropertyRead) 让
-  /// UI 能展示. 之前 v2.0.20 ~ v2.0.86 整个 MpvFFI 没人调过, 加载失败没
-  /// 任何信号, _downloadSpeedBps 永远 0, UI 永远 "0 B/s".
+  /// v2.0.91: 删所有诊断字段写入, 失败时仅写 _loadError (v2.0.20 原有). 逐个
+  /// lookup 软失败 (一个 symbol 找不到不影响其他), 之前 v2.0.86 一个 lookup
+  /// 失败导致整个 _ensureLoaded 抛错, 全部 symbol null, isAvailable 返 false.
   static void _ensureLoaded() {
     if (_lib != null || _loadError != null) return;
     try {
@@ -138,80 +135,52 @@ class MpvFFI {
         _lib = DynamicLibrary.process();
       } else {
         _loadError = 'libmpv not supported on ${Platform.operatingSystem}';
-        _loadStatus = '❌ $_loadError';
         return;
       }
-      // v2.0.87: 逐个 lookup, 失败不抛错 (走诊断), 不影响其他 symbol
-      //   之前 v2.0.86 一个 lookup 失败导致整个 _ensureLoaded 抛错, 全部 symbol
-      //   null, isAvailable 返 false, _startSpeedSampling 早退, 永远 0 B/s.
+      // 逐个 lookup, 失败不抛错 (软失败), 不影响其他 symbol
       try {
         final sym = _lib!.lookup<NativeFunction<_MpvSetPropertyStringC>>(
             'mpv_set_property_string');
         _setPropertyString = sym.asFunction<_MpvSetPropertyStringD>();
-      } catch (e) {
-        _lastError = 'mpv_set_property_string lookup 失败: $e';
-      }
+      } catch (_) {}
       try {
         final sym2 = _lib!.lookup<NativeFunction<_MpvGetPropertyStringC>>(
             'mpv_get_property_string');
         _getPropertyString = sym2.asFunction<_MpvGetPropertyStringD>();
-      } catch (e) {
-        _lastError += '\nmpv_get_property_string lookup 失败: $e';
-      }
+      } catch (_) {}
       try {
         final sym3 = _lib!.lookup<NativeFunction<_MpvGetPropertyI64C>>(
             'mpv_get_property_i64');
         _getPropertyI64 = sym3.asFunction<_MpvGetPropertyI64D>();
-      } catch (e) {
-        _lastError += '\nmpv_get_property_i64 lookup 失败: $e';
-      }
+      } catch (_) {}
       try {
         final sym4 = _lib!.lookup<NativeFunction<_MpvGetPropertyDoubleC>>(
             'mpv_get_property_double');
         _getPropertyDouble = sym4.asFunction<_MpvGetPropertyDoubleD>();
-      } catch (e) {
-        _lastError += '\nmpv_get_property_double lookup 失败: $e';
-      }
-      // v2.0.87: 通用 mpv_get_property API (libmpv 文档推荐, 拿任意 type)
+      } catch (_) {}
+      // 通用 mpv_get_property API (libmpv 文档推荐, 拿任意 type)
       try {
         final sym5 = _lib!.lookup<NativeFunction<_MpvGetPropertyC>>(
             'mpv_get_property');
         _getProperty = sym5.asFunction<_MpvGetPropertyD>();
-      } catch (e) {
-        _lastError += '\nmpv_get_property lookup 失败: $e';
-      }
-      // v2.0.87: 汇总加载状态
-      final loaded = <String>[];
-      if (_setPropertyString != null) loaded.add('set');
-      if (_getPropertyString != null) loaded.add('getString');
-      if (_getPropertyI64 != null) loaded.add('getI64');
-      if (_getPropertyDouble != null) loaded.add('getDouble');
-      if (_getProperty != null) loaded.add('getProperty');
-      _loadStatus = '✅ lib 加载成功, symbol: [${loaded.join(', ')}]';
+      } catch (_) {}
     } catch (e) {
       _loadError = 'Failed to load libmpv: $e';
-      _loadStatus = '❌ $_loadError';
     }
   }
 
   /// libmpv 是否成功加载. 失败时 [loadError] 有原因.
   ///
-  /// v2.0.87: 改宽松 — 之前要求 setPropertyString != null 才算 available,
-  /// v2.0.86 用户反馈下载速度还是 0, 怀疑是 setPropertyString 没找到导致
-  /// isAvailable=false, 整个采样早退. 现在只要通用 getProperty 找到就算
-  /// available (demuxer-bytes 走它读, 一定够用).
+  /// 改宽松 — 之前要求 setPropertyString != null 才算 available, v2.0.86
+  /// 用户反馈下载速度还是 0, 怀疑是 setPropertyString 没找到导致整个采样
+  /// 早退. 现在只要通用 getProperty 找到就算 available (demuxer-bytes 走它
+  /// 读, 一定够用).
   static bool get isAvailable {
     _ensureLoaded();
     return _getProperty != null;
   }
 
   static String? get loadError => _loadError;
-
-  /// v2.0.87: 诊断信息 (UI 展示用)
-  static String get debugStatus {
-    _ensureLoaded();
-    return '$_loadStatus\n错误: ${_lastError.isEmpty ? "(无)" : _lastError}\n最近读: $_lastPropertyRead';
-  }
 
   /// 设置 mpv 字符串属性. 等价于 mpv CLI 的 `--<name>=<value>`.
   ///
@@ -263,9 +232,9 @@ class MpvFFI {
   /// DOUBLE=5 / STRING=3), 走 void* union buffer. 通用 API 一定是 libmpv
   /// 第一个实现的, 不会找不到.
   ///
-  /// 失败时:
+  ///   失败时:
   ///   - lib 没加载 / handle=0: 返 null
-  ///   - rc != 0: 返 null + 写 _lastError + 写 _lastPropertyRead
+  ///   - rc != 0: 返 null
   ///
   /// 成功时:
   ///   - INT64: 返 int64 数字
@@ -276,11 +245,9 @@ class MpvFFI {
     _ensureLoaded();
     final fn = _getProperty;
     if (fn == null) {
-      _lastPropertyRead = '❌ $name: getProperty symbol 未加载';
       return null;
     }
     if (handle == 0) {
-      _lastPropertyRead = '❌ $name: handle=0';
       return null;
     }
     final namePtr = name.toNativeUtf8();
@@ -290,12 +257,9 @@ class MpvFFI {
         try {
           final rc = fn(Pointer<Void>.fromAddress(handle), namePtr, format, outPtr.cast<Void>());
           if (rc != 0) {
-            _lastError = 'mpv_get_property($name, INT64) 返 rc=$rc';
-            _lastPropertyRead = '❌ $name: rc=$rc';
             return null;
           }
           final v = outPtr.value;
-          _lastPropertyRead = '✅ $name: $v (INT64)';
           return v;
         } finally {
           calloc.free(outPtr);
@@ -305,12 +269,9 @@ class MpvFFI {
         try {
           final rc = fn(Pointer<Void>.fromAddress(handle), namePtr, format, outPtr.cast<Void>());
           if (rc != 0) {
-            _lastError = 'mpv_get_property($name, DOUBLE) 返 rc=$rc';
-            _lastPropertyRead = '❌ $name: rc=$rc';
             return null;
           }
           final v = outPtr.value;
-          _lastPropertyRead = '✅ $name: $v (DOUBLE)';
           return v;
         } finally {
           calloc.free(outPtr);
@@ -322,17 +283,13 @@ class MpvFFI {
         try {
           final rc = fn(Pointer<Void>.fromAddress(handle), namePtr, format, outPtr.cast<Void>());
           if (rc != 0) {
-            _lastError = 'mpv_get_property($name, STRING) 返 rc=$rc';
-            _lastPropertyRead = '❌ $name: rc=$rc';
             return null;
           }
           final charPtr = outPtr.value;
           if (charPtr == nullptr) {
-            _lastPropertyRead = '⚠️ $name: rc=0 但 char*=NULL';
             return null;
           }
           final v = charPtr.toDartString();
-          _lastPropertyRead = '✅ $name: $v (STRING)';
           return v;
         } finally {
           calloc.free(outPtr);
@@ -344,22 +301,16 @@ class MpvFFI {
         try {
           final rc = fn(Pointer<Void>.fromAddress(handle), namePtr, format, outPtr.cast<Void>());
           if (rc != 0) {
-            _lastError = 'mpv_get_property($name, FLAG) 返 rc=$rc';
-            _lastPropertyRead = '❌ $name: rc=$rc';
             return null;
           }
           final v = outPtr.value != 0;
-          _lastPropertyRead = '✅ $name: $v (FLAG)';
           return v;
         } finally {
           calloc.free(outPtr);
         }
       }
-      _lastPropertyRead = '❌ $name: 未知 format=$format';
       return null;
     } catch (e) {
-      _lastError = 'mpv_get_property($name) 抛错: $e';
-      _lastPropertyRead = '❌ $name: 异常 $e';
       return null;
     } finally {
       calloc.free(namePtr);

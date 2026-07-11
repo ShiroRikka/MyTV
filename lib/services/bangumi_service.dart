@@ -8,7 +8,6 @@ import 'package:luna_tv/services/api_service.dart';
 import 'package:luna_tv/services/cf_optimizer.dart' show CfOptimizerHttpOverrides;
 import 'package:luna_tv/services/douban_cache_service.dart';
 import 'package:luna_tv/services/user_data_service.dart';
-import 'package:luna_tv/services/video_proxy_log.dart';
 
 /// Bangumi 数据服务（函数级缓存，一天过期）
 class BangumiService {
@@ -168,8 +167,6 @@ class BangumiService {
       final resp = await _secureSocketGet(Uri.parse(url), headers);
       return http.Response(resp.$3, resp.$1, headers: _mapHeaders(resp.$2));
     } catch (e) {
-      VideoProxyLog.append(
-          '[Bangumi] 请求失败 [viaWorker=$viaWorker] url=${url.length > 120 ? url.substring(0, 120) + "..." : url} err=$e');
       return null;
     }
   }

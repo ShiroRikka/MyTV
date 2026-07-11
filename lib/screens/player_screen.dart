@@ -12,7 +12,6 @@ import 'package:screen_brightness/screen_brightness.dart';
 import 'package:luna_tv/services/api_service.dart';
 import 'package:luna_tv/services/page_cache_service.dart';
 import 'package:luna_tv/services/user_data_service.dart';
-import 'package:luna_tv/services/video_proxy_log.dart';
 import 'package:luna_tv/services/m3u8_service.dart';
 import 'package:luna_tv/services/video_proxy_server.dart';
 import 'package:luna_tv/services/mpv_ffi.dart';
@@ -314,7 +313,6 @@ class _PlayerScreenState extends State<PlayerScreen>
         final isShort = durSec < 30;
         final changed = (wasSec - durSec).abs() > 1;
         if (wasSec == 0 || isShort || changed) {
-          VideoProxyLog.append('[VideoProxy] 时长变化: ${_formatDuration(wasDur)} → ${_formatDuration(dur)} ($durSec s) ${isShort ? "⚠️异常短" : ""}');
         }
       }
       // v1.0.77: 广告流自动跳过
@@ -361,11 +359,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   buffering true/false, 跟时长变化日志配合能看出是哪一帧挂的.
     _player.streams.buffering.listen((b) {
       if (!mounted) return;
-      VideoProxyLog.append('[VideoProxy] 缓冲: ${b ? "开始(卡)" : "结束(流畅)"} 时长=${_formatDuration(_currentDuration)} 位置=${_formatDuration(_currentPosition)}');
     });
     // v2.0.58: 播放错误日志 (mpv 报错时立刻记到日记, 用户能看到真因)
     _player.streams.error.listen((e) {
-      VideoProxyLog.append('[VideoProxy] ⚠️libmpv 错误: $e');
     });
     // 加载跳过片头片尾配置
     _loadSkipConfig();
@@ -1803,25 +1799,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   关 = 视频不走代理, libmpv 直连视频源; 开 = 视频走 VideoProxyServer.
     final videoProxyOn = await UserDataService.getVideoProxyEnabled();
     if (!videoProxyOn) {
-      VideoProxyLog.append('[VideoProxy] 跳过: 「视频代理」开关未开, libmpv 直连视频源');
       return;
     }
     if (_videoProxy != null && _videoProxy!.isRunning) {
-      VideoProxyLog.append('[VideoProxy] 跳过: 已在跑 (port=${_videoProxy!.port})');
       return;
     }
     // v2.0.58: 记录优选 IP 状态, 帮助分析 "4s 卡顿" 跟 manual IP 的关系
     // v2.0.76: 优选 IP 启用 开关名 → getCfWorkerEnabled()
     final manualIp = CfOptimizerHttpOverrides.getResolvedManualIp();
     final preferIpEnabled = await UserDataService.getCfWorkerEnabled();
-    VideoProxyLog.append('[VideoProxy] _ensureVideoProxy 开始: 优选IP开关=$preferIpEnabled manualIp=$manualIp');
     // v2.0.67: 优选 IP 不再是必须条件, tryStart 一次就行 (不再 retry 等 _resolvedManualIp)
     //   v2.0.76: 守门已改成「视频代理」开关, 这里 tryStart 一定成功 (除非域名没配)
     //   - 视频代理开关开 + worker 域名配了 → tryStart 成功 (优选 IP 可选)
     //   - 视频代理开关关 → 上面已 return, 不会到这
     final proxy = await VideoProxyServer.tryStart();
     if (proxy == null) {
-      VideoProxyLog.append('[VideoProxy] tryStart 返 null (域名未配), libmpv 走原 URL');
       return;
     }
     // v2.0.65: 不再设 libmpv --http-proxy!
@@ -1831,9 +1823,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   播放 URL 改成 http://127.0.0.1:PORT/m3u8?url=..., 代理自己 fetch
     //   worker 返回. libmpv 直接 HTTP 连本地代理, 不走 CONNECT 隧道.
     //   代理服务器还是要启动 (VideoProxyServer._handleLocalHttp 处理).
-    VideoProxyLog.append('[VideoProxy] 启用成功 (v2.0.65 本地 HTTP 代理): '
-        'http://127.0.0.1:${proxy.port} '
-        '优选IP开关=$preferIpEnabled manualIp=$manualIp (播放 URL 走本地代理 → worker)');
     _videoProxy = proxy;
     // v2.0.34: 通知顶部「加速状态」指示器重算 + 启动下载速度采样
     setState(() {
@@ -2037,18 +2026,13 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
         final extracted = anyM3u8.group(1)!;
         final resolved = _resolveAbsoluteUrl(extracted, baseUri);
-        VideoProxyLog.append(
-            '[VideoProxy] 分享页解析: HTML 里找到视频链接 $resolved');
         return resolved;
       }
       final extracted = match.group(1)!;
       final resolved = _resolveAbsoluteUrl(extracted, baseUri);
-      VideoProxyLog.append(
-          '[VideoProxy] 分享页解析: $originalUrl → $resolved (从 HTML JS 变量提取)');
       return resolved;
     } catch (e) {
       // 超时/网络错, 不影响播放, 原样返回
-      VideoProxyLog.append('[VideoProxy] 分享页解析失败 ($e), 用原 URL');
       return originalUrl;
     }
   }
@@ -2177,9 +2161,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     // v2.0.58: 记录实际播放 URL + 代理状态, 分析 "4s/6s 时长" bug 的关键信号.
     //   原 URL vs playUrl (buildProxiedUrl 之后) 能看出 CF Worker 是否介入;
     //   代理是否起能看出 .ts 段是否走优选 IP.
-    VideoProxyLog.append('[VideoProxy] _player.open: 代理=${proxyOn ? "ON port=$proxyPort" : "OFF"}, '
-        '原URL=${_shortenUrl(url)}');
-    VideoProxyLog.append('[VideoProxy] _player.open: 播放URL=${_shortenUrl(playUrl)}');
     try {
       await _player.stop();
       await _player.open(Media(playUrl));
@@ -2479,15 +2460,6 @@ class _PlayerScreenState extends State<PlayerScreen>
                 color: isDark ? Colors.white : Colors.black),
             onPressed: () => Navigator.pop(context),
           ),
-          // v2.0.42: 左上角"日记"按钮 — 不开 logcat 也能给开发者看 [VideoProxy] 输出
-          // 背景: 用户反馈"我不会 logcat", v2.0.42 把 11 处 print 双写到 VideoProxyLog
-          // 静态 buffer, 玩家点这个按钮 → 弹底部 sheet 显示 buffer 内容, 带复制/清空
-          IconButton(
-            tooltip: '视频代理日志',
-            icon: Icon(Icons.bug_report_outlined,
-                color: isDark ? Colors.white70 : Colors.black54),
-            onPressed: _showVideoProxyLogSheet,
-          ),
           Expanded(
             child: Text(
               '选源播放',
@@ -2503,118 +2475,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  // v2.0.42: 弹底部 sheet 显示 VideoProxyLog buffer, 带复制 + 清空按钮
-  //
-  // 用户操作: 进播放页 → libmpv 拉视频 (哪怕 0 B/s 也行, 也会走代理) → 顶部 🐞 按钮
-  //   → 看 [VideoProxy] 真实拨号 / 失败原因 → 长按复制或点"复制全部"粘出来给开发者
-  Future<void> _showVideoProxyLogSheet() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) {
-        return DraggableScrollableSheet(
-          initialChildSize: 0.7,
-          minChildSize: 0.3,
-          maxChildSize: 0.95,
-          expand: false,
-          builder: (_, scrollController) {
-            return StatefulBuilder(
-              builder: (ctx, setSheetState) {
-                final lines = VideoProxyLog.lines;
-                return Container(
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF1A1A1A),
-                    borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-                  ),
-                  child: Column(
-                    children: [
-                      // 顶栏
-                      Container(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.bug_report, color: Colors.greenAccent, size: 20),
-                            const SizedBox(width: 8),
-                            const Text('视频代理日志',
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w600)),
-                            const Spacer(),
-                            Text('${lines.length}/500',
-                                style: const TextStyle(
-                                    color: Colors.white38, fontSize: 12)),
-                            IconButton(
-                              tooltip: '复制全部',
-                              icon: const Icon(Icons.copy, color: Colors.white70),
-                              onPressed: () async {
-                                if (lines.isEmpty) return;
-                                await Clipboard.setData(
-                                    ClipboardData(text: VideoProxyLog.linesAsString()));
-                                if (!ctx.mounted) return;
-                                ScaffoldMessenger.of(ctx).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('已复制到剪贴板'),
-                                    duration: Duration(seconds: 1),
-                                  ),
-                                );
-                              },
-                            ),
-                            IconButton(
-                              tooltip: '清空',
-                              icon: const Icon(Icons.delete_outline,
-                                  color: Colors.white70),
-                              onPressed: () {
-                                VideoProxyLog.clear();
-                                setSheetState(() {});
-                              },
-                            ),
-                            IconButton(
-                              tooltip: '关闭',
-                              icon: const Icon(Icons.close, color: Colors.white70),
-                              onPressed: () => Navigator.pop(ctx),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const Divider(height: 1, color: Colors.white12),
-                      // 日志内容
-                      Expanded(
-                        child: lines.isEmpty
-                            ? const Center(
-                                child: Text('暂无日志\n播放后 libmpv 拉视频会触发 [VideoProxy] 输出',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(color: Colors.white38, fontSize: 13)),
-                              )
-                            : ListView.builder(
-                                controller: scrollController,
-                                padding: const EdgeInsets.all(12),
-                                itemCount: lines.length,
-                                itemBuilder: (_, i) => Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 2),
-                                  child: SelectableText(
-                                    lines[i],
-                                    style: const TextStyle(
-                                      color: Colors.greenAccent,
-                                      fontSize: 11,
-                                      fontFamily: 'monospace',
-                                      height: 1.3,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
 
   Widget _buildPosterHeader(bool isDark) {
     return Padding(
@@ -3898,12 +3758,6 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                 ],
               ),
-              // v2.0.87: 诊断 tile — 长按 / 点开看 MpvFFI 加载状态 + 最近一次
-              //   property 读结果. 之前 v2.0.86 装上还是 0 B/s, 没有任何信号
-              //   知道为啥 (MpvFFI.isAvailable 早退 vs property 读不到 vs
-              //   handle 没拿到). 加这个 tile, 截图给开发者秒定位.
-              const SizedBox(height: 8),
-              _buildMpvFfiDebugTile(),
               // 提示
               if (accelLevel != 'full')
                 Padding(
@@ -4196,103 +4050,6 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   /// v2.0.34: 格式化下载速度 (Bytes/s → 人类可读)
-  /// v2.0.87: 诊断 tile — 加速链路弹窗底部, 显示 MpvFFI 加载状态 + 最近
-  ///   一次 property 读结果. v2.0.86 装上还是 0 B/s 不知道为啥 (MpvFFI.isAvailable
-  ///   早退 / symbol 找不到 / handle 没拿到 / property 读不到 4 种可能).
-  ///   加这个 tile, 截图给开发者秒定位.
-  ///
-  /// 布局: 默认折叠, 标题 "🔧 MpvFFI 诊断", 副标题 "点击展开".
-  ///   展开后: 显示 MpvFFI.debugStatus 多行文字 (lib 加载状态 / symbol 列表 /
-  ///   错误信息 / 最近一次 property 读结果). 用户截图给我看就能定位.
-  ///
-  /// v2.0.87 设计:
-  ///   - 默认折叠避免打扰普通用户
-  ///   - 字号小 (12sp), 颜色灰 (Color(0xFF9ca3af)), 不抢主视觉
-  ///   - 展开时背景深色 (Color(0xFF111827)), 跟整体弹窗风格一致
-  ///   - 自动 rebuild (FutureBuilder 走 setState 触发)
-  Widget _buildMpvFfiDebugTile() {
-    return StatefulBuilder(
-      builder: (ctx, setLocalState) {
-        final expanded = _mpvFfiDebugExpanded;
-        return GestureDetector(
-          onTap: () {
-            setLocalState(() {
-              _mpvFfiDebugExpanded = !_mpvFfiDebugExpanded;
-            });
-          },
-          child: Container(
-            width: double.infinity,
-            margin: const EdgeInsets.only(top: 4),
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: expanded ? const Color(0xFF111827) : Colors.transparent,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color: const Color(0xFF374151),
-                width: 0.5,
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.bug_report,
-                        color: Color(0xFF9ca3af), size: 14),
-                    const SizedBox(width: 6),
-                    const Text(
-                      'MpvFFI 诊断',
-                      style: TextStyle(
-                        color: Color(0xFF9ca3af),
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const Spacer(),
-                    Icon(
-                      expanded ? Icons.expand_less : Icons.expand_more,
-                      color: const Color(0xFF9ca3af),
-                      size: 16,
-                    ),
-                  ],
-                ),
-                if (expanded) ...[
-                  const SizedBox(height: 8),
-                  SelectableText(
-                    MpvFFI.debugStatus,
-                    style: const TextStyle(
-                      color: Color(0xFF9ca3af),
-                      fontSize: 11,
-                      fontFamily: 'monospace',
-                      height: 1.4,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  GestureDetector(
-                    onTap: () {
-                      // 强制重新加载 (清除 lib 缓存, 重新 dlopen)
-                      setLocalState(() {});
-                    },
-                    child: const Text(
-                      '(点空白处折叠, 截图发开发者)',
-                      style: TextStyle(
-                        color: Color(0xFF6b7280),
-                        fontSize: 10,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  /// v2.0.87: 加速链路弹窗的下载速度 / 诊断展开状态
-  bool _mpvFfiDebugExpanded = false;
 
   /// < 1 KB/s → "0 B/s" (避免跳 0 误差)
   /// 1-1024 B/s → "512 B/s"

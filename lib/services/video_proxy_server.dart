@@ -38,7 +38,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:luna_tv/services/video_proxy_log.dart';
 
 import 'package:luna_tv/services/cf_optimizer.dart' show CfOptimizerHttpOverrides;
 import 'package:luna_tv/services/user_data_service.dart';
@@ -89,14 +88,9 @@ class VideoProxyServer {
     try {
       final s = VideoProxyServer._();
       await s._bind();
-      // ignore: avoid_print
-      VideoProxyLog.append('[VideoProxy] tryStart 成功: bind 127.0.0.1:${s._port} '
-          '(优选IP开关=$preferIpEnabled, 生效IP=${effectiveIp ?? "无,走DNS"})');
       return s;
     } catch (e, st) {
       // v2.0.39: 不再静默吞, 打印详细原因.
-      // ignore: avoid_print
-      VideoProxyLog.append('[VideoProxy] tryStart bind 失败: $e\n$st');
       return null;
     }
   }
@@ -257,18 +251,12 @@ class VideoProxyServer {
     List<String> candidateIps,
   ) async {
     if (candidateIps.isEmpty) {
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] _connectRace: 拨 $originalHost:$port (无候选 IP, 直接拨原 host)');
       final t0 = DateTime.now();
       final socket = await Socket.connect(originalHost, port,
           timeout: const Duration(seconds: 5));
       try {
         socket.setOption(SocketOption.tcpNoDelay, true);
       } catch (_) {}
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] _connectRace: 原 host 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort} 耗时 ${DateTime.now().difference(t0).inMilliseconds}ms');
       return socket;
     }
 
@@ -294,9 +282,6 @@ class VideoProxyServer {
         !candidateIps.contains(manualIp)) {
       manualCandidate = manualIp;
     }
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] _connectRace: 拨 $originalHost:$port 候选 ${candidateIps.length} IP (host=${hostIps.length}, manual=${manualCandidate != null ? 1 : 0}, v2.0.57 分阶段)');
 
     // Phase 1: host IPs 并发 race (跟 SNI 匹配, TLS 必成功)
     if (hostIps.isNotEmpty) {
@@ -309,46 +294,28 @@ class VideoProxyServer {
           raceT0,
         );
       } catch (e) {
-        // ignore: avoid_print
-        VideoProxyLog.append(
-            '[VideoProxy] _connectRace: Phase 1 (host IPs ${hostIps.length} 个) 全失败 ($e), 进入 Phase 2');
       }
     }
 
     // Phase 2: 单独拨 manual IP (host IPs 全死才用, manual 不参与 race)
     if (manualCandidate != null) {
       final dialT0 = DateTime.now();
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] _connectRace: Phase 2: 单独拨 manual IP [$manualCandidate] T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
       try {
         final socket = await _connectOne(manualCandidate, port);
         try {
           socket.setOption(SocketOption.tcpNoDelay, true);
         } catch (_) {}
-        // ignore: avoid_print
-        VideoProxyLog.append(
-            '[VideoProxy] _connectRace: Phase 2 manual 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort} 耗时 ${DateTime.now().difference(dialT0).inMilliseconds}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
         return socket;
       } catch (e) {
-        // ignore: avoid_print
-        VideoProxyLog.append(
-            '[VideoProxy] _connectRace: Phase 2 manual 拨号失败 ($e) 耗时 ${DateTime.now().difference(dialT0).inMilliseconds}ms, 进入 Phase 3');
       }
     }
 
     // Phase 3: 全失败 → fallback 原 host (老路径兜底, 系统 DNS 解析)
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] _connectRace: Phase 3: 全部候选失败, fallback 原 host $originalHost:$port');
     final fallbackT0 = DateTime.now();
     final socket = await _connectOne(originalHost, port);
     try {
       socket.setOption(SocketOption.tcpNoDelay, true);
     } catch (_) {}
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] _connectRace: Phase 3 fallback 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort} 耗时 ${DateTime.now().difference(fallbackT0).inMilliseconds}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
     return socket;
   }
 
@@ -372,15 +339,9 @@ class VideoProxyServer {
 
     for (final ip in ips) {
       final dialT0 = DateTime.now();
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] _connectRaceGroup [$groupName:$ip] 开始拨号 T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
       // ignore: unawaited_futures
       _connectOne(ip, port).then((socket) {
         final dialMs = DateTime.now().difference(dialT0).inMilliseconds;
-        // ignore: avoid_print
-        VideoProxyLog.append(
-            '[VideoProxy] _connectRaceGroup [$groupName:$ip] TCP 拨号成功 → ${socket.remoteAddress.address}:${socket.remotePort} 耗时 ${dialMs}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
         if (!winnerChosen) {
           winnerChosen = true;
           winnerIp = ip;
@@ -390,16 +351,10 @@ class VideoProxyServer {
             socket.destroy();
           }
         } else {
-          // ignore: avoid_print
-          VideoProxyLog.append(
-              '[VideoProxy] _connectRaceGroup [$groupName:$ip] 输的 socket 销毁');
           socket.destroy();
         }
       }).catchError((e) {
         final dialMs = DateTime.now().difference(dialT0).inMilliseconds;
-        // ignore: avoid_print
-        VideoProxyLog.append(
-            '[VideoProxy] _connectRaceGroup [$groupName:$ip] 拨号失败 ($e) 耗时 ${dialMs}ms T+${DateTime.now().difference(raceT0).inMilliseconds}ms');
         if (winnerChosen) return;
         errorCount++;
         if (errorCount == totalCount && !completer.isCompleted) {
@@ -414,9 +369,6 @@ class VideoProxyServer {
     try {
       socket.setOption(SocketOption.tcpNoDelay, true);
     } catch (_) {}
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] _connectRaceGroup winner=$groupName:$winnerIp 总耗时 ${DateTime.now().difference(raceT0).inMilliseconds}ms');
     return socket;
   }
 
@@ -429,9 +381,6 @@ class VideoProxyServer {
     final connT0 = DateTime.now();
     final connId =
         '${connT0.millisecondsSinceEpoch % 100000}-${client.remotePort}';
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] [$connId] 新连接 from libmpv: ${client.remoteAddress.address}:${client.remotePort}');
     // v2.0.25: 设 TCP_NODELAY 避免小包被 Nagle 延迟
     //   TLS ClientHello / ServerHello 是小包, Nagle 算法会延迟发送,
     //   导致 TLS 握手慢/超时 → "没速度"
@@ -468,9 +417,6 @@ class VideoProxyServer {
           backendToClientBytes > 0 &&
           backendToClientBytes < 2048 &&
           aliveMs > 500;
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] [$connId] 连接关闭 ${state.method ?? "?"} ${state.host ?? "?"}, client→backend $clientToBackendBytes bytes, backend→client $backendToClientBytes bytes, 存活 ${aliveMs}ms${short ? " ⚠️可疑短响应" : ""}${graceful ? " (优雅)" : ""}');
       try {
         clientSub.cancel();
       } catch (_) {}
@@ -522,18 +468,12 @@ class VideoProxyServer {
       (data) {
         if (firstClientDataAt == null) {
           firstClientDataAt = DateTime.now();
-          // ignore: avoid_print
-          VideoProxyLog.append(
-              '[VideoProxy] [$connId] libmpv 首次发数据 ${data.length}B, T+${DateTime.now().difference(connT0).inMilliseconds}ms, 头几个字节: ${_hexPreview(data, 16)}');
         }
         // Phase 2: backend 已就绪, 直接转发
         if (backendReady && backend != null && backendAlive) {
           clientToBackendBytes += data.length;
           // v2.0.60: 详细记录 Phase 2 转发, 确认 libmpv 的 HTTP GET 请求
           //   是否被转发给 backend. 4s bug 怀疑 GET 请求没到 worker.
-          // ignore: avoid_print
-          VideoProxyLog.append(
-              '[VideoProxy] [$connId] Phase2 转发 ${data.length}B → backend (累计 $clientToBackendBytes B)');
           try {
             backend!.add(data);
           } catch (_) {
@@ -549,15 +489,9 @@ class VideoProxyServer {
         try {
           _onClientData(client, state, data, (b) {
             // onBackendReady callback — race 拨上后被调
-            // ignore: avoid_print
-            VideoProxyLog.append(
-                '[VideoProxy] [$connId] backend ready → ${b.remoteAddress.address}:${b.remotePort}, T+${DateTime.now().difference(connT0).inMilliseconds}ms, 准备建桥 (单 listener 切换模式)');
             backend = b;
             // 推 race 期间累积的 client 数据到 backend
             if (state.pendingBodyBytes.isNotEmpty) {
-              // ignore: avoid_print
-              VideoProxyLog.append(
-                  '[VideoProxy] [$connId] 推 pendingBodyBytes ${state.pendingBodyBytes.length}B → backend');
               try {
                 backend!.add(state.pendingBodyBytes);
               } catch (_) {}
@@ -568,9 +502,6 @@ class VideoProxyServer {
             //   收到 200 后立刻发的 TLS ClientHello, 推不上 TLS 永远
             //   握不完 → 没速度)
             if (state.buffer.isNotEmpty) {
-              // ignore: avoid_print
-              VideoProxyLog.append(
-                  '[VideoProxy] [$connId] 推 race 期间累积 buffer ${state.buffer.length}B → backend');
               try {
                 backend!.add(state.buffer);
               } catch (_) {}
@@ -590,9 +521,6 @@ class VideoProxyServer {
                     if (state.method != null && state.method != 'CONNECT') {
                       statusHint = _parseHttpStatus(d);
                     }
-                    // ignore: avoid_print
-                    VideoProxyLog.append(
-                        '[VideoProxy] [$connId] upstream 首次回数据 ${d.length}B, T+${DateTime.now().difference(connT0).inMilliseconds}ms${statusHint != null ? ", HTTP $statusHint" : ""}, 头几个字节: ${_hexPreview(d, 16)}');
                   }
                   backendToClientBytes += d.length;
                   try {
@@ -602,9 +530,6 @@ class VideoProxyServer {
                   }
                 },
                 onError: (e) {
-                  // ignore: avoid_print
-                  VideoProxyLog.append(
-                      '[VideoProxy] [$connId] upstream socket error: $e');
                   backendAlive = false;
                   closeAll();
                 },
@@ -618,9 +543,6 @@ class VideoProxyServer {
                   //   修法: backend onDone 只关 backend, 不关 client. client 等
                   //   libmpv 自己读完数据后关闭, client onDone 触发 closeAll.
                   //   风险: client 永不关闭会泄漏 socket. 加 30s 超时兜底.
-                  // ignore: avoid_print
-                  VideoProxyLog.append(
-                      '[VideoProxy] [$connId] upstream socket done (remote 关闭), 总 $backendToClientBytes bytes → 只关 backend, 等 libmpv 读完 client');
                   backendAlive = false;
                   try {
                     backendSub?.cancel();
@@ -637,7 +559,6 @@ class VideoProxyServer {
                   // 30s 超时兜底: 如果 libmpv 30s 没关 client, 强制关 (防泄漏)
                   Future.delayed(const Duration(seconds: 30), () {
                     if (!clientClosed) {
-                      VideoProxyLog.append('[VideoProxy] [$connId] 30s 超时强制关闭 client (libmpv 没关)');
                       closeAll();
                     }
                   });
@@ -645,37 +566,22 @@ class VideoProxyServer {
                 cancelOnError: true,
               );
             } catch (e, st) {
-              // ignore: avoid_print
-              VideoProxyLog.append(
-                  '[VideoProxy] [$connId] backend.listen 失败: $e\n$st');
               closeAll();
               return;
             }
             // 切到 Phase 2 — 后续 onData 直接转发
             backendReady = true;
             backendAlive = true;
-            // ignore: avoid_print
-            VideoProxyLog.append(
-                '[VideoProxy] [$connId] 桥接已建立 (c→b / b→c 都活了, 单 listener 切换模式)');
           }, closeAll);
         } catch (e) {
-          // ignore: avoid_print
-          VideoProxyLog.append(
-              '[VideoProxy] [$connId] _onClientData 异常: $e');
           _errorCount++;
           closeAll();
         }
       },
       onError: (e) {
-        // ignore: avoid_print
-        VideoProxyLog.append(
-            '[VideoProxy] [$connId] libmpv socket (header 阶段) error: $e');
         closeAll();
       },
       onDone: () {
-        // ignore: avoid_print
-        VideoProxyLog.append(
-            '[VideoProxy] [$connId] libmpv socket done (header 阶段都没数据)');
         closeAll();
       },
       cancelOnError: true,
@@ -770,8 +676,6 @@ class VideoProxyServer {
 
       if (state.method == 'CONNECT') {
         // v2.0.40 诊断日志
-        // ignore: avoid_print
-        VideoProxyLog.append('[VideoProxy] CONNECT ${state.target} (从 libmpv 收到 CONNECT 头, 开始拨号)');
         _handleConnect(client, state, onBackendReady, closeAll);
       } else if (state.target!.startsWith('/')) {
         // v2.0.65: 本地 HTTP 反向代理模式.
@@ -779,13 +683,9 @@ class VideoProxyServer {
         //   代理自己 fetch https://worker/m3u8?url=... 返回内容.
         //   解决 libmpv 通过 --http-proxy CONNECT 隧道播放 HTTPS 失败的问题
         //   (libmpv 的 CONNECT 实现有 bug, ffmpeg 通过同一代理能播).
-        // ignore: avoid_print
-        VideoProxyLog.append('[VideoProxy] LOCAL ${state.method} ${state.target}');
         _handleLocalHttp(client, state, closeAll);
       } else {
         // v2.0.40 诊断日志
-        // ignore: avoid_print
-        VideoProxyLog.append('[VideoProxy] HTTP ${state.method} ${state.target}');
         _handleHttp(client, state, onBackendReady, closeAll);
       }
     }
@@ -842,9 +742,6 @@ class VideoProxyServer {
         ? resolvedIp
         : null;
     final fetchStart = DateTime.now();
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] LOCAL 代理 fetch: https://$workerDomain$target (优选IP=${preferIp ?? "无,走DNS"})');
 
     Socket? upstream;
     try {
@@ -943,8 +840,6 @@ class VideoProxyServer {
         respBuf.write('\r\n');
         client.add(utf8.encode(respBuf.toString()));
         await client.flush();
-        VideoProxyLog.append(
-            '[VideoProxy] LOCAL m3u8 响应头已发 (chunked), worker 响应头到达耗时 ${DateTime.now().difference(fetchStart).inMilliseconds}ms, 等待 body 重写...');
 
         // 读完整 body, 重写 https://worker/ → http://127.0.0.1:PORT/
         final bodyBytes = await reader.readBody(contentLength, isChunked);
@@ -961,8 +856,6 @@ class VideoProxyServer {
         client.add(utf8.encode('\r\n0\r\n\r\n'));
         await client.flush();
         final bodyMs = DateTime.now().difference(headerSentAt).inMilliseconds;
-        VideoProxyLog.append(
-            '[VideoProxy] LOCAL m3u8 重写完成: ${bodyBytes.length}B → ${rewrittenBytes.length}B (body 耗时 ${bodyMs}ms, 优选IP=$preferIp)');
       } else {
         // 非 m3u8 (.ts / .mp4): 流式转发
         final respBuf = StringBuffer();
@@ -982,8 +875,6 @@ class VideoProxyServer {
 
         // 流式转发 body
         final totalBytes = await reader.streamTo(client);
-        VideoProxyLog.append(
-            '[VideoProxy] LOCAL 流式转发完成: $totalBytes bytes (优选IP=$preferIp)');
       }
 
       // 关闭连接
@@ -996,8 +887,6 @@ class VideoProxyServer {
         client.close();
       } catch (_) {}
     } catch (e) {
-      // ignore: avoid_print
-      VideoProxyLog.append('[VideoProxy] LOCAL 代理 fetch 失败: $e');
       try {
         upstream?.destroy();
       } catch (_) {}
@@ -1028,38 +917,19 @@ class VideoProxyServer {
     //   race 拨 host IPs 跟 SNI 匹配 → TLS 成功, 解决"162.159.x.x 静态
     //   IP TCP 拨上但 TLS 失败 → 0KB"问题
     // v2.0.54 日志: CONNECT 路径
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] CONNECT $host:$port, 候选 IP 计算中...');
     CfOptimizerHttpOverrides.maybeResolveHostEagerly(host);
     final topIps = CfOptimizerHttpOverrides.getTopNIpsForVideoProxy(host, 3);
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] CONNECT $host:$port, 候选 ${topIps.length} IP: $topIps');
-    final raceStart = topIps.isNotEmpty ? DateTime.now() : null;
     try {
       final backend = await _connectRace(host, port, topIps);
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] CONNECT $host: 准备发 "200 Connection Established" → libmpv, T+${DateTime.now().difference(raceStart!).inMilliseconds}ms');
       client.add('HTTP/1.1 200 Connection Established\r\n\r\n'.codeUnits);
       await client.flush();
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] CONNECT $host: "200" 已发, backend = ${backend.remoteAddress.address}:${backend.remotePort}');
       if (topIps.isNotEmpty) {
         _raceWinCount++;
-        final ms = DateTime.now().difference(raceStart!).inMilliseconds;
-        // ignore: avoid_print
-        VideoProxyLog.append('[VideoProxy] CONNECT $host: race dial won in ${ms}ms (${topIps.length} candidates)');
       } else {
         _tunnelCount++;
       }
       onBackendReady(backend);
     } catch (e) {
-      // ignore: avoid_print
-      VideoProxyLog.append(
-          '[VideoProxy] CONNECT $host: race + fallback 全失败 ($e), 发 502');
       _errorCount++;
       _sendHttpError(client, 502, 'Bad Gateway', closeAll);
     }
@@ -1096,14 +966,8 @@ class VideoProxyServer {
     // v2.0.46: 手动 IP 模式触发一次 host DNS 解析 (跟 _onClientConnection 一致)
     // v2.0.54 日志: HTTP 代理路径
     // v2.0.58: 加 reqPath 区分请求类型
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] HTTP ${state.method} $host:$port $reqPath, 候选 IP 计算中...');
     CfOptimizerHttpOverrides.maybeResolveHostEagerly(host);
     final topIps = CfOptimizerHttpOverrides.getTopNIpsForVideoProxy(host, 3);
-    // ignore: avoid_print
-    VideoProxyLog.append(
-        '[VideoProxy] HTTP ${state.method} $host:$port $reqPath, 候选 ${topIps.length} IP: $topIps');
 
     // v2.0.19: 修 bug — request line + Host header 都用原 host, 不要用 IP
     // IP 只用来做 TCP 路由, 服务端通过 Host header 找 vhost
