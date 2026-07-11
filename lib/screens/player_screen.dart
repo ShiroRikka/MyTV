@@ -1942,8 +1942,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
 
         // 4. v2.0.88 文本状态 fallback: 显示「缓冲中 / 暂停 / 未开播」, 不再永远 0 B/s 骗用户
-        final idle = MpvFFI.getPropertyAny(handle, 'idle-active', _kMpvFormatBool);
-        final paused = MpvFFI.getPropertyAny(handle, 'pause', _kMpvFormatBool);
+        final idle = MpvFFI.getPropertyAny(handle, 'idle-active', kMpvFormatBool);
+        final paused = MpvFFI.getPropertyAny(handle, 'pause', kMpvFormatBool);
         String stateText = '';
         if (paused == true) {
           stateText = '已暂停';

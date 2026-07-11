@@ -90,12 +90,14 @@ typedef _MpvGetPropertyD = int Function(
     Pointer<Void>, Pointer<Utf8>, int, Pointer<Void>);
 
 // MPV_FORMAT_* enum 数字 (libmpv/mpv.h 头文件官方常量)
-const int _kMpvFormatString = 3;
-const int _kMpvFormatInt64 = 4;
-const int _kMpvFormatDouble = 5;
+const int kMpvFormatString = 3;
+const int kMpvFormatInt64 = 4;
+const int kMpvFormatDouble = 5;
 // v2.0.88: MPV_FORMAT_FLAG = 1 (libmpv bool 类型 property 用这个 format)
 //   跟 INT64 不一样, libmpv 内部 bool 是单字节 (uint8), 不是 int64
-const int _kMpvFormatBool = 1;
+//   v2.0.88a: 改 public (kMpvFormat*), 之前 _kMpvFormat* private, player_screen
+//   拿不到 → build 报 "The getter 'kMpvFormatBool' isn't defined"
+const int kMpvFormatBool = 1;
 
 class MpvFFI {
   MpvFFI._();
@@ -283,7 +285,7 @@ class MpvFFI {
     }
     final namePtr = name.toNativeUtf8();
     try {
-      if (format == _kMpvFormatInt64) {
+      if (format == kMpvFormatInt64) {
         final outPtr = calloc<Int64>();
         try {
           final rc = fn(Pointer<Void>.fromAddress(handle), namePtr, format, outPtr.cast<Void>());
@@ -298,7 +300,7 @@ class MpvFFI {
         } finally {
           calloc.free(outPtr);
         }
-      } else if (format == _kMpvFormatDouble) {
+      } else if (format == kMpvFormatDouble) {
         final outPtr = calloc<Double>();
         try {
           final rc = fn(Pointer<Void>.fromAddress(handle), namePtr, format, outPtr.cast<Void>());
@@ -313,7 +315,7 @@ class MpvFFI {
         } finally {
           calloc.free(outPtr);
         }
-      } else if (format == _kMpvFormatString) {
+      } else if (format == kMpvFormatString) {
         // STRING format 返 char* (mpv 内部 alloc, 调用方需要 mpv_free).
         // 跟 getPropertyString 一样, 暂时不 free (泄漏几十字节/秒, 可忽略).
         final outPtr = calloc<Pointer<Utf8>>();
@@ -335,7 +337,7 @@ class MpvFFI {
         } finally {
           calloc.free(outPtr);
         }
-      } else if (format == _kMpvFormatBool) {
+      } else if (format == kMpvFormatBool) {
         // v2.0.88: FLAG/BOOL format 返 uint8 (1 byte). libmpv bool property
         //   (pause / idle-active 等) 走这个 format. 用 calloc<Uint8> 分配 1 字节.
         final outPtr = calloc<Uint8>();
@@ -369,7 +371,7 @@ class MpvFFI {
   /// v2.0.87 改: 内部走通用 getPropertyAny 替专用 mpv_get_property_i64.
   /// 之前 (v2.0.86) 装上还是 0 B/s, 怀疑专用 symbol 没找到.
   static int? getPropertyI64(int handle, String name) {
-    final v = getPropertyAny(handle, name, _kMpvFormatInt64);
+    final v = getPropertyAny(handle, name, kMpvFormatInt64);
     return v is int ? v : null;
   }
 
@@ -377,7 +379,7 @@ class MpvFFI {
   ///
   /// v2.0.87 改: 内部走通用 getPropertyAny 替专用 mpv_get_property_double.
   static double? getPropertyDouble(int handle, String name) {
-    final v = getPropertyAny(handle, name, _kMpvFormatDouble);
+    final v = getPropertyAny(handle, name, kMpvFormatDouble);
     return v is double ? v : null;
   }
 }
