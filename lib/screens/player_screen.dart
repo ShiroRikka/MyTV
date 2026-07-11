@@ -1858,18 +1858,18 @@ class _PlayerScreenState extends State<PlayerScreen>
   ///   1. demuxer-bytes 改成走通用 getPropertyAny (INT64 format), 跟 v2.0.87 一致
   ///   2. 加 demuxer-cache-bytes fallback (跟 demuxer-bytes 类似但走 cache layer)
   ///   3. input-bitrate 改用 INT64 format (v2.0.86 写错用 DOUBLE, libmpv 实际是 int64)
-  ///   4. 加 video-bitrate + audio-bitrate + sub-bitrate (DOUBLE, kibit/s) 兜底
+  ///   4. 加 video-bitrate + audio-bitrate + sub-bitrate (DOUBLE, bps) 兜底
   ///   5. 加播放状态 fallback: idle-active / pause → 显示「缓冲中 / 暂停 / 未开播」
   ///      文本状态, 不再永远 0 B/s 骗用户
   ///
-  /// 字段类型映射 (libmpv 0.36 文档):
+  /// 字段类型映射 (libmpv 0.36 文档, 单位都是 **bits per second**):
   ///   - demuxer-bytes: int64 (累计字节)
   ///   - demuxer-cache-bytes: int64 (累计 cache 字节)
   ///   - cache-size: int64 (累计 cache 字节, 同上但不同名)
-  ///   - input-bitrate: int64 (输入 bitrate, **kibit/s** 注意是 1024-based)
-  ///   - video-bitrate: double (kibit/s)
-  ///   - audio-bitrate: double (kibit/s)
-  ///   - sub-bitrate: double (kibit/s)
+  ///   - input-bitrate: int64 (输入 bitrate, bps)
+  ///   - video-bitrate: double (bps)
+  ///   - audio-bitrate: double (bps)
+  ///   - sub-bitrate: double (bps)
   ///   - idle-active: bool (player 是否闲置)
   ///   - pause: bool (是否暂停)
   void _startSpeedSampling() {
@@ -1913,13 +1913,15 @@ class _PlayerScreenState extends State<PlayerScreen>
           return;
         }
 
-        // 2. v2.0.88 兜底: input-bitrate 瞬时码率 (int64, kibit/s)
-        //   v2.0.86 我错用 DOUBLE format, libmpv 0.36 实际是 int64 → rc=-8 (format 错)
-        //   改 INT64 format. 拿到后 bps = kbps * 1024 / 8.
+        // 2. v2.0.90 兜底: input-bitrate 瞬时码率 (int64, bps)
+        //   v2.0.88 错用 `* 1024 / 8` (按 kibit/s 算), 实际 libmpv 0.36 文档明说
+        //   input-bitrate 单位是 **bits per second (bps)**, 1024-based 是错的.
+        //   用户装 v2.0.89 后显示 414.51 MB/s (反推真实值 ≈ 3.4 Mbit/s, 1080p HLS 合理),
+        //   我 * 1024 / 8 多乘 1024 倍. 改 `/ 8` (bit → Byte).
         final inputBps = MpvFFI.getPropertyI64(handle, 'input-bitrate');
         if (inputBps != null && inputBps > 0 && mounted) {
-          // input-bitrate 是 kibit/s, 1 kibit = 1024 bit, 转 Bytes/s
-          final bps = inputBps * 1024 / 8;
+          // input-bitrate 是 bps (bits per second), 直接 / 8 = Bytes/s
+          final bps = inputBps / 8;
           setState(() {
             _downloadSpeedBps = bps.toDouble();
             _playbackStateText = '';
@@ -1927,13 +1929,14 @@ class _PlayerScreenState extends State<PlayerScreen>
           return;
         }
 
-        // 3. v2.0.88 兜底: video + audio + sub bitrate 加起来 (DOUBLE, kibit/s)
+        // 3. v2.0.90 兜底: video + audio + sub bitrate 加起来 (DOUBLE, bps)
+        //   同样修 v2.0.88 的 `* 1024 / 8` 错, 实际是 bps, 改 `/ 8`.
         final v = MpvFFI.getPropertyDouble(handle, 'video-bitrate') ?? 0;
         final a = MpvFFI.getPropertyDouble(handle, 'audio-bitrate') ?? 0;
         final s = MpvFFI.getPropertyDouble(handle, 'sub-bitrate') ?? 0;
-        final totalKibit = v + a + s;
-        if (totalKibit > 0 && mounted) {
-          final bps = totalKibit * 1024 / 8; // kibit/s → Bytes/s
+        final totalBps = v + a + s;
+        if (totalBps > 0 && mounted) {
+          final bps = totalBps / 8; // bps (bits per second) → Bytes/s
           setState(() {
             _downloadSpeedBps = bps;
             _playbackStateText = '';
