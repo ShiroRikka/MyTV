@@ -604,6 +604,203 @@ class VideoProxyServer {
     return sb.toString();
   }
 
+  // ===== v2.0.92: m3u8 ad 段预过滤 =====
+
+  /// 跟 m3u8_service._looksLikeAdSegment 对齐, 测速/播放两种判断一致.
+  static const List<String> _adKeywords = [
+    '/ad/',
+    '/ads/',
+    '/advert/',
+    'doubleclick',
+    'googlevideo',
+    'imasdk',
+    'adnxs',
+    'admarvel',
+    'pubmatic',
+  ];
+
+  /// 段 URL 是不是明显广告. 跟 m3u8_service._looksLikeAdSegment 同规则.
+  static bool _isAdUrl(String url, String baseHost) {
+    final lower = url.toLowerCase();
+    for (final kw in _adKeywords) {
+      if (lower.contains(kw)) return true;
+    }
+    try {
+      final segHost = Uri.parse(url).host.toLowerCase();
+      if (segHost.isEmpty || segHost == baseHost) return false;
+      // 二级域名比对: a.cdn.example.com vs b.cdn.example.com 都不算跨域
+      final baseParts = baseHost.split('.');
+      final segParts = segHost.split('.');
+      if (baseParts.length >= 2 && segParts.length >= 2) {
+        final baseApex = baseParts.sublist(baseParts.length - 2).join('.');
+        final segApex = segParts.sublist(segParts.length - 2).join('.');
+        if (baseApex == segApex) return false;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 从 m3u8 内容所有段 URL 提取 base host.
+  /// 策略: 统计所有 host 出现次数, **排除已知 ad host** (走关键词), 取最多.
+  /// 平手时 (e.g. 主片 1 段 + ad 1 段): 用**最后出现**的 host — 视频源 ad
+  /// 一般插在中间/开头, 最后一段几乎总是主片, 排除 ad host 后还平手就
+  /// 用这个 tie-breaker.
+  ///
+  /// 为什么不用「最后一段」或「第一段」单选:
+  ///   - 最后一段: ad 在结尾时 (罕见但存在) 最后一段就是 ad, 整个 m3u8 不动
+  ///   - 第一段: ad 在开头时第一段就是 ad, 整个 m3u8 不动
+  ///   - 多数 + 排除 ad + 最后出现 tie-breaker: 三种位置都覆盖
+  static String? _detectBaseHostFromM3u8(List<String> lines) {
+    final hosts = <String, int>{};
+    final lastSeenIdx = <String, int>{};
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i].trimRight();
+      if (line.isEmpty || line.startsWith('#')) continue;
+      try {
+        final h = Uri.parse(line).host.toLowerCase();
+        if (h.isNotEmpty) {
+          hosts[h] = (hosts[h] ?? 0) + 1;
+          lastSeenIdx[h] = i;
+        }
+      } catch (_) {}
+    }
+    if (hosts.isEmpty) return null;
+    // 排除走关键词识别的 ad host (整个是 ad 服务, 不作 base)
+    final nonAdHosts = hosts.entries.where((e) {
+      return !_isAdUrl('http://${e.key}/placeholder', '');
+    }).toList();
+    final pool = nonAdHosts.isNotEmpty ? nonAdHosts : hosts.entries.toList();
+    // 按 count desc, 平手时按 last-seen-idx desc (后出现优先)
+    pool.sort((a, b) {
+      final c = b.value.compareTo(a.value);
+      if (c != 0) return c;
+      return (lastSeenIdx[b.key] ?? 0).compareTo(lastSeenIdx[a.key] ?? 0);
+    });
+    return pool.first.key;
+  }
+
+  /// 清掉输出 m3u8 里变成孤儿的 EXT-X-DISCONTINUITY 标记.
+  /// 删了 ad 段后, 前后两个 discontinuity 可能相邻 / 在头尾, 留着会触发
+  /// libmpv 不必要的 decoder re-init (多次连续 discontinuity 等价连续重启解码).
+  ///
+  /// 规则:
+  ///   - 头部的 discontinuity (前面没内容) 删
+  ///   - 尾部的 discontinuity (后面没内容) 删
+  ///   - 连续多个 discontinuity 合并成 1 个
+  static List<String> _pruneOrphanDiscontinuities(List<String> lines) {
+    // 找第一个有内容的行索引
+    int firstContentIdx = -1;
+    for (var i = 0; i < lines.length; i++) {
+      final l = lines[i].trimRight();
+      if (l.isEmpty || l == '#EXT-X-DISCONTINUITY') continue;
+      firstContentIdx = i;
+      break;
+    }
+    if (firstContentIdx < 0) return lines; // 全是 discontinuity, 不可能
+
+    // 找最后一个有内容的行索引
+    int lastContentIdx = -1;
+    for (var i = lines.length - 1; i >= 0; i--) {
+      final l = lines[i].trimRight();
+      if (l.isEmpty || l == '#EXT-X-DISCONTINUITY') continue;
+      lastContentIdx = i;
+      break;
+    }
+
+    final out = <String>[];
+    var lastWasDiscontinuity = false;
+    for (var i = 0; i < lines.length; i++) {
+      final raw = lines[i];
+      final line = raw.trimRight();
+      // 头部 / 尾部孤儿 discontinuity: 跳过
+      if (line == '#EXT-X-DISCONTINUITY') {
+        if (i < firstContentIdx) continue;
+        if (i > lastContentIdx) continue;
+        // 中间连续多个 discontinuity: 合并成 1 个
+        if (lastWasDiscontinuity) continue;
+        out.add(raw);
+        lastWasDiscontinuity = true;
+        continue;
+      }
+      // 空行不算 "内容", 不影响 lastWasDiscontinuity 状态
+      if (line.isEmpty) {
+        out.add(raw);
+        continue;
+      }
+      out.add(raw);
+      lastWasDiscontinuity = false;
+    }
+    return out;
+  }
+
+  /// v2.0.92: 从 m3u8 playlist 里删 ad 段 + 删孤儿 discontinuity.
+  ///
+  /// 配合 player_screen 的 runtime ad 跳:
+  ///   - 这里: m3u8 重写时**物理删掉 ad 段**, libmpv 根本看不到 ad,
+  ///     不再有"卡住几秒再跳过"
+  ///   - runtime 跳: 兜底 — 万一跨域识别漏了, libmpv 还是加载了 ad 段,
+  ///     duration 跳变触发 seek 回去, 至少不卡死死循环
+  ///
+  /// 边界: master playlist (含 #EXT-X-STREAM-INF) 不过滤, 子 m3u8 走 LOCAL
+  /// 代理时被分别过滤.
+  static String _stripAdsFromM3u8(String body, String workerDomain) {
+    final lines = body.split('\n');
+    final baseHost = _detectBaseHostFromM3u8(lines) ?? workerDomain;
+
+    final out = <String>[];
+    var removedAny = false;
+    var i = 0;
+    while (i < lines.length) {
+      final raw = lines[i];
+      final line = raw.trimRight();
+      // 空行 / 主播放列表标记 / EXTM3U: 保留
+      if (line.isEmpty ||
+          line == '#EXTM3U' ||
+          line.startsWith('#EXT-X-STREAM-INF')) {
+        out.add(raw);
+        i++;
+        continue;
+      }
+      // #EXTINF: 它描述**下一个段 URL** 的时长. 看下一行是不是 ad, 是的话一起删.
+      if (line.startsWith('#EXTINF:')) {
+        if (i + 1 < lines.length) {
+          final next = lines[i + 1].trimRight();
+          if (_isAdUrl(next, baseHost)) {
+            // 删 #EXTINF + 段 URL
+            i += 2;
+            removedAny = true;
+            continue;
+          }
+        }
+        out.add(raw);
+        i++;
+        continue;
+      }
+      // 其他注释 (KEY, MAP, VERSION, TARGETDURATION, MEDIA-SEQUENCE, ENDLIST,
+      //   CUE-OUT, CUE-IN, DISCONTINUITY 等): 保留
+      if (line.startsWith('#')) {
+        out.add(raw);
+        i++;
+        continue;
+      }
+      // 段 URL 行 (罕见 — 不带 #EXTINF 的孤立段, 兜底删)
+      if (_isAdUrl(line, baseHost)) {
+        removedAny = true;
+        i++;
+        continue;
+      }
+      out.add(raw);
+      i++;
+    }
+
+    if (removedAny) {
+      return _pruneOrphanDiscontinuities(out).join('\n');
+    }
+    return out.join('\n');
+  }
+
   /// v2.0.58: 从 backend 首包解析 HTTP 响应状态行 (e.g. "HTTP/1.1 200 OK" → "200 OK").
   /// 用于诊断 "优选 IP 4s 时长" — 502/403/404 错误页会让 libmpv 拿到非视频内容.
   /// 返回 null = 不是 HTTP 响应 / 解析失败 (CONNECT 隧道加密数据也会返 null).
@@ -847,7 +1044,15 @@ class VideoProxyServer {
         final port = _port;
         final localBase = 'http://127.0.0.1:$port';
         final workerBase = 'https://$workerDomain';
-        final rewritten = body.replaceAll(workerBase, localBase);
+        // v2.0.92: 改写 URL 前先在 worker 域 m3u8 上做 ad 段过滤 (基于原 host)
+        //   原因: 用户反馈"播放到广告位卡住几秒再跳过" — 之前的方案是
+        //   libmpv 已经加载了 ad 段, duration 跳变触发 seek 回去, 中间有几秒
+        //   广告播放. 现在改在 m3u8 重写层就物理删除 ad 段, libmpv 根本看不到.
+        //   过滤规则: 跟 m3u8_service._looksLikeAdSegment 一致 — URL 含广告
+        //   关键词 (/ad/, /ads/, doubleclick, googlevideo 等) 或 host 跟
+        //   m3u8 的 base host 跨域.
+        final filtered = _stripAdsFromM3u8(body, workerDomain);
+        final rewritten = filtered.replaceAll(workerBase, localBase);
         final rewrittenBytes = utf8.encode(rewritten);
 
         // chunked: 长度行 (hex) + 数据 + \r\n + 结束 chunk (0\r\n\r\n)
