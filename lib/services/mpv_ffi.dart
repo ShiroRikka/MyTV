@@ -93,6 +93,9 @@ typedef _MpvGetPropertyD = int Function(
 const int _kMpvFormatString = 3;
 const int _kMpvFormatInt64 = 4;
 const int _kMpvFormatDouble = 5;
+// v2.0.88: MPV_FORMAT_FLAG = 1 (libmpv bool 类型 property 用这个 format)
+//   跟 INT64 不一样, libmpv 内部 bool 是单字节 (uint8), 不是 int64
+const int _kMpvFormatBool = 1;
 
 class MpvFFI {
   MpvFFI._();
@@ -328,6 +331,23 @@ class MpvFFI {
           }
           final v = charPtr.toDartString();
           _lastPropertyRead = '✅ $name: $v (STRING)';
+          return v;
+        } finally {
+          calloc.free(outPtr);
+        }
+      } else if (format == _kMpvFormatBool) {
+        // v2.0.88: FLAG/BOOL format 返 uint8 (1 byte). libmpv bool property
+        //   (pause / idle-active 等) 走这个 format. 用 calloc<Uint8> 分配 1 字节.
+        final outPtr = calloc<Uint8>();
+        try {
+          final rc = fn(Pointer<Void>.fromAddress(handle), namePtr, format, outPtr.cast<Void>());
+          if (rc != 0) {
+            _lastError = 'mpv_get_property($name, FLAG) 返 rc=$rc';
+            _lastPropertyRead = '❌ $name: rc=$rc';
+            return null;
+          }
+          final v = outPtr.value != 0;
+          _lastPropertyRead = '✅ $name: $v (FLAG)';
           return v;
         } finally {
           calloc.free(outPtr);

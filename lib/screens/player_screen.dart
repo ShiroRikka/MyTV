@@ -1842,71 +1842,133 @@ class _PlayerScreenState extends State<PlayerScreen>
     _startSpeedSampling();
   }
 
-  /// v2.0.86: 1Hz 采样 libmpv demuxer-bytes (累计下载字节), 算 delta = 实时下载速度
+  /// v2.0.88: 1Hz 采样 libmpv 各种 property, 算实时下载速度
   ///
-  /// 为什么不直接用 m3u8 测速:
-  ///   m3u8 测速只在选源时跑一次 (player_sources_panel), 播放中不更新
-  ///   demuxer-bytes 是 libmpv 持续统计的, 播放中每秒钟都变, 算 delta 准
+  /// 演化 (4 轮迭代):
+  ///   v2.0.34: 用 getPropertyString 读 demuxer-bytes → 永远 null (libmpv 文档
+  ///            明说对 Number 类型返 NULL) → 永远 0 B/s
+  ///   v2.0.86: 改用 getPropertyI64 走专用 API → 还是 0 B/s (装上还是 0)
+  ///   v2.0.87: 改用 mpv_get_property 通用 API (走 void* union) + 加诊断 tile
+  ///            → 用户装上打开诊断 tile, 看到 `mpv_get_property(input-bitrate, DOUBLE)
+  ///            返 rc=-8` (PROPERTY_UNAVAILABLE). 说明 libmpv 内部没在播, 加上
+  ///            input-bitrate 在 libmpv 0.36 是 int64 不是 double (v2.0.86 写错 format)
+  ///   v2.0.88: 扩 fallback 链 + 加播放状态文本 fallback
   ///
-  /// v2.0.86 改法: 走 MpvFFI.getPropertyI64 读 Number 类型 property
-  ///   之前 (v2.0.34 ~ v2.0.85) 用 MpvFFI.getPropertyString 读 demuxer-bytes
-  ///   永远返 null — libmpv 文档明说 mpv_get_property_string 对 Number 类型
-  ///   property 返 NULL. 结果: 实时下载速度一直显示 "0 B/s" (用户反馈).
-  ///   改用 mpv_get_property_i64 走 Number 类型通道, 拿 int64 稳.
+  /// 修法 (v2.0.88):
+  ///   1. demuxer-bytes 改成走通用 getPropertyAny (INT64 format), 跟 v2.0.87 一致
+  ///   2. 加 demuxer-cache-bytes fallback (跟 demuxer-bytes 类似但走 cache layer)
+  ///   3. input-bitrate 改用 INT64 format (v2.0.86 写错用 DOUBLE, libmpv 实际是 int64)
+  ///   4. 加 video-bitrate + audio-bitrate + sub-bitrate (DOUBLE, kibit/s) 兜底
+  ///   5. 加播放状态 fallback: idle-active / pause → 显示「缓冲中 / 暂停 / 未开播」
+  ///      文本状态, 不再永远 0 B/s 骗用户
   ///
-  /// 兜底链: demuxer-bytes → cache-size → input-bitrate (瞬时码率)
-  ///   1. demuxer-bytes: libmpv demuxer 累计下载字节, HLS/MP4 都有
-  ///   2. cache-size: libmpv 缓存字节, 跟 demuxer-bytes 类似但跟 demuxer 无关
-  ///   3. input-bitrate: libmpv 内部统计的瞬时码率 (kb/s, double),
-  ///      用于前两个拿不到时 fallback (一定非 0, 但只能给瞬时值)
+  /// 字段类型映射 (libmpv 0.36 文档):
+  ///   - demuxer-bytes: int64 (累计字节)
+  ///   - demuxer-cache-bytes: int64 (累计 cache 字节)
+  ///   - cache-size: int64 (累计 cache 字节, 同上但不同名)
+  ///   - input-bitrate: int64 (输入 bitrate, **kibit/s** 注意是 1024-based)
+  ///   - video-bitrate: double (kibit/s)
+  ///   - audio-bitrate: double (kibit/s)
+  ///   - sub-bitrate: double (kibit/s)
+  ///   - idle-active: bool (player 是否闲置)
+  ///   - pause: bool (是否暂停)
   void _startSpeedSampling() {
     _speedSampleTimer?.cancel();
     _lastDemuxerBytes = 0;
     _lastSampleMs = 0;
     _downloadSpeedBps = 0;
+    _playbackStateText = ''; // v2.0.88: 文本状态 fallback
     _speedSampleTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
       if (!mounted) return;
       if (!MpvFFI.isAvailable) return;
       try {
         final handle = await _player.handle;
         if (handle == 0) return;
-        // v2.0.86: 读累计下载字节. 优先 demuxer-bytes, 拿不到 fallback cache-size.
-        //   mpv_get_property_i64 走 Number 类型通道, 不会再像 get_property_string
-        //   那样对 Number 类型返 NULL.
+
+        // 1. 主路径: 读累计下载字节 (demuxer-bytes)
+        //   v2.0.87 改用通用 mpv_get_property (INT64 format). 拿到后算 delta = bps.
         int? cur = MpvFFI.getPropertyI64(handle, 'demuxer-bytes');
+        cur ??= MpvFFI.getPropertyI64(handle, 'demuxer-cache-bytes');
         cur ??= MpvFFI.getPropertyI64(handle, 'cache-size');
-        if (cur == null) {
-          // v2.0.86: 两个累计 property 都拿不到, 退到 input-bitrate 瞬时码率
-          //   (kb/s, libmpv 内部统计, 一定非 0). 拿到后 bps = kbps * 1024 / 8.
-          final kbps = MpvFFI.getPropertyDouble(handle, 'input-bitrate');
-          if (kbps != null && kbps > 0 && mounted) {
+        if (cur != null) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (_lastSampleMs == 0 || cur < _lastDemuxerBytes) {
+            // 首次采样 / demuxer 重置 (切集), 只记基线, 不算速度
+            _lastDemuxerBytes = cur;
+            _lastSampleMs = now;
+            return;
+          }
+          final deltaBytes = cur - _lastDemuxerBytes;
+          final deltaMs = now - _lastSampleMs;
+          if (deltaMs <= 0) return;
+          final bps = deltaBytes * 1000.0 / deltaMs;
+          _lastDemuxerBytes = cur;
+          _lastSampleMs = now;
+          if (mounted) {
             setState(() {
-              _downloadSpeedBps = kbps * 1024 / 8; // kb/s → Bytes/s
+              _downloadSpeedBps = bps;
+              _playbackStateText = ''; // 有速度, 清掉文本
             });
           }
           return;
         }
-        final now = DateTime.now().millisecondsSinceEpoch;
-        if (_lastSampleMs == 0 || cur < _lastDemuxerBytes) {
-          // 首次采样 / demuxer 重置 (切集), 只记基线, 不算速度
-          _lastDemuxerBytes = cur;
-          _lastSampleMs = now;
+
+        // 2. v2.0.88 兜底: input-bitrate 瞬时码率 (int64, kibit/s)
+        //   v2.0.86 我错用 DOUBLE format, libmpv 0.36 实际是 int64 → rc=-8 (format 错)
+        //   改 INT64 format. 拿到后 bps = kbps * 1024 / 8.
+        final inputBps = MpvFFI.getPropertyI64(handle, 'input-bitrate');
+        if (inputBps != null && inputBps > 0 && mounted) {
+          // input-bitrate 是 kibit/s, 1 kibit = 1024 bit, 转 Bytes/s
+          final bps = inputBps * 1024 / 8;
+          setState(() {
+            _downloadSpeedBps = bps.toDouble();
+            _playbackStateText = '';
+          });
           return;
         }
-        final deltaBytes = cur - _lastDemuxerBytes;
-        final deltaMs = now - _lastSampleMs;
-        if (deltaMs <= 0) return;
-        final bps = deltaBytes * 1000.0 / deltaMs;
-        _lastDemuxerBytes = cur;
-        _lastSampleMs = now;
-        if (mounted) {
+
+        // 3. v2.0.88 兜底: video + audio + sub bitrate 加起来 (DOUBLE, kibit/s)
+        final v = MpvFFI.getPropertyDouble(handle, 'video-bitrate') ?? 0;
+        final a = MpvFFI.getPropertyDouble(handle, 'audio-bitrate') ?? 0;
+        final s = MpvFFI.getPropertyDouble(handle, 'sub-bitrate') ?? 0;
+        final totalKibit = v + a + s;
+        if (totalKibit > 0 && mounted) {
+          final bps = totalKibit * 1024 / 8; // kibit/s → Bytes/s
           setState(() {
             _downloadSpeedBps = bps;
+            _playbackStateText = '';
+          });
+          return;
+        }
+
+        // 4. v2.0.88 文本状态 fallback: 显示「缓冲中 / 暂停 / 未开播」, 不再永远 0 B/s 骗用户
+        final idle = MpvFFI.getPropertyAny(handle, 'idle-active', _kMpvFormatBool);
+        final paused = MpvFFI.getPropertyAny(handle, 'pause', _kMpvFormatBool);
+        String stateText = '';
+        if (paused == true) {
+          stateText = '已暂停';
+        } else if (idle == true) {
+          stateText = '未开播 / 缓冲中';
+        } else {
+          // player 在播但所有 property 都拿不到 (拿不到 demuxer-bytes 也拿不到 bitrate)
+          // 罕见情况, 显示「测量中...」让用户知道在采
+          stateText = '测量中...';
+        }
+        if (mounted && stateText != _playbackStateText) {
+          setState(() {
+            _playbackStateText = stateText;
+            _downloadSpeedBps = 0; // 文本状态时不算速度, 避免跳数
           });
         }
       } catch (_) {}
     });
   }
+
+  /// v2.0.88: 播放状态文本 fallback (在拿不到 demuxer-bytes / bitrate 时显示)
+  ///   - "已暂停" (paused == true)
+  ///   - "未开播 / 缓冲中" (idle == true)
+  ///   - "测量中..." (player 在播但 property 都拿不到, 罕见)
+  String _playbackStateText = '';
 
   /// v2.0.64: 解析分享页 HTML 提取真实视频 URL.
   ///
@@ -3814,13 +3876,21 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ),
                   ),
                   const Spacer(),
+                  // v2.0.88: 文本状态 fallback 优先 (拿不到 demuxer-bytes /
+                  //   bitrate 时显示「已暂停 / 未开播 / 缓冲中 / 测量中」)
                   Text(
-                    _formatSpeed(_downloadSpeedBps),
-                    style: const TextStyle(
-                      color: Color(0xFF60a5fa),
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      fontFeatures: [FontFeature.tabularFigures()],
+                    _playbackStateText.isNotEmpty
+                        ? _playbackStateText
+                        : _formatSpeed(_downloadSpeedBps),
+                    style: TextStyle(
+                      color: _playbackStateText.isNotEmpty
+                          ? const Color(0xFF9ca3af) // 文本状态灰
+                          : const Color(0xFF60a5fa), // 速度蓝
+                      fontSize: _playbackStateText.isNotEmpty ? 13 : 16,
+                      fontWeight: _playbackStateText.isNotEmpty
+                          ? FontWeight.w400
+                          : FontWeight.w600,
+                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),
                 ],
