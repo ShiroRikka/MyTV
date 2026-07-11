@@ -17,6 +17,14 @@
 //              - 平板: 21:9 (跟 v2.0.51 TMDB hero 一致, 给选集留空间)
 //            整体结构跟 v2.0.43 TMDB hero 一模一样, 只差"没 TMDB API
 //            拿 overview / 评分 / 集数" (豆瓣没公开 API, 没必要接).
+//   v2.0.84: 平板 21:9 背景用 coverUrl (16:9 横版剧照 l_cover 1280x720),
+//            替代 cover (2:3 竖海报 l_ratio_poster 600x900). 平板 2K 屏
+//            1024+ 宽, 竖海报拉到全宽边角糊; 横版完美 cover.
+//   v2.0.85: 手机 16:9 背景也用 coverUrl (跟平板一致). 之前只平板改,
+//            手机仍用竖海报 (注释说"手机 600x900 够清晰"), 但用户反馈
+//            "手机也改下" — 手机屏 16:9 也把 l_ratio_poster 600x900 拉
+//            到 720-1200 物理像素宽, 边角糊. 改后手机/平板共用
+//            _backgroundUrl() (原 _tabletBackgroundUrl 重命名).
 //
 // 数据流 (无网络):
 //   1. widget.videoInfo.cover  → getImageUrl(cover, source) 自动
@@ -75,9 +83,11 @@ class DoubanDetailHeader extends StatefulWidget {
 }
 
 class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
-  /// v2.0.84: 平板背景 URL — coverUrl (横版) 优先, cover (竖版) 兜底.
-  ///   coverUrl 走 [getDoubanCoverUrl] 升级到 l_cover 1280x720 + CDN 切换
-  Future<String> _tabletBackgroundUrl() async {
+  /// v2.0.84: 背景 URL — coverUrl (16:9 横版剧照) 优先, cover (2:3 竖海报) 兜底.
+  ///   coverUrl 走 [getDoubanCoverUrl] 升级到 l_cover 1280x720 + CDN 切换.
+  ///   无 coverUrl 时 fallback cover (竖海报, 走 getImageUrl 升 l_ratio_poster).
+  ///   手机/平板都用这个 (v2.0.85 起手机也用, 之前只有平板用).
+  Future<String> _backgroundUrl() async {
     if (widget.coverUrl != null && widget.coverUrl!.isNotEmpty) {
       return getDoubanCoverUrl(widget.coverUrl!);
     }
@@ -121,16 +131,21 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
   ///   - 前景左侧 150x225 大竖海报 (主元素, 跟背景海报同一张图,
   ///     用 memCache 复用, 跟 v2.0.43 一致)
   ///   - 前景右侧: 大标题 + 年份/源
-  /// 平板 21:9 (v2.0.78 沿用): 跟手机结构一样, 比例更宽给选集留空间.
+  ///
+  /// v2.0.85: 背景改用 coverUrl (16:9 横版剧照 l_cover 1280x720), 跟平板一致.
+  ///   用户反馈「手机也改下」 — 之前注释说"手机仍用竖海报", 但手机屏
+  ///   16:9 也把 l_ratio_poster 600x900 拉到 720-1200 物理像素宽, 边角糊.
+  ///   coverUrl 横版 1280x720 完美 cover 16:9 手机屏, 前景 150x225 竖海报
+  ///   不变 (主元素).
   Widget _buildPhoneLayout(bool isDark) {
     return AspectRatio(
       aspectRatio: 16 / 9, // v2.0.43 TMDB hero 手机比例
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // 1) 背景: 整张海报 + 重度渐变 (跟 v2.0.43 TMDB hero 一致)
+          // 1) 背景: 横版 coverUrl (有则) / 竖版 cover (无则)
           FutureBuilder<String>(
-            future: getImageUrl(widget.cover, widget.source),
+            future: _backgroundUrl(),
             builder: (context, snapshot) {
               final imageUrl = snapshot.data ?? widget.cover;
               final headers = getImageRequestHeaders(imageUrl, widget.source);
@@ -230,6 +245,7 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
   ///   平板 2K 屏 1024+ 宽, 竖海报 600x900 拉到全宽会糊;
   ///   横版 l_cover 1280x720 完美 cover 平板宽度.
   ///   无 coverUrl 时 fallback 到 cover (竖海报).
+  /// v2.0.85: 跟手机共用 _backgroundUrl() (方法重命名).
   Widget _buildTabletLayout(bool isDark) {
     return AspectRatio(
       aspectRatio: 21 / 9,
@@ -238,7 +254,7 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
         children: [
           // 1) 背景: 横版 coverUrl (有则) / 竖版 cover (无则)
           FutureBuilder<String>(
-            future: _tabletBackgroundUrl(),
+            future: _backgroundUrl(),
             builder: (context, snapshot) {
               final imageUrl = snapshot.data ?? widget.cover;
               final headers = getImageRequestHeaders(imageUrl, widget.source);
