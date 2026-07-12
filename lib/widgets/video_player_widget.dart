@@ -193,6 +193,14 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> with WidgetsBindi
         await proxy.stop();
       }
     }
+    // v2.0.96: 同 player_screen, 应用 mpv 播放调优 (hwdec/cache/framedrop).
+    //   修复「卡住 → 声音继续 → 突然快速播放一段」(软解丢帧 burst). 失败静默.
+    if (MpvFFI.isAvailable) {
+      try {
+        final handle = await _player!.handle;
+        MpvFFI.applyPlaybackTuning(handle);
+      } catch (_) {}
+    }
     _videoController = VideoController(_player!);
     _setupPlayerListeners();
     if (_currentUrl != null) {

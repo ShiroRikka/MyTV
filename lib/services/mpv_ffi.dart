@@ -202,6 +202,34 @@ class MpvFFI {
     }
   }
 
+  /// v2.0.96: 应用播放调优 (hwdec/cache/framedrop).
+  ///
+  /// 修复用户反馈「播放一有事卡住, 声音还有, 然后突然快速播放一段」:
+  ///   根因: Player() 默认不带任何 mpv 配置, 走纯默认值 (软解 hwdec=no +
+  ///   framedrop=vo). 高码率 / 复杂片段 / 切流瞬间解码跟不上 → mpv 丢视频帧
+  ///   保音频同步 (framedrop=vo 只在 VO 层丢) → 音还在, 画面卡 → 解码追上后
+  ///   burst 一堆帧 = "突然快速播放一段".
+  ///
+  /// 修法 (3 个属性, 单个失败不影响其他):
+  ///   hwdec=auto-safe  优先硬解 (Android MediaCodec / iOS VideoToolbox /
+  ///                    Windows DXVA / Linux VAAPI/NVDEC), 失败自动回退软解.
+  ///                    auto-safe 比 auto 更保守, 只用确认稳定的硬解器, 不会黑屏.
+  ///   cache=yes + cache-secs=10  demuxer 缓冲 10s, 吸收网络抖动 / 切流瞬间
+  ///                               的 buffer underrun, 防止触发 framedrop.
+  ///   framedrop=decoder+vo  解码器 + VO 都参与丢帧 (不光 VO), A/V 同步更紧,
+  ///                          不会积压一堆帧后 burst.
+  ///
+  /// 调用时机: Player 创建后, open media 之前 (运行时改也行, 但 open 前更稳).
+  /// 失败静默 — FFI 不可用 / handle=0 / 单个 property 不存在都不影响播放,
+  /// 只是没调优效果, 行为退回原默认值.
+  static void applyPlaybackTuning(int handle) {
+    if (handle == 0) return;
+    setPropertyString(handle, 'hwdec', 'auto-safe');
+    setPropertyString(handle, 'cache', 'yes');
+    setPropertyString(handle, 'cache-secs', '10');
+    setPropertyString(handle, 'framedrop', 'decoder+vo');
+  }
+
   /// v2.0.34+: 读 mpv 字符串属性. 失败返 null (load error / handle=0 / property 不存在).
   /// 内部把 char* 转成 Dart String, 用 utf8.decode 自动 copy, 原 char* 是 mpv 内部
   /// 分配的, 这里没法 mpv_free (Dart 侧没暴露), 暂时泄漏, 但 property 读很慢

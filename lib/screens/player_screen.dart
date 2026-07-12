@@ -171,6 +171,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration _lastKnownPosition = Duration.zero;
   Duration _lastDurationForAdDetect = Duration.zero;
   DateTime _lastAdDetectAt = DateTime.fromMillisecondsSinceEpoch(0);
+  // v2.0.97: 上次广告跳过的目标位置. 用于检测"同一广告位反复触发":
+  //   如果再次触发广告, 且 _lastKnownPosition 跟这个位置很近 (< 60s),
+  //   说明 seek 回去后 m3u8 reload 又卡在同一广告位 — 这次改 seek 到
+  //   _lastKnownPosition + 30s (跳过广告段), 而不是 seek 回 _lastKnownPosition
+  //   (会再卡一次). 修复用户反馈"卡住 5s 然后回到 5-10 分钟前".
+  Duration _lastAdSkipTarget = Duration.zero;
 
   // 自动播下一集: 防止 position/completed 重复触发
   bool _autoPlayedThisEpisode = false;
@@ -219,6 +225,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     super.initState();
     _player = Player();
     _controller = VideoController(_player);
+    // v2.0.96: 给 libmpv 配播放调优 (hwdec/cache/framedrop).
+    //   修复用户反馈「播放一有事卡住, 声音还有, 然后突然快速播放一段」:
+    //   Player() 默认无任何 mpv 配置 → 软解 + framedrop=vo → 复杂片段丢视频帧
+    //   保音频同步 → 音还在画面卡 → 解码追上后 burst = "快速播放一段".
+    //   调优内容见 MpvFFI.applyPlaybackTuning 注释. fire-and-forget, 失败静默
+    //   回退默认行为 (不影响播放, 只是没有调优效果).
+    unawaited(() async {
+      if (!MpvFFI.isAvailable) return;
+      try {
+        final handle = await _player.handle;
+        MpvFFI.applyPlaybackTuning(handle);
+      } catch (_) {}
+    }());
     // v2.0.51: 选集 PageView 初始化
     _episodesPageController = PageController();
     _pageControllerNotifier.value = _episodesPageController;
@@ -292,20 +311,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         //   - prevPos > 10s: 已经在主片播了一段, 不是开场
         //   - pos < 5s: 突然回到开头附近
         //   - 倒退幅度 > 5s: 真的跳了, 不是抖动
-        //   - 冷却 3s: 避免连续触发
+        //   - 冷却 + 反复触发处理在 _skipAd 里 (v2.0.97)
         if (_scrubbingValue == null &&
             prevPos > const Duration(seconds: 10) &&
             pos < const Duration(seconds: 5) &&
-            prevPos - pos > const Duration(seconds: 5) &&
-            DateTime.now().difference(_lastAdDetectAt) >
-                const Duration(seconds: 3)) {
-          // 兜底 seek 回 prevPos. 注意 _currentPosition 已经被设成
-          // pos (广告流的 0) 了, 这里强行覆盖回去避免 UI 闪到 0
-          _currentPosition = prevPos;
-          _player.seek(prevPos);
-          _lastAdDetectAt = DateTime.now();
-          // ignore: avoid_print
-          print('[ad-skip v2.0.33] position 倒退检测: ${prevPos.inSeconds}s → ${pos.inSeconds}s, seek 回 ${prevPos.inSeconds}s');
+            prevPos - pos > const Duration(seconds: 5)) {
+          _skipAd('position 倒退 ${prevPos.inSeconds}s→${pos.inSeconds}s');
         }
         // v1.0.52: 实时刷新时间文字 + 进度条
         // 之前只更新 _currentPosition 但不 setState, 底部栏的
@@ -348,13 +359,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       // 边界: seek 回去后主片重新加载, duration 又会发 2700s, 此时
       // wasDur = 30s, dur = 2700s, 是"变大" (30→2700), 不触发, 不
       // 会死循环.
+      // v2.0.97: 改用 _skipAd helper, 共享冷却 + 同一广告位反复触发
+      //   检测 (冷却 15s 内不重复 seek, 反复触发时跳 +30s 而不是回原位).
       if (wasDur > Duration.zero &&
           wasDur - dur > const Duration(seconds: 60)) {
-        if (_lastKnownPosition > Duration.zero) {
-          _player.seek(_lastKnownPosition);
-          // 兜底: 避免 UI 在 seek 完成前显示广告流的 0
-          _currentPosition = _lastKnownPosition;
-        }
+        _skipAd('duration 跳变 ${wasDur.inSeconds}s→${dur.inSeconds}s');
       }
       // 记录这一次 duration, 下一帧对比
       if (dur > Duration.zero) {
@@ -516,6 +525,47 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// SharedPreferences 存储键（按视频标题区分）
   String get _skipPrefKey => 'skip_config_${widget.videoInfo.title}';
+
+  /// v2.0.97: 统一广告跳过 helper. duration 跳变检测 + position 倒退检测
+  /// 都走这个, 保证两个检测点行为一致 + 共享冷却 + 共享"同一广告位反复
+  /// 触发"检测.
+  ///
+  /// 修复用户反馈"播放到广告卡住 5s 最右然后回到 5-10 分钟前播放的位置":
+  ///   根因: 旧逻辑 seek 回 _lastKnownPosition 后, 主片重新加载, position
+  ///   从 0 涨到 5s, 又触发 position 倒退检测 (prev=28min → 5s), 又 seek
+  ///   回 _lastKnownPosition. 反复卡在同一广告位 5s, 直到 m3u8 reload
+  ///   完成 position 涨过 5s 才解脱.
+  ///
+  /// 修法 (3 个改进):
+  ///   1. 冷却从 3s 加到 15s: seek 回去后 m3u8 reload 期间 (5-10s)
+  ///      position 从 0 涨, 15s 冷却能覆盖 reload 期, 不会反复触发.
+  ///   2. 记 _lastAdSkipTarget: 如果再次触发广告且 _lastKnownPosition 跟
+  ///      _lastAdSkipTarget 很近 (< 60s), 说明同一广告位反复触发 — 这次
+  ///      seek 到 _lastKnownPosition + 30s (跳过广告段), 不再 seek 回原位.
+  ///   3. duration 跳变检测也走冷却: 之前 duration 检测没冷却, 容易跟
+  ///      position 检测叠加 (同一广告位触发两次 seek).
+  void _skipAd(String reason) {
+    final now = DateTime.now();
+    if (now.difference(_lastAdDetectAt) < const Duration(seconds: 15)) {
+      return;
+    }
+    if (_lastKnownPosition <= Duration.zero) return;
+    // 同一广告位反复触发检测: _lastKnownPosition 跟上次跳过目标 < 60s
+    final isRepeat = _lastAdSkipTarget > Duration.zero &&
+        (_lastKnownPosition - _lastAdSkipTarget).abs() <
+            const Duration(seconds: 60);
+    final target = isRepeat
+        ? _lastKnownPosition + const Duration(seconds: 30)
+        : _lastKnownPosition;
+    _currentPosition = target;
+    _player.seek(target);
+    _lastAdSkipTarget = target;
+    _lastAdDetectAt = now;
+    // ignore: avoid_print
+    print('[ad-skip v2.0.97] $reason: '
+        'lastKnown=${_lastKnownPosition.inSeconds}s '
+        'repeat=$isRepeat seekTo=${target.inSeconds}s');
+  }
 
   /// 加载跳过片头片尾配置
   Future<void> _loadSkipConfig() async {
@@ -2129,6 +2179,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     _lastKnownPosition = Duration.zero;
     _lastDurationForAdDetect = Duration.zero;
     _lastAdDetectAt = DateTime.fromMillisecondsSinceEpoch(0);
+    // v2.0.97: 同样清零 _lastAdSkipTarget, 新一集不沿用上一集的跳过目标
+    _lastAdSkipTarget = Duration.zero;
 
     // 记住这次要 seek 到的位置, 等 player 缓冲到可以 seek 时用
     // 仅在用户主动开新集时且和云记忆吻合的那次才用
@@ -2564,6 +2616,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildDetailView(bool isDark) {
+    // v2.1.8: 平板 (宽 >= 600) header 右侧已显示简介, 下方不重复渲染独立 section;
+    //   手机 header 屏窄没显示简介, 仍走下方独立 section.
+    final isTablet = MediaQuery.of(context).size.width >= 600;
     return Column(
       children: [
         // 顶部 bar
@@ -2613,13 +2668,19 @@ class _PlayerScreenState extends State<PlayerScreen>
                     sourceName: widget.videoInfo.sourceName,
                     coverUrl: widget.videoInfo.coverUrl,
                     tmdbBackdropUrl: _tmdbBackdropUrl,
+                    // v2.1.8: 传 summary, 平板 header 右侧显示简介填满空白.
+                    //   手机 header 屏窄不显示 (DoubanDetailHeader 内部判断),
+                    //   走下方独立 _buildSummarySection.
+                    summary: _summary,
                   )
                 else
                   _buildPosterHeader(isDark),
                 // v2.1.7: 剧情简介 (用户反馈"海报多的地方放上电影简介")
                 //   选集 section 上面. 走 DoubanService.getDoubanDetails 拉
                 //   doubanId 详情, 取 summary. 拉不到 / 字段空 = 不渲染.
-                if (_summary != null) _buildSummarySection(isDark),
+                // v2.1.8: 平板 header 右侧已显示简介, 不再重复渲染独立 section;
+                //   手机 header 屏窄没显示简介, 仍走独立 section.
+                if (_summary != null && !isTablet) _buildSummarySection(isDark),
                 // 集数 (放在源上面,LunaTV Web 风格)
                 _buildEpisodeSection(isDark),
                 // 源 + 测速

@@ -92,6 +92,10 @@ class DoubanDetailHeader extends StatefulWidget {
   //   player_screen 传进来, 优先级 > coverUrl > cover. 留空 = 走 coverUrl.
   //   TMDB image CDN (image.tmdb.org) 直连即可, 不需要 worker 加速.
   final String? tmdbBackdropUrl;
+  // v2.1.8: 豆瓣剧情简介. 平板/宽屏 layout 把它放进 header 右侧 (标题/年份
+  //   下方), 填满原来大片空白. 手机 layout 屏太窄不放 (走独立 summary section).
+  //   null/空 = 不渲染简介部分, 跟 v2.1.7 之前完全一致.
+  final String? summary;
 
   const DoubanDetailHeader({
     super.key,
@@ -102,6 +106,7 @@ class DoubanDetailHeader extends StatefulWidget {
     this.sourceName,
     this.coverUrl,
     this.tmdbBackdropUrl,
+    this.summary,
   });
 
   @override
@@ -216,57 +221,67 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
               ),
             ),
           ),
-          // 2) 前景: 左侧 150x225 大竖海报 (主元素) + 右侧标题/年份/源
+          // 2) 前景: 左侧大竖海报 (主元素) + 右侧标题/年份/源
+          // v2.1.8: 用 LayoutBuilder 拿容器高度, 海报高度 = 容器高 - padding,
+          //   宽度 = 高度 * 2/3. 修复"海报和片名错位" — 之前海报固定 150x225,
+          //   16:9 窄屏容器高 < 225 时海报溢出, Row 被撑高, 标题贴底对不齐海报.
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 左侧大竖海报 (主元素, 跟 v2.0.43 TMDB hero 一致)
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: SizedBox(
-                    width: 150,
-                    height: 225,
-                    child: FutureBuilder<String>(
-                      future: getImageUrl(widget.cover, widget.source),
-                      builder: (context, snapshot) {
-                        final imageUrl = snapshot.data ?? widget.cover;
-                        final headers =
-                            getImageRequestHeaders(imageUrl, widget.source);
-                        return CachedNetworkImage(
-                          imageUrl: imageUrl,
-                          fit: BoxFit.cover,
-                          httpHeaders: headers,
-                          memCacheWidth: (150 *
-                                  MediaQuery.of(context).devicePixelRatio)
-                              .round(),
-                          memCacheHeight: (225 *
-                                  MediaQuery.of(context).devicePixelRatio)
-                              .round(),
-                          placeholder: (c, u) => Container(
-                            color: isDark
-                                ? const Color(0xFF1F2937)
-                                : const Color(0xFFE5E7EB),
-                          ),
-                          errorWidget: (c, u, e) => Container(
-                            color: isDark
-                                ? const Color(0xFF1F2937)
-                                : const Color(0xFFE5E7EB),
-                            child: const Icon(Icons.movie_outlined,
-                                color: Colors.grey, size: 48),
-                          ),
-                        );
-                      },
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final maxH = constraints.maxHeight;
+                // 海报高度不超过容器高, 不超过 225 (大屏不无限放大)
+                final posterH = maxH < 225 ? maxH : 225.0;
+                final posterW = posterH * 2 / 3;
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: SizedBox(
+                        width: posterW,
+                        height: posterH,
+                        child: FutureBuilder<String>(
+                          future: getImageUrl(widget.cover, widget.source),
+                          builder: (context, snapshot) {
+                            final imageUrl = snapshot.data ?? widget.cover;
+                            final headers =
+                                getImageRequestHeaders(imageUrl, widget.source);
+                            return CachedNetworkImage(
+                              imageUrl: imageUrl,
+                              fit: BoxFit.cover,
+                              httpHeaders: headers,
+                              memCacheWidth: (posterW *
+                                      MediaQuery.of(context).devicePixelRatio)
+                                  .round(),
+                              memCacheHeight: (posterH *
+                                      MediaQuery.of(context).devicePixelRatio)
+                                  .round(),
+                              placeholder: (c, u) => Container(
+                                color: isDark
+                                    ? const Color(0xFF1F2937)
+                                    : const Color(0xFFE5E7EB),
+                              ),
+                              errorWidget: (c, u, e) => Container(
+                                color: isDark
+                                    ? const Color(0xFF1F2937)
+                                    : const Color(0xFFE5E7EB),
+                                child: const Icon(Icons.movie_outlined,
+                                    color: Colors.grey, size: 48),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: 14),
-                // 右侧: 标题 + 年份 + 源
-                Expanded(
-                  child: _buildMetaColumn(alignEnd: false),
-                ),
-              ],
+                    const SizedBox(width: 14),
+                    // 右侧: 标题 + 年份 + 源
+                    Expanded(
+                      child: _buildMetaColumn(alignEnd: false),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
         ],
@@ -371,9 +386,9 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
                   ),
                 ),
                 const SizedBox(width: 14),
-                // 右侧: 标题 + 年份 + 源
+                // 右侧: 标题 + 年份 + 源 + 简介 (v2.1.8: 平板填满右侧空白)
                 Expanded(
-                  child: _buildMetaColumn(alignEnd: false),
+                  child: _buildMetaColumn(alignEnd: false, showSummary: true),
                 ),
               ],
             ),
@@ -386,10 +401,19 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
   /// v2.0.78: 标题 + 年份 + 源 — 浮在渐变蒙版上, 白字带阴影
   ///
   /// 共用手机/平板布局, 文字颜色 + 阴影一致 (跟 TMDB hero v2.0.43 风格).
-  Widget _buildMetaColumn({required bool alignEnd}) {
+  /// v2.1.8: 平板 (showSummary=true) 在年份下方加剧情简介, Expanded 撑满
+  ///   剩余高度, 解决"右侧大片空白". 手机 (showSummary=false) 屏窄不放简介,
+  ///   走独立 summary section. alignEnd 参数保留但当前都传 false.
+  Widget _buildMetaColumn({required bool alignEnd, bool showSummary = false}) {
+    final hasSummary = showSummary &&
+        widget.summary != null &&
+        widget.summary!.trim().isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisAlignment: MainAxisAlignment.end, // 底部对齐
+      // v2.1.8: 有简介时顶部对齐 (标题置顶 → 简介 Expanded 撑满 → 年份贴底);
+      //   无简介时保持原底部对齐 (标题/年份贴底, 跟 v2.0.78 视觉一致).
+      mainAxisAlignment:
+          hasSummary ? MainAxisAlignment.start : MainAxisAlignment.end,
       mainAxisSize: MainAxisSize.max,
       children: [
         // 大标题
@@ -436,6 +460,25 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
               ),
           ],
         ),
+        // v2.1.8: 平板 — 剧情简介填满右侧剩余空间 (解决"右边空白")
+        if (hasSummary) ...[
+          const SizedBox(height: 10),
+          Expanded(
+            child: Text(
+              widget.summary!.trim(),
+              maxLines: 8,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.5,
+                color: Colors.white.withOpacity(0.82),
+                shadows: const [
+                  Shadow(color: Colors.black54, blurRadius: 4),
+                ],
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
