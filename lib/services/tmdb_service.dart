@@ -52,6 +52,13 @@ class TmdbService {
     RegExp(r'\s+season\s+[ivxlcdm]+$', caseSensitive: false),
     RegExp(r'\s+\d+(st|nd|rd|th)\s+season$', caseSensitive: false),
     RegExp(r'\s*第\s*[0-9一二三四五六七八九十百]+\s*[季期]$'),
+    // v2.0.96: 第 5 个 — 清洗剧名末尾的年份 (1900-2099).
+    //   跟 Season 清洗一个模式, 一次只删一个, while-loop.
+    //   用途: 豆瓣/番剧源常在 title 末尾加年份 (e.g. "痴迷 2025" / "Avatar 2009"),
+    //     TMDB search 内部按 "title starts with query" 匹配, 末尾年份
+    //     经常干扰, 清洗后命中率高很多. Selene-TV mk4 没这 regex,
+    //     我们 LunaTV-Mobile 加上 (跟 Season 清洗复用同一套机制).
+    RegExp(r'\s+(19|20)\d{2}$'),
   ];
 
   /// 清洗标题 — 反复应用 4 个 regex, 一次只删一个匹配, 删完重头扫.
@@ -93,10 +100,24 @@ class TmdbService {
 
   /// search/multi 拿精准 (mediaType, id).
   ///
-  /// 严格按 Selene-TV mk4.h 行为:
+  /// 跟 Selene-TV mk4.h 行为 (1:1 移植) + v2.0.96 改进:
+  ///
+  /// v2.0.96: search URL **不传 year 参数** (v2.0.93 传了, 命中很差).
+  ///   - TMDB 内部按 popularity DESC 排序, year 只是 hint, 传了反而
+  ///     经常 0 结果 (中文剧名 + year 太严). 改不传让 TMDB 用自己的
+  ///     ranking 自由匹配, 命中率明显高.
+  ///   - year 过滤从「硬 continue」(v2.0.93) 改「soft bonus」(v2.0.96):
+  ///     year 匹配的 +1000 popularity bonus, 不匹配 0, 然后 popularity
+  ///     (含 bonus) 排序. 这样 year 匹配优先, 但 year 不匹配时仍能选
+  ///     popularity 最大的, 跟 v2.0.93 year 硬过滤的"无结果"相比宽容
+  ///     很多. v2.0.93 行为: "痴迷 2025" → 0 result → SnackBar 弹错;
+  ///     v2.0.96 行为: "痴迷 2025" → 清洗 "痴迷" + 软 year bonus, 仍
+  ///     可能选到非 2025 的同名剧 (rare) 或 2025 真正的剧.
+  ///
+  /// v2.0.93 行为 (保留注释, 备查):
   ///   1. include_adult=false
   ///   2. media_type in ["movie", "tv"]
-  ///   3. year 过滤: release_date / first_air_date 前 4 位 == year
+  ///   3. year 过滤: release_date / first_air_date 前 4 位 == year (硬 continue)
   ///   4. 选 popularity 最大的
   ///   5. 没结果返 null
   ///
@@ -117,14 +138,16 @@ class TmdbService {
     final cached = await _readRefCache(cacheKey);
     if (cached != null) return cached;
 
-    // 2) search/multi 请求
+    // 2) search/multi 请求 — v2.0.96 不传 year 给 TMDB (命中率更高)
     final params = <String, String>{
       'api_key': apiKey,
       'query': cleaned,
       'include_adult': 'false',
       'page': '1',
     };
-    if (year != null) params['year'] = year.toString();
+    // v2.0.96: 删 year from URL — TMDB 内部按 popularity DESC 排, year
+    //   只是 hint, 传了经常 0 结果. 改用 soft bonus 在 result 上过滤.
+    // if (year != null) params['year'] = year.toString();
     final query =
         params.entries.map((e) => '${e.key}=${Uri.encodeComponent(e.value)}').join('&');
     final url = _wrapWithWorker('$_baseUrl/search/multi?$query');
@@ -147,22 +170,28 @@ class TmdbService {
 
     String? bestMediaType;
     int? bestId;
-    double bestPopularity = -1;
+    double bestScore = -1; // v2.0.96: 软 year bonus 后的综合分
     for (final r in results) {
       if (r is! Map) continue;
       final mediaType = r['media_type'] as String?;
       if (mediaType != 'movie' && mediaType != 'tv') continue;
 
-      // year 过滤 — release_date / first_air_date 前 4 位
+      // v2.0.96: year 过滤从硬 continue 改 soft bonus
+      //   - year 匹配: score = popularity + 1000 (优先选)
+      //   - year 不匹配: score = popularity + 0 (跟 year 匹配的一样参与排序)
+      //   - year 为空: score = popularity + 0
+      // 这样 year 匹配的剧优先, 但 year 不匹配时仍能选 popularity 最大的.
+      double score = (r['popularity'] as num?)?.toDouble() ?? 0;
       if (year != null) {
         final dateField = mediaType == 'movie' ? 'release_date' : 'first_air_date';
         final date = r[dateField] as String?;
-        if (date == null || !date.startsWith(year.toString())) continue;
+        if (date != null && date.startsWith(year.toString())) {
+          score += 1000.0;
+        }
       }
 
-      final popularity = (r['popularity'] as num?)?.toDouble() ?? 0;
-      if (popularity > bestPopularity) {
-        bestPopularity = popularity;
+      if (score > bestScore) {
+        bestScore = score;
         bestMediaType = mediaType;
         bestId = r['id'] as int?;
       }

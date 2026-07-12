@@ -2410,21 +2410,25 @@ class _PlayerScreenState extends State<PlayerScreen>
     return 'movie';
   }
 
-  // v2.0.95: TMDB 精准识别 — 后台拉 w1280 backdrop, 拿到后 setState
+  // v2.0.95/96: TMDB 精准识别 — 后台拉 w1280 backdrop, 拿到后 setState
   //   触发 DoubanDetailHeader rebuild 切到 TMDB backdrop. 失败 / 没
   //   配 key / 搜索无结果 = _tmdbBackdropUrl 保持 null, 走豆瓣 coverUrl.
   //
-  // v2.0.95 改: 失败时不再静默 (v2.0.93/v2.0.94 静默吞, 用户反馈
-  //   "配了 key 还是豆瓣海报" 不知道为啥). 现在每一步都打 debugPrint
-  //   (adb logcat 能看) + 失败时弹 SnackBar (普通用户能看).
+  // v2.0.95: 失败时 debugPrint + SnackBar 弹错 (用户反馈"key 没问题 +
+  //   还是豆瓣海报"需要知道原因, 弹错让用户能行动).
+  // v2.0.96: 失败时改回静默 fallback (SnackBar 删), debugPrint 保留.
+  //   原因: TMDB 数据覆盖不全 (e.g. 2025 中文新片没入库), 频繁弹
+  //   SnackBar 反而打扰用户, 跟 v2.0.91 删 log UI 精神一致 — 失败
+  //   静默, 让 DoubanDetailHeader 走豆瓣 coverUrl 兜底. 开发者仍能
+  //   `adb logcat | grep TMDB` 看全流程.
   //
   // 守门:
   //   - 配了 TMDB key (UserDataService.isTmdbConfigured)
   //   - title 非空 (没标题搜不到)
   //   - year 解析成功 (4 位数字; "2024-01-01" 截前 4 位, "2024" 直接用)
   //
-  // 异常: 任何一步 throw / 网络超时 / 解析失败 = debugPrint + SnackBar
-  //   告诉用户原因, DoubanDetailHeader 走 coverUrl 兜底.
+  // 异常: 任何一步 throw / 网络超时 / 解析失败 = debugPrint 静默, 用户
+  //   感知不到 (DoubanDetailHeader 继续走 coverUrl).
   Future<void> _loadTmdbBackdrop() async {
     if (!UserDataService.isTmdbConfigured()) {
       debugPrint('[TMDB] skip: key not configured');
@@ -2452,7 +2456,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (ref == null) {
         debugPrint(
             '[TMDB] search: no result (key 失效 / 剧名无匹配 / year 不匹配)');
-        _showTmdbSnack('TMDB 搜索无结果 (key 失效 / 剧名无匹配 / year 不匹配)');
+        // v2.0.96: 静默 fallback — SnackBar 删了, 不打扰用户
         return;
       }
       debugPrint('[TMDB] search hit: ${ref.mediaType}#${ref.id}');
@@ -2462,7 +2466,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (art == null || art.backdropUrl == null) {
         debugPrint(
             '[TMDB] fetchArt: no backdrop (art=${art == null ? "null" : "empty"})');
-        _showTmdbSnack('TMDB 搜到了, 但没 backdrop 图');
         return;
       }
       debugPrint('[TMDB] backdrop: ${art.backdropUrl}');
@@ -2471,25 +2474,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       });
     } catch (e, st) {
       debugPrint('[TMDB] error: $e\n$st');
-      _showTmdbSnack('TMDB 出错: $e');
+      // v2.0.96: 静默 fallback
     }
-  }
-
-  // v2.0.95: 弹一个浮层 SnackBar 告诉用户 TMDB 失败原因
-  //   跟 v2.0.91 删 log UI 精神不冲突: 那个是「运行日志」 (用户看不懂),
-  //   这个是「错误提示」 (用户能行动 — 改 key / 切网络 / 反馈开发者).
-  //   3 秒自动消失, 不抢戏.
-  void _showTmdbSnack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        duration: const Duration(seconds: 3),
-        backgroundColor: Colors.black87,
-        behavior: SnackBarBehavior.floating,
-        margin: const EdgeInsets.all(12),
-      ),
-    );
   }
 
   Widget _buildDetailView(bool isDark) {
