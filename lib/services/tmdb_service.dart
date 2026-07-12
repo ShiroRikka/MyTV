@@ -29,7 +29,9 @@
 //   final backdropUrl = art?.backdropUrl;  // w1280 backdrop URL (走 worker 加速, v2.0.94)
 //   final logoUrl = art?.logoUrl;          // w500 logo URL (走 worker 加速, v2.0.94)
 
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -116,6 +118,67 @@ class TmdbService {
     }
   }
 
+  // v2.1.2: 把 URL 里的 api_key=… 替换成前4+…+后4, 避免日记明文打印 key
+  // (用户截屏 = 泄露 key). 只对 api_key=xxx 这种 query string 做处理, 不会
+  // 误伤其他参数.
+  static String _maskKeyInUrl(String url, String apiKey) {
+    if (apiKey.isEmpty) return url;
+    return url.replaceAll('api_key=$apiKey', 'api_key=${_maskKey(apiKey)}');
+  }
+
+  // v2.1.2: 单 key 显示成 "abcd…wxyz" (32 字符 hex 留首尾, 中间隐藏).
+  // 短于等于 8 字符 → "…", 太短全部隐藏.
+  static String _maskKey(String key) {
+    if (key.length <= 8) return '…';
+    return '${key.substring(0, 4)}…${key.substring(key.length - 4)}';
+  }
+
+  // v2.1.2: 网络/握手/TLS/超时类错误 → 自动 fallback to direct (仅当 source=cf_worker).
+  // 4xx/5xx 走的是 statusCode 分支, 不在这里 catch, 也不 fallback
+  // (key 失效 / 限流 / 服务异常, 直连也一样失败).
+  static bool _isNetworkInfraError(Object e) {
+    return e is SocketException ||
+        e is HandshakeException ||
+        e is HttpException ||
+        e is TimeoutException ||
+        e is http.ClientException;
+  }
+
+  // v2.1.2: 通用 http.get + fallback. cf_worker 模式下网络/握手/TLS/超时错
+  // 自动重试 1 次 direct (用 origUrl 重建, 不带 worker wrap). 其他 source
+  // (direct / off) 不 fallback. 返回 null = 网络层全失败.
+  static Future<http.Response?> _httpGetWithFallback({
+    required String origUrl,
+    required String url,
+    required String source,
+    required String apiKey,
+    required String tag,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    try {
+      return await http.get(Uri.parse(url)).timeout(timeout);
+    } catch (e) {
+      if (source == 'cf_worker' && _isNetworkInfraError(e)) {
+        DiaryService.add(
+            '[TMDB] cf_worker $tag 网络/握手失败: $e (timeout=${timeout.inSeconds}s), fallback to direct');
+        final directUrl = _buildTmdbApiUrl(origUrl, 'direct');
+        DiaryService.add(
+            '[TMDB] network req (direct fallback $tag): ${_maskKeyInUrl(directUrl, apiKey)}');
+        try {
+          return await http.get(Uri.parse(directUrl)).timeout(timeout);
+        } catch (e2) {
+          DiaryService.add(
+              '[TMDB] direct fallback $tag err: $e2 (timeout=${timeout.inSeconds}s)');
+          return null;
+        }
+      }
+      // v2.0.99.2: 网络错也写进日记, 用户排查 "TMDB 大背景没出来为啥"
+      DiaryService.add(
+          '[TMDB] $tag network err: $e (timeout=${timeout.inSeconds}s)');
+      return null;
+    }
+  }
+
   /// search/multi 拿精准 (mediaType, id).
   ///
   /// 跟 Selene-TV mk4.h 行为 (1:1 移植) + v2.0.96 改进:
@@ -187,17 +250,20 @@ class TmdbService {
     // if (year != null) params['year'] = year.toString();
     final query =
         params.entries.map((e) => '${e.key}=${Uri.encodeComponent(e.value)}').join('&');
-    final url = _buildTmdbApiUrl('$_baseUrl/search/multi?$query', source);
-    DiaryService.add('[TMDB] network req: $url');
+    final origUrl = '$_baseUrl/search/multi?$query';
+    final url = _buildTmdbApiUrl(origUrl, source);
+    DiaryService.add('[TMDB] network req: ${_maskKeyInUrl(url, apiKey)}');
 
-    final http.Response resp;
-    try {
-      resp = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
-    } catch (e) {
-      // v2.0.99.2: 网络错也写进日记, 用户排查 "TMDB 大背景没出来为啥"
-      DiaryService.add('[TMDB] network err: $e (timeout=10s)');
-      return null;
-    }
+    // v2.1.2: try cf_worker first, 网络/握手/TLS/超时类错自动 fallback 1 次 direct.
+    // 4xx/5xx 不 fallback (key 失效 / 限流, 直连也一样失败).
+    final http.Response? resp = await _httpGetWithFallback(
+      origUrl: origUrl,
+      url: url,
+      source: source,
+      apiKey: apiKey,
+      tag: 'search',
+    );
+    if (resp == null) return null;
     if (resp.statusCode != 200) {
       // v2.0.99.2: HTTP 错 (401 key 失效 / 429 限流 / 5xx) 写进日记
       DiaryService.add(
@@ -308,45 +374,62 @@ class TmdbService {
 
     // 1) 无语言版本 (backdrop 优选无语言, 跟 v2.0.43 风格一致)
     // 2) zh-CN 版本 (logo 优选中文, 跟 v2.0.43 风格一致)
-    final noLangUrl = _buildTmdbApiUrl(
-        '$_baseUrl/$mediaType/$id/images?api_key=$apiKey', source);
-    final zhUrl = _buildTmdbApiUrl(
-        '$_baseUrl/$mediaType/$id/images?api_key=$apiKey&language=zh-CN', source);
+    final noLangOrig = '$_baseUrl/$mediaType/$id/images?api_key=$apiKey';
+    final zhOrig = '$_baseUrl/$mediaType/$id/images?api_key=$apiKey&language=zh-CN';
+    final noLangUrl = _buildTmdbApiUrl(noLangOrig, source);
+    final zhUrl = _buildTmdbApiUrl(zhOrig, source);
+    DiaryService.add('[TMDB] network req (fetchArt noLang): ${_maskKeyInUrl(noLangUrl, apiKey)}');
+    DiaryService.add('[TMDB] network req (fetchArt zh): ${_maskKeyInUrl(zhUrl, apiKey)}');
 
+    // v2.1.2: 并行 2 个请求, 任一网络/握手错自动 fallback to direct
     final List<http.Response> responses;
     try {
       responses = await Future.wait([
-        http.get(Uri.parse(noLangUrl)).timeout(const Duration(seconds: 10)),
-        http.get(Uri.parse(zhUrl)).timeout(const Duration(seconds: 10)),
+        _httpGetWithFallback(
+            origUrl: noLangOrig,
+            url: noLangUrl,
+            source: source,
+            apiKey: apiKey,
+            tag: 'fetchArt noLang'),
+        _httpGetWithFallback(
+            origUrl: zhOrig,
+            url: zhUrl,
+            source: source,
+            apiKey: apiKey,
+            tag: 'fetchArt zh'),
       ]);
     } catch (e) {
       DiaryService.add('[TMDB] fetchArt network err: $e');
       return null;
     }
-    if (responses[0].statusCode != 200) {
+    if (responses[0] == null || responses[1] == null) {
+      DiaryService.add('[TMDB] fetchArt 全部网络/握手失败 (cf_worker+direct 都挂了)');
+      return null;
+    }
+    if (responses[0]!.statusCode != 200) {
       DiaryService.add(
-          '[TMDB] fetchArt noLang statusCode=${responses[0].statusCode}');
+          '[TMDB] fetchArt noLang statusCode=${responses[0]!.statusCode}');
       return null;
     }
 
     Map<String, dynamic> noLang;
     Map<String, dynamic> zh;
     try {
-      noLang = jsonDecode(responses[0].body) as Map<String, dynamic>;
+      noLang = jsonDecode(responses[0]!.body) as Map<String, dynamic>;
     } catch (e) {
       DiaryService.add('[TMDB] fetchArt parse err: $e');
       return null;
     }
-    if (responses[1].statusCode == 200) {
+    if (responses[1]!.statusCode == 200) {
       try {
-        zh = jsonDecode(responses[1].body) as Map<String, dynamic>;
+        zh = jsonDecode(responses[1]!.body) as Map<String, dynamic>;
       } catch (e) {
         DiaryService.add('[TMDB] fetchArt zh parse err: $e');
         zh = <String, dynamic>{};
       }
     } else {
       DiaryService.add(
-          '[TMDB] fetchArt zh statusCode=${responses[1].statusCode} (用空 {} 兜底)');
+          '[TMDB] fetchArt zh statusCode=${responses[1]!.statusCode} (用空 {} 兜底)');
       zh = <String, dynamic>{};
     }
 
