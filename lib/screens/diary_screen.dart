@@ -149,7 +149,7 @@ class _DiaryScreenState extends State<DiaryScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          LucideIcons.notebookPen,
+                          LucideIcons.fileText,
                           size: 64,
                           color: isDark ? Colors.white24 : Colors.black26,
                         ),
@@ -208,11 +208,11 @@ class _DiaryScreenState extends State<DiaryScreen> {
                         child: Text(
                           entry,
                           style: TextStyle(
-                            fontFamily: FontUtils.monospaceFamily,
+                            fontFamily: 'monospace',
                             fontSize: 12,
                             height: 1.4,
                             color: isDark
-                                ? Colors.white.withValues(alpha: 0.9)
+                                ? Colors.white.withOpacity(0.9)
                                 : Colors.black87,
                           ),
                         ),
