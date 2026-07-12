@@ -221,10 +221,14 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
               ),
             ),
           ),
-          // 2) 前景: 左侧大竖海报 (主元素) + 右侧标题/年份/源
+          // 2) 前景: 左侧大竖海报 (主元素) + 右侧标题/年份/源/简介
           // v2.1.8: 用 LayoutBuilder 拿容器高度, 海报高度 = 容器高 - padding,
           //   宽度 = 高度 * 2/3. 修复"海报和片名错位" — 之前海报固定 150x225,
           //   16:9 窄屏容器高 < 225 时海报溢出, Row 被撑高, 标题贴底对不齐海报.
+          // v2.1.9: 手机右侧也显示简介 (填空白, 跟平板一致). 外层加横向
+          //   SingleChildScrollView — 用户反馈"手机也是写不下就左滑", 标题/简介
+          //   超出可见宽度时可左滑查看. 右侧 meta column 用固定宽度 (不用
+          //   Expanded, 因为 Expanded 跟横向滚动冲突), 宽度 = 可见宽 - 海报 - gap.
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
             child: LayoutBuilder(
@@ -233,53 +237,63 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
                 // 海报高度不超过容器高, 不超过 225 (大屏不无限放大)
                 final posterH = maxH < 225 ? maxH : 225.0;
                 final posterW = posterH * 2 / 3;
-                return Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: SizedBox(
-                        width: posterW,
-                        height: posterH,
-                        child: FutureBuilder<String>(
-                          future: getImageUrl(widget.cover, widget.source),
-                          builder: (context, snapshot) {
-                            final imageUrl = snapshot.data ?? widget.cover;
-                            final headers =
-                                getImageRequestHeaders(imageUrl, widget.source);
-                            return CachedNetworkImage(
-                              imageUrl: imageUrl,
-                              fit: BoxFit.cover,
-                              httpHeaders: headers,
-                              memCacheWidth: (posterW *
-                                      MediaQuery.of(context).devicePixelRatio)
-                                  .round(),
-                              memCacheHeight: (posterH *
-                                      MediaQuery.of(context).devicePixelRatio)
-                                  .round(),
-                              placeholder: (c, u) => Container(
-                                color: isDark
-                                    ? const Color(0xFF1F2937)
-                                    : const Color(0xFFE5E7EB),
-                              ),
-                              errorWidget: (c, u, e) => Container(
-                                color: isDark
-                                    ? const Color(0xFF1F2937)
-                                    : const Color(0xFFE5E7EB),
-                                child: const Icon(Icons.movie_outlined,
-                                    color: Colors.grey, size: 48),
-                              ),
-                            );
-                          },
+                // 右侧 meta 可见宽度 = 总宽 - 海报 - gap - 右 padding.
+                // 给固定宽度让 SingleChildScrollView 能判断溢出.
+                final metaW = constraints.maxWidth - posterW - 14 - 16;
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  physics: const BouncingScrollPhysics(),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: SizedBox(
+                          width: posterW,
+                          height: posterH,
+                          child: FutureBuilder<String>(
+                            future: getImageUrl(widget.cover, widget.source),
+                            builder: (context, snapshot) {
+                              final imageUrl = snapshot.data ?? widget.cover;
+                              final headers = getImageRequestHeaders(
+                                  imageUrl, widget.source);
+                              return CachedNetworkImage(
+                                imageUrl: imageUrl,
+                                fit: BoxFit.cover,
+                                httpHeaders: headers,
+                                memCacheWidth: (posterW *
+                                        MediaQuery.of(context).devicePixelRatio)
+                                    .round(),
+                                memCacheHeight: (posterH *
+                                        MediaQuery.of(context).devicePixelRatio)
+                                    .round(),
+                                placeholder: (c, u) => Container(
+                                  color: isDark
+                                      ? const Color(0xFF1F2937)
+                                      : const Color(0xFFE5E7EB),
+                                ),
+                                errorWidget: (c, u, e) => Container(
+                                  color: isDark
+                                      ? const Color(0xFF1F2937)
+                                      : const Color(0xFFE5E7EB),
+                                  child: const Icon(Icons.movie_outlined,
+                                      color: Colors.grey, size: 48),
+                                ),
+                              );
+                            },
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 14),
-                    // 右侧: 标题 + 年份 + 源
-                    Expanded(
-                      child: _buildMetaColumn(alignEnd: false),
-                    ),
-                  ],
+                      const SizedBox(width: 14),
+                      // 右侧: 标题 + 年份 + 源 + 简介 (v2.1.9: 手机也显示简介)
+                      SizedBox(
+                        width: metaW,
+                        height: posterH,
+                        child: _buildMetaColumn(
+                            alignEnd: false, showSummary: true),
+                      ),
+                    ],
+                  ),
                 );
               },
             ),
