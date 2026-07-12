@@ -2541,8 +2541,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
       if (!mounted) return;
       if (!resp.success || resp.data == null) {
-        debugPrint('[Douban summary] fetch failed: ${resp.error}');
-        DiaryService.add('[Douban summary] fetch failed: ${resp.error}');
+        debugPrint('[Douban summary] fetch failed: ${resp.message}');
+        DiaryService.add('[Douban summary] fetch failed: ${resp.message}');
         return;
       }
       final s = resp.data!.summary;
