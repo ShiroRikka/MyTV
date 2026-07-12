@@ -1615,34 +1615,46 @@ class _UserMenuState extends State<UserMenu> {
                     ? const Color(0xFF3b82f6)
                     : const Color(0xFF9ca3af),
               ),
-              if (_tmdbConfigured) ...[
-                _buildDivider(),
-                // v2.0.97: TMDB 数据源 (跟 Bangumi 数据源一样 UX, 3 选 1)
-                //   - CF Worker 加速 (默认, 配 worker wrap, 没配直连)
-                //   - 直连 (强制直连, 不走 worker)
-                //   - 已关闭 (配了 key 也强制不走 TMDB, 走豆瓣兜底)
-                _buildOptionSelector(
-                  title: 'TMDB 数据源',
-                  currentValue: UserDataService.getTmdbDataSourceDisplayName(
-                      _tmdbDataSource),
-                  options: const [
-                    'CF Worker 加速',
-                    '直连',
-                    '已关闭',
-                  ],
-                  onChanged: (value) async {
-                    final key = UserDataService
-                        .getTmdbDataSourceKeyFromDisplayName(value);
-                    await UserDataService.saveTmdbDataSource(key);
-                    if (!mounted) return;
-                    setState(() {
-                      _tmdbDataSource = key;
-                    });
-                  },
-                  icon: LucideIcons.database,
-                  iconColor: const Color(0xFFec4899),
-                ),
-              ],
+              _buildDivider(),
+              // v2.0.98: TMDB 数据源永远显示 (v2.0.97 加了 if (_tmdbConfigured)
+              //   条件, 没配 key 不显示, 用户反馈 "改的啥玩意选项在哪" — 跟
+              //   Bangumi 数据源一样 UX 永远显示, 切了存但没配 key 时不生效.
+              //   没配 key 时 icon 灰色, 配了粉色, 一眼能看出状态.
+              _buildOptionSelector(
+                title: 'TMDB 数据源',
+                currentValue: UserDataService.getTmdbDataSourceDisplayName(
+                    _tmdbDataSource),
+                options: const [
+                  'CF Worker 加速',
+                  '直连',
+                  '已关闭',
+                ],
+                onChanged: (value) async {
+                  final key = UserDataService
+                      .getTmdbDataSourceKeyFromDisplayName(value);
+                  await UserDataService.saveTmdbDataSource(key);
+                  if (!mounted) return;
+                  setState(() {
+                    _tmdbDataSource = key;
+                  });
+                  // v2.0.98: 没配 key 时切了不生效, 告诉用户为啥.
+                  //   配了 key 的用户切了直接生效, 不打扰.
+                  if (!_tmdbConfigured) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          '已切换 TMDB 数据源, 但还没配 TMDB API Key, 详情页仍走豆瓣',
+                        ),
+                        duration: Duration(seconds: 3),
+                      ),
+                    );
+                  }
+                },
+                icon: LucideIcons.database,
+                iconColor: _tmdbConfigured
+                    ? const Color(0xFFec4899)
+                    : const Color(0xFF9ca3af),
+              ),
             ],
           ),
           // ===== 其他 =====
