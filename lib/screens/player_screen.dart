@@ -1280,9 +1280,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     _lastSavedKey = key;
     _firstRecordSaved = true;
 
+    DiaryService.add(
+        '[History] _saveCurrentProgress: key="$key" index=$index playTime=${playTime}ms totalTime=${totalTime}ms searchTitle="${record.searchTitle}" force=$force');
+
     try {
       await PageCacheService().savePlayRecord(record, context);
-    } catch (_) {
+      DiaryService.add('[History] save ok: key="$key"');
+    } catch (e) {
+      DiaryService.add('[History] save err: $e');
       // 静默失败
     }
   }
@@ -1333,6 +1338,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     final title = widget.videoInfo.searchTitle.isNotEmpty
         ? widget.videoInfo.searchTitle
         : widget.videoInfo.title;
+    DiaryService.add(
+        '[History] _loadSources begin: title="$title" videoInfo.source="${widget.videoInfo.source}" videoInfo.index=${widget.videoInfo.index} videoInfo.playTime=${widget.videoInfo.playTime}ms videoInfo.searchTitle="${widget.videoInfo.searchTitle}"');
     if (title.isEmpty) {
       setState(() {
         _sourcesLoading = false;
@@ -1351,15 +1358,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     final resume = widget.videoInfo.source.isEmpty || widget.videoInfo.index <= 0
         ? await _tryLoadResumeFromCloud(title)
         : null;
+    DiaryService.add(
+        '[History] resume: ${resume == null ? "null (跳过云端)" : "source=${resume.source} index=${resume.index} playTime=${resume.playTime}ms"}');
     final resumeSourceKey = resume?.source ?? widget.videoInfo.source;
     final resumeIndex = resume != null
         ? (resume.index - 1).clamp(0, 1 << 30)
         : (widget.videoInfo.index - 1).clamp(0, 1 << 30);
+    DiaryService.add(
+        '[History] resume computed: resumeSourceKey="$resumeSourceKey" resumeIndex=$resumeIndex (0-based)');
     if (resume != null && resume.playTime > 0) {
-    _pendingResumeAt = Duration(milliseconds: resume.playTime);
-  } else if (widget.videoInfo.playTime > 0) {
-    _pendingResumeAt = Duration(milliseconds: widget.videoInfo.playTime);
-  }
+      _pendingResumeAt = Duration(milliseconds: resume.playTime);
+    } else if (widget.videoInfo.playTime > 0) {
+      _pendingResumeAt = Duration(milliseconds: widget.videoInfo.playTime);
+    }
+    DiaryService.add(
+        '[History] _pendingResumeAt: ${_pendingResumeAt?.inMilliseconds ?? "null"}ms');
 
     try {
       final results = await ApiService.fetchSourcesData(title);
@@ -1402,6 +1415,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
       }
       _selectSource(toSelect, episodeIndex: resumeIndex);
+      DiaryService.add(
+          '[History] _selectSource done: toSelect.source="${toSelect.source}" toSelect.id="${toSelect.id}" resumeIndex=$resumeIndex → _currentEpisodeIndex=$_currentEpisodeIndex');
 
       // 进入详情页不自动播放,等用户点"播放"按钮
       // (电视剧在第1集播完后会自动播第2集,可点暂停控制)
