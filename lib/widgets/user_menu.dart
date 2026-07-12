@@ -12,6 +12,7 @@ import 'package:luna_tv/services/douban_cache_service.dart';
 import 'package:luna_tv/services/page_cache_service.dart';
 import 'package:luna_tv/services/live_service.dart';
 import 'package:luna_tv/services/local_search_cache_service.dart';
+import 'package:luna_tv/services/tmdb_service.dart';
 import 'package:luna_tv/services/version_service.dart';
 import 'package:luna_tv/utils/device_utils.dart';
 import 'package:luna_tv/utils/font_utils.dart';
@@ -1655,6 +1656,30 @@ class _UserMenuState extends State<UserMenu> {
                     ? const Color(0xFFec4899)
                     : const Color(0xFF9ca3af),
               ),
+              if (_tmdbConfigured) ...[
+                _buildDivider(),
+                // v2.0.99.1: 清除 TMDB 缓存 — 用户排查 TMDB 大背景没出来
+                //   时一键清 7 天缓存 (ref + art 两个命名空间), 排除缓存
+                //   污染 (e.g. v2.0.95 硬 year 过滤的 0 result 缓存, v2.0.96
+                //   改不传 year + 软 year bonus 后仍走老缓存命中 null).
+                //   跟 v2.0.93 TmdbService.clearAllCache 内部接口对齐.
+                _buildInputOption(
+                  title: '清除 TMDB 缓存',
+                  currentValue: '清除 7 天识别/图片缓存',
+                  onTap: () async {
+                    await TmdbService.clearAllCache();
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('已清除 TMDB 缓存, 下次进详情页重新识别'),
+                        duration: Duration(seconds: 3),
+                      ),
+                    );
+                  },
+                  icon: LucideIcons.trash2,
+                  iconColor: const Color(0xFFef4444),
+                ),
+              ],
             ],
           ),
           // ===== 其他 =====
