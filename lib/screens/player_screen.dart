@@ -1281,7 +1281,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _firstRecordSaved = true;
 
     DiaryService.add(
-        '[History] _saveCurrentProgress: key="$key" index=$index playTime=${playTime}ms totalTime=${totalTime}ms searchTitle="${record.searchTitle}" force=$force');
+        '[History] _saveCurrentProgress: key="$key" index=${record.index} playTime=${playTime}ms totalTime=${totalTime}ms searchTitle="${record.searchTitle}" force=$force');
 
     try {
       await PageCacheService().savePlayRecord(record, context);
