@@ -26,8 +26,8 @@
 //   final ref = await TmdbService.search(title: '剧名', year: 2024);
 //   if (ref == null) return null;
 //   final art = await TmdbService.fetchArt(id: ref.id, mediaType: ref.mediaType);
-//   final backdropUrl = art?.backdropUrl;  // w1280 backdrop URL
-//   final logoUrl = art?.logoUrl;          // w500 logo URL
+//   final backdropUrl = art?.backdropUrl;  // w1280 backdrop URL (走 worker 加速, v2.0.94)
+//   final logoUrl = art?.logoUrl;          // w500 logo URL (走 worker 加速, v2.0.94)
 
 import 'dart:convert';
 
@@ -259,7 +259,8 @@ class TmdbService {
       }
     }
     final backdropUrl = bestBackdropPath != null
-        ? '$_imageBase/w1280/${bestBackdropPath.startsWith('/') ? bestBackdropPath.substring(1) : bestBackdropPath}'
+        ? _wrapWithWorker(
+            '$_imageBase/w1280/${bestBackdropPath.startsWith('/') ? bestBackdropPath.substring(1) : bestBackdropPath}')
         : null;
 
     // logo 优选: w500, .png 后缀, zh > en > null 优先级, vote DESC
@@ -289,7 +290,8 @@ class TmdbService {
       }
     }
     final logoUrl = bestLogoPath != null
-        ? '$_imageBase/w500/${bestLogoPath.startsWith('/') ? bestLogoPath.substring(1) : bestLogoPath}'
+        ? _wrapWithWorker(
+            '$_imageBase/w500/${bestLogoPath.startsWith('/') ? bestLogoPath.substring(1) : bestLogoPath}')
         : null;
 
     final art = TmdbArt(backdropUrl: backdropUrl, logoUrl: logoUrl);

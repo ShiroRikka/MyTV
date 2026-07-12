@@ -33,6 +33,11 @@
 //            (v2.0.84/v2.0.85 行为), 行为完全不变.
 //            设计选择: backdropUrl 是「已知最优质」信号, 直接信它, 不
 //            再回退 — 避免 TMDB 失败时混搭豆瓣图导致视觉割裂.
+//   v2.0.94: tmdbBackdropUrl 走 worker 加速 (跟豆瓣/番剧图一致, 通过
+//            「加速 → CF Worker 域名」配 .workers.dev 域名生效). v2.0.93
+//            当初直连 image.tmdb.org (CF 全球 CDN 跟 worker 一样快),
+//            但用户反馈国内 image.tmdb.org 偶发加载慢, 走 worker 稳.
+//            没配 worker 域名 = 直连 image.tmdb.org (v2.0.93 行为, 不变).
 //
 // 数据流 (无网络):
 //   1. widget.videoInfo.cover  → getImageUrl(cover, source) 自动
