@@ -55,6 +55,11 @@ class _UserMenuState extends State<UserMenu> {
   // v2.0.93: TMDB API Key (v3) — 详情页大头部走 TMDB search/multi 拿
   //   精准 w1280 backdrop 替代豆瓣 coverUrl. 配了 = true, 走精准识别.
   bool _tmdbConfigured = false;
+  // v2.0.97: TMDB 数据源 (跟 Bangumi 数据源一样 UX, 3 选 1)
+  //   - cf_worker (默认, 跟 v2.0.94 ~ v2.0.96 一致): 配 worker wrap
+  //   - direct: 强制直连, 不走 worker
+  //   - off: 配了 key 也强制不走 TMDB
+  String _tmdbDataSource = 'cf_worker';
 
   @override
   void initState() {
@@ -98,6 +103,8 @@ class _UserMenuState extends State<UserMenu> {
     // v2.0.93: TMDB API key — 决定详情页大头部走 TMDB 精准 backdrop
     final tmdbApiKey = await UserDataService.getTmdbApiKey();
     final tmdbConfigured = tmdbApiKey != null && tmdbApiKey.isNotEmpty;
+    // v2.0.97: TMDB 数据源 — 跟 Bangumi 数据源一样 UX, 3 选 1
+    final tmdbDataSource = await UserDataService.getTmdbDataSourceKey();
 
     if (mounted) {
       setState(() {
@@ -123,6 +130,7 @@ class _UserMenuState extends State<UserMenu> {
         );
         _doubanLoggedIn = doubanLoggedIn;
         _tmdbConfigured = tmdbConfigured;
+        _tmdbDataSource = tmdbDataSource;
       });
     }
   }
@@ -1607,6 +1615,34 @@ class _UserMenuState extends State<UserMenu> {
                     ? const Color(0xFF3b82f6)
                     : const Color(0xFF9ca3af),
               ),
+              if (_tmdbConfigured) ...[
+                _buildDivider(),
+                // v2.0.97: TMDB 数据源 (跟 Bangumi 数据源一样 UX, 3 选 1)
+                //   - CF Worker 加速 (默认, 配 worker wrap, 没配直连)
+                //   - 直连 (强制直连, 不走 worker)
+                //   - 已关闭 (配了 key 也强制不走 TMDB, 走豆瓣兜底)
+                _buildOptionSelector(
+                  title: 'TMDB 数据源',
+                  currentValue: UserDataService.getTmdbDataSourceDisplayName(
+                      _tmdbDataSource),
+                  options: const [
+                    'CF Worker 加速',
+                    '直连',
+                    '已关闭',
+                  ],
+                  onChanged: (value) async {
+                    final key = UserDataService
+                        .getTmdbDataSourceKeyFromDisplayName(value);
+                    await UserDataService.saveTmdbDataSource(key);
+                    if (!mounted) return;
+                    setState(() {
+                      _tmdbDataSource = key;
+                    });
+                  },
+                  icon: LucideIcons.database,
+                  iconColor: const Color(0xFFec4899),
+                ),
+              ],
             ],
           ),
           // ===== 其他 =====

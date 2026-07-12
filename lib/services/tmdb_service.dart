@@ -88,14 +88,31 @@ class TmdbService {
     return current.trim();
   }
 
-  /// 构造 API URL — 配了 worker 走 worker 加速, 没配直连.
-  /// 跟 v2.0.36 README "走 CORSAPI worker 加速" 一致.
-  static String _wrapWithWorker(String fullUrl) {
-    final worker = UserDataService.getCfWorkerDomainSync();
-    if (worker.isNotEmpty) {
-      return 'https://$worker/?url=${Uri.encodeComponent(fullUrl)}';
+  /// v2.0.97: 构造 API / image URL — 根据 TMDB 数据源 3 选 1 选路径
+  ///
+  /// - 'cf_worker' (默认, 跟 v2.0.94 ~ v2.0.96 一致): 配 worker 域名时
+  ///   wrap `https://$worker/?url=<encoded fullUrl>`, 没配 worker 域名
+  ///   时直连 fullUrl. CF Worker 加速跟豆瓣/番剧图一个模式.
+  /// - 'direct': 强制直连 fullUrl, 不走 worker. 给用户在国内 worker 域名
+  ///   被墙 / 想用真直连的时用.
+  /// - 'off': 配了 TMDB key 也强制不走 TMDB. search / fetchArt 调用方
+  ///   开头判 `source == 'off'` 直接 return null, 不调 _buildTmdbApiUrl.
+  ///
+  /// 跟 Bangumi 数据源 (cf_worker / direct / cors_proxy) 风格一致, 3 选 1.
+  /// TMDB 跟 Bangumi 一样用 worker 加速, 不需要 cors_proxy 第三方代理
+  /// (Zwei 的 cors-proxy 是给豆瓣做的, 跨服务不可靠).
+  static String _buildTmdbApiUrl(String fullUrl, String source) {
+    switch (source) {
+      case 'direct':
+        return fullUrl;
+      case 'cf_worker':
+      default:
+        final worker = UserDataService.getCfWorkerDomainSync();
+        if (worker.isNotEmpty) {
+          return 'https://$worker/?url=${Uri.encodeComponent(fullUrl)}';
+        }
+        return fullUrl;
     }
-    return fullUrl;
   }
 
   /// search/multi 拿精准 (mediaType, id).
@@ -133,6 +150,12 @@ class TmdbService {
     final apiKey = UserDataService.getTmdbApiKeySync();
     if (apiKey == null || apiKey.isEmpty) return null;
 
+    // v2.0.97: 配了 key 但数据源 = 'off' → 强制不走 TMDB, 走豆瓣兜底
+    final source = UserDataService.getTmdbDataSourceSync();
+    if (source == 'off') {
+      return null;
+    }
+
     // 1) 缓存查
     final cacheKey = 'tmdb_ref_${cleaned}_${year ?? ""}';
     final cached = await _readRefCache(cacheKey);
@@ -150,7 +173,7 @@ class TmdbService {
     // if (year != null) params['year'] = year.toString();
     final query =
         params.entries.map((e) => '${e.key}=${Uri.encodeComponent(e.value)}').join('&');
-    final url = _wrapWithWorker('$_baseUrl/search/multi?$query');
+    final url = _buildTmdbApiUrl('$_baseUrl/search/multi?$query', source);
 
     final http.Response resp;
     try {
@@ -219,6 +242,12 @@ class TmdbService {
     final apiKey = UserDataService.getTmdbApiKeySync();
     if (apiKey == null || apiKey.isEmpty) return null;
 
+    // v2.0.97: 配了 key 但数据源 = 'off' → 强制不走 TMDB
+    final source = UserDataService.getTmdbDataSourceSync();
+    if (source == 'off') {
+      return null;
+    }
+
     // 缓存查
     final cacheKey = 'tmdb_art_${mediaType}_$id';
     final cached = await _readArtCache(cacheKey);
@@ -226,10 +255,10 @@ class TmdbService {
 
     // 1) 无语言版本 (backdrop 优选无语言, 跟 v2.0.43 风格一致)
     // 2) zh-CN 版本 (logo 优选中文, 跟 v2.0.43 风格一致)
-    final noLangUrl = _wrapWithWorker(
-        '$_baseUrl/$mediaType/$id/images?api_key=$apiKey');
-    final zhUrl = _wrapWithWorker(
-        '$_baseUrl/$mediaType/$id/images?api_key=$apiKey&language=zh-CN');
+    final noLangUrl = _buildTmdbApiUrl(
+        '$_baseUrl/$mediaType/$id/images?api_key=$apiKey', source);
+    final zhUrl = _buildTmdbApiUrl(
+        '$_baseUrl/$mediaType/$id/images?api_key=$apiKey&language=zh-CN', source);
 
     final List<http.Response> responses;
     try {
@@ -288,8 +317,9 @@ class TmdbService {
       }
     }
     final backdropUrl = bestBackdropPath != null
-        ? _wrapWithWorker(
-            '$_imageBase/w1280/${bestBackdropPath.startsWith('/') ? bestBackdropPath.substring(1) : bestBackdropPath}')
+        ? _buildTmdbApiUrl(
+            '$_imageBase/w1280/${bestBackdropPath.startsWith('/') ? bestBackdropPath.substring(1) : bestBackdropPath}',
+            source)
         : null;
 
     // logo 优选: w500, .png 后缀, zh > en > null 优先级, vote DESC
@@ -319,8 +349,9 @@ class TmdbService {
       }
     }
     final logoUrl = bestLogoPath != null
-        ? _wrapWithWorker(
-            '$_imageBase/w500/${bestLogoPath.startsWith('/') ? bestLogoPath.substring(1) : bestLogoPath}')
+        ? _buildTmdbApiUrl(
+            '$_imageBase/w500/${bestLogoPath.startsWith('/') ? bestLogoPath.substring(1) : bestLogoPath}',
+            source)
         : null;
 
     final art = TmdbArt(backdropUrl: backdropUrl, logoUrl: logoUrl);

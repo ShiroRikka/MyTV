@@ -29,6 +29,16 @@ class UserDataService {
   //   coverUrl, 行为完全不变 (跟「豆瓣登录」「优选 IP」同 UX: 字段本身
   //   就是开关, 不另加 toggle).
   static const String _tmdbApiKeyKey = 'tmdb_api_key';
+  // v2.0.97: TMDB 数据源 — 跟 Bangumi 数据源一样 UX, 3 选 1.
+  //   - 'cf_worker' (默认): 配 worker 时 wrap `https://$worker/?url=...`,
+  //     没配 worker 域名时直连. 跟 v2.0.94 ~ v2.0.96 行为一致.
+  //   - 'direct': 强制直连 api.themoviedb.org / image.tmdb.org, 不走
+  //     worker 加速. 给用户在国内 worker 域名被墙 / 想用真直连的时用.
+  //   - 'off': 配了 TMDB key 也强制不走 TMDB, 直接返 null. 跟没配 key
+  //     行为完全一致 (大背景走豆瓣 coverUrl). 给临时关掉 TMDB 但保留
+  //     key 字段的用户用 (e.g. 觉得 TMDB 识别不准, 临时回退豆瓣,
+  //     缓存还在, 想开再切回).
+  static const String _tmdbDataSourceKey = 'tmdb_data_source';
 
   // 内存缓存
   static bool? _isLocalModeCache;
@@ -44,6 +54,8 @@ class UserDataService {
   static String? _doubanCookieCache;
   // v2.0.93
   static String? _tmdbApiKeyCache;
+  // v2.0.97
+  static String? _tmdbDataSourceCache;
 
   // 保存用户登录信息
   static Future<void> saveUserData({
@@ -527,6 +539,56 @@ class UserDataService {
     await saveTmdbApiKey(null);
   }
 
+  // ===== v2.0.97: TMDB 数据源 (跟 Bangumi 数据源一样 UX) =====
+
+  /// 保存 TMDB 数据源 (key 值: 'cf_worker' / 'direct' / 'off')
+  static Future<void> saveTmdbDataSource(String key) async {
+    final cleaned = (key == 'direct' || key == 'off') ? key : 'cf_worker';
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_tmdbDataSourceKey, cleaned);
+    _tmdbDataSourceCache = cleaned;
+  }
+
+  /// 异步读 TMDB 数据源 key, 默认 'cf_worker'
+  static Future<String> getTmdbDataSourceKey() async {
+    if (_tmdbDataSourceCache != null) return _tmdbDataSourceCache!;
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getString(_tmdbDataSourceKey) ?? 'cf_worker';
+    _tmdbDataSourceCache = v;
+    return v;
+  }
+
+  /// 同步读 TMDB 数据源 key (build 时用, 比如 TmdbService._buildTmdbApiUrl)
+  static String getTmdbDataSourceSync() {
+    return _tmdbDataSourceCache ?? 'cf_worker';
+  }
+
+  /// key 值 → 显示名
+  static String getTmdbDataSourceDisplayName(String key) {
+    switch (key) {
+      case 'direct':
+        return '直连';
+      case 'off':
+        return '已关闭';
+      case 'cf_worker':
+      default:
+        return 'CF Worker 加速';
+    }
+  }
+
+  /// 显示名 → key 值
+  static String getTmdbDataSourceKeyFromDisplayName(String name) {
+    switch (name) {
+      case '直连':
+        return 'direct';
+      case '已关闭':
+        return 'off';
+      case 'CF Worker 加速':
+      default:
+        return 'cf_worker';
+    }
+  }
+
   /// 同步读 (启动 warmup 后用)
   static String? getCfBestIpSync() {
     return _cfBestIpCache;
@@ -897,6 +959,11 @@ class UserDataService {
       final prefs = await SharedPreferences.getInstance();
       final v = prefs.getString(_tmdbApiKeyKey);
       _tmdbApiKeyCache = (v == null || v.isEmpty) ? null : v;
+    }
+    // v2.0.97: 缓存 TMDB 数据源, 给 TmdbService._buildTmdbApiUrl 同步读
+    if (_tmdbDataSourceCache == null) {
+      final prefs = await SharedPreferences.getInstance();
+      _tmdbDataSourceCache = prefs.getString(_tmdbDataSourceKey) ?? 'cf_worker';
     }
   }
 }
