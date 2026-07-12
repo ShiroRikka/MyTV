@@ -2410,21 +2410,31 @@ class _PlayerScreenState extends State<PlayerScreen>
     return 'movie';
   }
 
-  // v2.0.93: TMDB 精准识别 — 后台拉 w1280 backdrop, 拿到后 setState
+  // v2.0.95: TMDB 精准识别 — 后台拉 w1280 backdrop, 拿到后 setState
   //   触发 DoubanDetailHeader rebuild 切到 TMDB backdrop. 失败 / 没
   //   配 key / 搜索无结果 = _tmdbBackdropUrl 保持 null, 走豆瓣 coverUrl.
+  //
+  // v2.0.95 改: 失败时不再静默 (v2.0.93/v2.0.94 静默吞, 用户反馈
+  //   "配了 key 还是豆瓣海报" 不知道为啥). 现在每一步都打 debugPrint
+  //   (adb logcat 能看) + 失败时弹 SnackBar (普通用户能看).
   //
   // 守门:
   //   - 配了 TMDB key (UserDataService.isTmdbConfigured)
   //   - title 非空 (没标题搜不到)
   //   - year 解析成功 (4 位数字; "2024-01-01" 截前 4 位, "2024" 直接用)
   //
-  // 异常: 任何一步 throw / 网络超时 / 解析失败 = 静默吞掉, 用户感知
-  //   不到 (DoubanDetailHeader 继续走 coverUrl).
+  // 异常: 任何一步 throw / 网络超时 / 解析失败 = debugPrint + SnackBar
+  //   告诉用户原因, DoubanDetailHeader 走 coverUrl 兜底.
   Future<void> _loadTmdbBackdrop() async {
-    if (!UserDataService.isTmdbConfigured()) return;
+    if (!UserDataService.isTmdbConfigured()) {
+      debugPrint('[TMDB] skip: key not configured');
+      return;
+    }
     final title = widget.videoInfo.title.trim();
-    if (title.isEmpty) return;
+    if (title.isEmpty) {
+      debugPrint('[TMDB] skip: title empty');
+      return;
+    }
 
     // year 解析: "2024" 或 "2024-01-01" → 2024
     int? year;
@@ -2434,19 +2444,52 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (m != null) year = int.tryParse(m.group(1)!);
     }
 
+    debugPrint('[TMDB] search: title="$title" year=$year');
+
     try {
       final ref = await TmdbService.search(title: title, year: year);
-      if (!mounted || ref == null) return;
+      if (!mounted) return;
+      if (ref == null) {
+        debugPrint(
+            '[TMDB] search: no result (key 失效 / 剧名无匹配 / year 不匹配)');
+        _showTmdbSnack('TMDB 搜索无结果 (key 失效 / 剧名无匹配 / year 不匹配)');
+        return;
+      }
+      debugPrint('[TMDB] search hit: ${ref.mediaType}#${ref.id}');
       final art = await TmdbService.fetchArt(
           id: ref.id, mediaType: ref.mediaType);
-      if (!mounted || art == null) return;
-      if (art.backdropUrl == null) return;
+      if (!mounted) return;
+      if (art == null || art.backdropUrl == null) {
+        debugPrint(
+            '[TMDB] fetchArt: no backdrop (art=${art == null ? "null" : "empty"})');
+        _showTmdbSnack('TMDB 搜到了, 但没 backdrop 图');
+        return;
+      }
+      debugPrint('[TMDB] backdrop: ${art.backdropUrl}');
       setState(() {
         _tmdbBackdropUrl = art.backdropUrl;
       });
-    } catch (_) {
-      // 静默吞掉 — 不打扰用户, DoubanDetailHeader 走 coverUrl 兜底.
+    } catch (e, st) {
+      debugPrint('[TMDB] error: $e\n$st');
+      _showTmdbSnack('TMDB 出错: $e');
     }
+  }
+
+  // v2.0.95: 弹一个浮层 SnackBar 告诉用户 TMDB 失败原因
+  //   跟 v2.0.91 删 log UI 精神不冲突: 那个是「运行日志」 (用户看不懂),
+  //   这个是「错误提示」 (用户能行动 — 改 key / 切网络 / 反馈开发者).
+  //   3 秒自动消失, 不抢戏.
+  void _showTmdbSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        duration: const Duration(seconds: 3),
+        backgroundColor: Colors.black87,
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.all(12),
+      ),
+    );
   }
 
   Widget _buildDetailView(bool isDark) {
