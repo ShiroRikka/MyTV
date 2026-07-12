@@ -506,6 +506,87 @@ class TmdbService {
     return art;
   }
 
+  /// v2.1.12: 拉 TMDB 详情的 overview (剧情简介), 用于详情页 header 右侧.
+  /// 跟 fetchArt 同样的 search → details 流程, 但只取 overview 字段.
+  /// 豆瓣 doubanId 拉不到简介时 (历史记录没存 doubanId / 非豆瓣源 /
+  ///   rexxar API 被反爬), 走 TMDB overview fallback.
+  /// 返回 null = 没配 key / search 无结果 / overview 空.
+  static Future<String?> fetchOverview({
+    required String title,
+    int? year,
+  }) async {
+    final apiKey = UserDataService.getTmdbApiKeySync();
+    if (apiKey == null || apiKey.isEmpty) {
+      DiaryService.add('[TMDB overview] skip: apiKey 空');
+      return null;
+    }
+    final source = UserDataService.getTmdbDataSourceSync();
+    if (source == 'off') {
+      DiaryService.add('[TMDB overview] skip: source=off');
+      return null;
+    }
+    // search 拿 ref (mediaType + id)
+    final ref = await search(title: title, year: year);
+    if (ref == null) {
+      DiaryService.add('[TMDB overview] search 无结果, title="$title"');
+      return null;
+    }
+    // 缓存 key (跟 art 缓存分开, overview 单独存)
+    final cacheKey = 'tmdb_overview_${ref.mediaType}_${ref.id}';
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(cacheKey);
+    if (raw != null) {
+      try {
+        final json = jsonDecode(raw) as Map<String, dynamic>;
+        final ts = json['ts'] as int? ?? 0;
+        if (DateTime.now().millisecondsSinceEpoch - ts <
+            _cacheTtl.inMilliseconds) {
+          final ov = json['overview'] as String?;
+          if (ov != null && ov.trim().isNotEmpty) {
+            DiaryService.add('[TMDB overview] cache hit');
+            return ov.trim();
+          }
+        }
+      } catch (_) {}
+    }
+    // details 接口拉 overview
+    final origUrl =
+        '$_baseUrl/${ref.mediaType}/${ref.id}?api_key=$apiKey&language=zh-CN';
+    final url = _buildTmdbApiUrl(origUrl, source);
+    DiaryService.add(
+        '[TMDB overview] network req: ${_maskKeyInUrl(url, apiKey)}');
+    try {
+      final resp = await _httpGetWithFallback(
+        origUrl: origUrl,
+        url: url,
+        source: source,
+        apiKey: apiKey,
+        tag: 'overview',
+      );
+      if (resp == null || resp.statusCode != 200) {
+        DiaryService.add(
+            '[TMDB overview] network fail: resp=${resp?.statusCode}');
+        return null;
+      }
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final overview = (data['overview'] as String?)?.trim();
+      if (overview == null || overview.isEmpty) {
+        DiaryService.add('[TMDB overview] overview 字段空');
+        return null;
+      }
+      // 写缓存
+      await prefs.setString(cacheKey, jsonEncode({
+        'ts': DateTime.now().millisecondsSinceEpoch,
+        'overview': overview,
+      }));
+      DiaryService.add('[TMDB overview] hit: ${overview.length} chars');
+      return overview;
+    } catch (e) {
+      DiaryService.add('[TMDB overview] error: $e');
+      return null;
+    }
+  }
+
   /// 清空所有 TMDB 缓存 (切换 key 后调一次, 避免老 key 的结果污染)
   static Future<void> clearAllCache() async {
     final prefs = await SharedPreferences.getInstance();

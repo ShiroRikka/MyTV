@@ -2579,38 +2579,66 @@ class _PlayerScreenState extends State<PlayerScreen>
   //   所以只检查 doubanId + summary 字段是否非空.
   Future<void> _loadDoubanSummary() async {
     final doubanId = widget.videoInfo.doubanId;
-    if (doubanId == null || doubanId.isEmpty) {
-      debugPrint('[Douban summary] skip: no doubanId');
-      DiaryService.add('[Douban summary] skip: no doubanId');
-      return;
+    // v2.1.12: 豆瓣拉不到 (没 doubanId / rexxar 失败 / summary 空) 时
+    //   fallback 到 TMDB overview. 用户反馈"历史影片/主页影片都不显示简介"
+    //   根因: 历史记录 PlayRecord 不存 doubanId, 主页某些源也没 doubanId,
+    //   导致 _loadDoubanSummary 直接 return. TMDB 靠标题搜索, 不依赖 doubanId.
+    if (doubanId != null && doubanId.isNotEmpty) {
+      debugPrint('[Douban summary] fetch: doubanId=$doubanId');
+      DiaryService.add('[Douban summary] fetch: doubanId=$doubanId');
+      try {
+        final resp = await DoubanService.getDoubanDetails(
+          context,
+          doubanId: doubanId,
+        );
+        if (!mounted) return;
+        if (resp.success && resp.data != null) {
+          final s = resp.data!.summary;
+          if (s != null && s.trim().isNotEmpty) {
+            debugPrint('[Douban summary] hit: ${s.length} chars');
+            DiaryService.add('[Douban summary] hit: ${s.length} chars');
+            if (mounted) {
+              setState(() {
+                _summary = s.trim();
+              });
+            }
+            return; // 豆瓣成功, 不走 TMDB fallback
+          }
+        }
+        debugPrint('[Douban summary] failed/empty, fallback TMDB overview');
+        DiaryService.add('[Douban summary] failed/empty, fallback TMDB overview');
+      } catch (e, st) {
+        debugPrint('[Douban summary] error: $e\n$st, fallback TMDB overview');
+        DiaryService.add('[Douban summary] error: $e, fallback TMDB overview');
+      }
+    } else {
+      debugPrint('[Douban summary] skip: no doubanId, fallback TMDB overview');
+      DiaryService.add('[Douban summary] skip: no doubanId, fallback TMDB overview');
     }
-    debugPrint('[Douban summary] fetch: doubanId=$doubanId');
-    DiaryService.add('[Douban summary] fetch: doubanId=$doubanId');
+    // v2.1.12: TMDB overview fallback — 靠标题搜索, 不依赖 doubanId
+    if (_summary != null) return; // 已有豆瓣简介就不重复拉
+    final title = widget.videoInfo.title.trim();
+    if (title.isEmpty) return;
+    int? year;
+    final y = widget.videoInfo.year;
+    if (y != null && y.isNotEmpty) {
+      final m = RegExp(r'^(\d{4})').firstMatch(y);
+      if (m != null) year = int.tryParse(m.group(1)!);
+    }
     try {
-      final resp = await DoubanService.getDoubanDetails(
-        context,
-        doubanId: doubanId,
+      final overview = await TmdbService.fetchOverview(
+        title: title,
+        year: year,
       );
       if (!mounted) return;
-      if (!resp.success || resp.data == null) {
-        debugPrint('[Douban summary] fetch failed: ${resp.message}');
-        DiaryService.add('[Douban summary] fetch failed: ${resp.message}');
-        return;
+      if (overview != null && overview.isNotEmpty) {
+        setState(() {
+          _summary = overview;
+        });
       }
-      final s = resp.data!.summary;
-      if (s == null || s.trim().isEmpty) {
-        debugPrint('[Douban summary] empty');
-        DiaryService.add('[Douban summary] empty');
-        return;
-      }
-      debugPrint('[Douban summary] hit: ${s.length} chars');
-      DiaryService.add('[Douban summary] hit: ${s.length} chars');
-      setState(() {
-        _summary = s.trim();
-      });
-    } catch (e, st) {
-      debugPrint('[Douban summary] error: $e\n$st');
-      DiaryService.add('[Douban summary] error: $e');
+    } catch (e) {
+      debugPrint('[TMDB overview] error: $e');
+      DiaryService.add('[TMDB overview] error: $e');
       // 静默 fallback — 不打扰用户
     }
   }
