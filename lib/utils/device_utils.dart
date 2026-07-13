@@ -93,20 +93,4 @@ class DeviceUtils {
       return 7.75;
     }
   }
-
-  /// 根据屏幕宽度动态计算直播频道列表的列数
-  static int getLiveChannelColumnCount(BuildContext context) {
-    if (!isTablet(context)) {
-      return 2; // 手机模式固定2列
-    }
-    final double width = MediaQuery.of(context).size.width;
-
-    if (width < 1000) {
-      return 3;
-    } else if (width < 1200) {
-      return 4;
-    } else {
-      return 5;
-    }
-  }
 }

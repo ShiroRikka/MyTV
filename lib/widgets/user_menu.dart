@@ -10,7 +10,6 @@ import 'package:luna_tv/screens/cf_acceleration_page.dart';
 import 'package:luna_tv/screens/login_screen.dart';
 import 'package:luna_tv/services/douban_cache_service.dart';
 import 'package:luna_tv/services/page_cache_service.dart';
-import 'package:luna_tv/services/live_service.dart';
 import 'package:luna_tv/screens/diary_screen.dart';
 import 'package:luna_tv/services/local_search_cache_service.dart';
 import 'package:luna_tv/services/tmdb_service.dart';
@@ -631,7 +630,6 @@ class _UserMenuState extends State<UserMenu> {
 
   Future<void> _handleLogout() async {
     // 清空所有缓存
-    LiveService.clearAllCache();
     LocalSearchCacheService().clearCache();
     PageCacheService().clearAllCache();
 

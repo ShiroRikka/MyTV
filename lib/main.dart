@@ -258,12 +258,6 @@ class _AppWrapperState extends State<AppWrapper> {
                     content.searchResources!,
                   );
                 }
-                if (content.liveSources != null &&
-                    content.liveSources!.isNotEmpty) {
-                  await LocalModeStorageService.saveLiveSources(
-                    content.liveSources!,
-                  );
-                }
               }
             }
           }

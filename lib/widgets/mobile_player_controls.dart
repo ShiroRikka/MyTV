@@ -25,7 +25,6 @@ class MobilePlayerControls extends StatefulWidget {
   final int? totalEpisodes;
   final String? sourceName;
   final VoidCallback? onExitFullScreen;
-  final bool live;
   final ValueNotifier<double> playbackSpeedListenable;
   final Future<void> Function(double speed) onSetSpeed;
   final Future<void> Function() onEnterPipMode;
@@ -49,7 +48,6 @@ class MobilePlayerControls extends StatefulWidget {
     this.totalEpisodes,
     this.sourceName,
     this.onExitFullScreen,
-    this.live = false,
     required this.playbackSpeedListenable,
     required this.onSetSpeed,
     required this.onEnterPipMode,
@@ -216,7 +214,7 @@ class _MobilePlayerControlsState extends State<MobilePlayerControls> {
   }
 
   void _onLongPressStart(LongPressStartDetails details) {
-    if (_isLocked || widget.live || !_isPlaying) return;
+    if (_isLocked || !_isPlaying) return;
     setState(() {
       _isLongPressing = true;
       _originalPlaybackSpeed = widget.playbackSpeedListenable.value;
@@ -225,13 +223,13 @@ class _MobilePlayerControlsState extends State<MobilePlayerControls> {
   }
 
   void _onLongPressEnd(LongPressEndDetails details) {
-    if (_isLocked || !_isLongPressing || widget.live) return;
+    if (_isLocked || !_isLongPressing) return;
     widget.onSetSpeed(_originalPlaybackSpeed);
     setState(() => _isLongPressing = false);
   }
 
   void _onSwipeStart(DragStartDetails details) {
-    if (_isLocked || widget.live) return;
+    if (_isLocked) return;
     _screenSize ??= MediaQuery.of(context).size;
     setState(() {
       _isSeekingViaSwipe = true;
@@ -244,7 +242,7 @@ class _MobilePlayerControlsState extends State<MobilePlayerControls> {
   }
 
   void _onSwipeUpdate(DragUpdateDetails details) {
-    if (_isLocked || !_isSeekingViaSwipe || widget.live || _screenSize == null)
+    if (_isLocked || !_isSeekingViaSwipe || _screenSize == null)
       return;
     final screenWidth = _screenSize!.width;
     final swipeDistance = details.globalPosition.dx - _swipeStartX;
@@ -263,7 +261,7 @@ class _MobilePlayerControlsState extends State<MobilePlayerControls> {
   }
 
   void _onSwipeEnd(DragEndDetails details) {
-    if (_isLocked || !_isSeekingViaSwipe || widget.live) return;
+    if (_isLocked || !_isSeekingViaSwipe) return;
     if (_dragPosition != null) {
       widget.player.seek(_dragPosition!);
     }
@@ -727,9 +725,7 @@ class _MobilePlayerControlsState extends State<MobilePlayerControls> {
           child: GestureDetector(
             onTap: () async {
               _onUserInteraction();
-              if (!widget.live) {
-                widget.player.pause();
-              }
+              widget.player.pause();
               await _showDLNADialog();
             },
             behavior: HitTestBehavior.opaque,
@@ -785,7 +781,6 @@ class _MobilePlayerControlsState extends State<MobilePlayerControls> {
             margin: const EdgeInsets.symmetric(horizontal: 16),
             child: _MobileVideoProgressBar(
               player: widget.player,
-              live: widget.live,
               onDragStart: () {
                 setState(() => _controlsVisible = true);
                 _hideTimer?.cancel();
@@ -844,7 +839,7 @@ class _MobilePlayerControlsState extends State<MobilePlayerControls> {
                     ),
                   ),
                 ),
-                if (!widget.isLastEpisode && !widget.live)
+                if (!widget.isLastEpisode)
                   GestureDetector(
                     onTap: () {
                       _onUserInteraction();
@@ -860,8 +855,7 @@ class _MobilePlayerControlsState extends State<MobilePlayerControls> {
                       ),
                     ),
                   ),
-                if (!widget.live)
-                  Expanded(
+                Expanded(
                     child: Padding(
                       padding: const EdgeInsets.only(left: 8.0, right: 8.0),
                       child: Text(
@@ -871,9 +865,7 @@ class _MobilePlayerControlsState extends State<MobilePlayerControls> {
                       ),
                     ),
                   ),
-                if (widget.live) const Spacer(),
-                if (!widget.live)
-                  GestureDetector(
+                GestureDetector(
                     onTap: () async {
                       _onUserInteraction();
                       await _showSpeedDialog();
@@ -1133,7 +1125,6 @@ class _MobileVideoProgressBar extends StatefulWidget {
   final Function(Duration)? onPositionUpdate;
   final Duration? dragPosition;
   final bool isSeekingViaSwipe;
-  final bool live;
 
   const _MobileVideoProgressBar({
     required this.player,
@@ -1143,7 +1134,6 @@ class _MobileVideoProgressBar extends StatefulWidget {
     this.onPositionUpdate,
     this.dragPosition,
     this.isSeekingViaSwipe = false,
-    this.live = false,
   });
 
   @override
@@ -1180,37 +1170,27 @@ class _MobileVideoProgressBarState extends State<_MobileVideoProgressBar> {
 
     double value = 0.0;
     if (duration.inMilliseconds > 0) {
-      if (widget.live) {
-        value = 1.0;
-      } else {
-        value = position.inMilliseconds / duration.inMilliseconds;
-      }
+      value = position.inMilliseconds / duration.inMilliseconds;
     }
 
-    if (_isDragging && !widget.live) {
+    if (_isDragging) {
       value = _dragValue;
     }
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onHorizontalDragStart: widget.live
-          ? null
-          : (details) {
+      onHorizontalDragStart: (details) {
               _isDragging = true;
               widget.onDragStart?.call();
               _updateDrag(details.localPosition.dx, context);
             },
-      onHorizontalDragUpdate: widget.live
-          ? null
-          : (details) {
+      onHorizontalDragUpdate: (details) {
               if (_isDragging) {
                 widget.onDragUpdate?.call();
                 _updateDrag(details.localPosition.dx, context);
               }
             },
-      onHorizontalDragEnd: widget.live
-          ? null
-          : (details) async {
+      onHorizontalDragEnd: (details) async {
               if (_isDragging) {
                 final seekPosition = Duration(
                   milliseconds: (_dragValue * duration.inMilliseconds).round(),
@@ -1234,9 +1214,7 @@ class _MobileVideoProgressBarState extends State<_MobileVideoProgressBar> {
                 widget.onDragEnd?.call();
               }
             },
-      onTapDown: widget.live
-          ? null
-          : (details) async {
+      onTapDown: (details) async {
               widget.onDragStart?.call();
               _updateDrag(details.localPosition.dx, context);
               final seekPosition = Duration(
@@ -1296,30 +1274,29 @@ class _MobileVideoProgressBarState extends State<_MobileVideoProgressBar> {
                       ),
                     ),
                   ),
-                  if (!widget.live)
-                    Positioned(
-                      left: thumbPosition - 8,
-                      top: 4,
-                      child: AnimatedScale(
-                        scale: widget.isSeekingViaSwipe ? 1.25 : 1.0,
-                        duration: const Duration(milliseconds: 150),
-                        child: Container(
-                          width: 16,
-                          height: 16,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Colors.red,
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.3),
-                                blurRadius: 4,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          ),
+                  Positioned(
+                    left: thumbPosition - 8,
+                    top: 4,
+                    child: AnimatedScale(
+                      scale: widget.isSeekingViaSwipe ? 1.25 : 1.0,
+                      duration: const Duration(milliseconds: 150),
+                      child: Container(
+                        width: 16,
+                        height: 16,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.red,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.3),
+                              blurRadius: 4,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
                         ),
                       ),
                     ),
+                  ),
                 ],
               );
             },
@@ -1335,11 +1312,9 @@ class _MobileVideoProgressBarState extends State<_MobileVideoProgressBar> {
     final width = box.size.width;
     final value = (dx / width).clamp(0.0, 1.0);
     setState(() => _dragValue = value);
-    if (!widget.live) {
-      final duration = widget.player.state.duration;
-      final position =
-          Duration(milliseconds: (value * duration.inMilliseconds).round());
-      widget.onPositionUpdate?.call(position);
-    }
+    final duration = widget.player.state.duration;
+    final position =
+        Duration(milliseconds: (value * duration.inMilliseconds).round());
+    widget.onPositionUpdate?.call(position);
   }
 }

@@ -263,8 +263,8 @@ class _LoginScreenState extends State<LoginScreen>
         if (!mounted) return;
 
         if (content == null ||
-            (content.searchResources == null || content.searchResources!.isEmpty) &&
-                (content.liveSources == null || content.liveSources!.isEmpty)) {
+            content.searchResources == null ||
+            content.searchResources!.isEmpty) {
           setState(() {
             _isLoading = false;
           });
@@ -327,10 +327,6 @@ class _LoginScreenState extends State<LoginScreen>
             content.searchResources!.isNotEmpty) {
           await LocalModeStorageService.saveSearchSources(
               content.searchResources!);
-          if (!mounted) return;
-        }
-        if (content.liveSources != null && content.liveSources!.isNotEmpty) {
-          await LocalModeStorageService.saveLiveSources(content.liveSources!);
           if (!mounted) return;
         }
 

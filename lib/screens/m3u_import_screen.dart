@@ -80,11 +80,6 @@ class _M3uImportScreenState extends State<M3uImportScreen> {
       await LocalModeStorageService.saveSearchSources(parsed.searchResources!);
       savedCount += parsed.searchResources!.length;
     }
-    if (parsed.liveSources != null && parsed.liveSources!.isNotEmpty) {
-      await LocalModeStorageService.saveLiveSources(parsed.liveSources!);
-      savedCount += parsed.liveSources!.length;
-    }
-
     // 同时切换到本地模式
     await UserDataService.saveIsLocalMode(true);
 

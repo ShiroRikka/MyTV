@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:luna_tv/models/search_resource.dart';
-import 'package:luna_tv/models/live_source.dart';
 import 'package:luna_tv/models/play_record.dart';
 import 'package:luna_tv/models/favorite_item.dart';
 
@@ -10,7 +9,6 @@ import 'package:luna_tv/models/favorite_item.dart';
 class LocalModeStorageService {
   static const String _subscriptionUrlKey = 'local_mode_subscription_url';
   static const String _searchSourcesKey = 'local_mode_search_sources';
-  static const String _liveSourcesKey = 'local_mode_live_sources';
   static const String _playRecordsKey = 'local_mode_play_records';
   static const String _favoritesKey = 'local_mode_favorites';
   static const String _searchHistoryKey = 'local_mode_search_history';
@@ -70,39 +68,6 @@ class LocalModeStorageService {
   static Future<void> clearSearchSources() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_searchSourcesKey);
-  }
-
-  // ==================== 直播源 ====================
-
-  /// 保存直播源列表
-  static Future<void> saveLiveSources(List<LiveSource> sources) async {
-    final prefs = await SharedPreferences.getInstance();
-    final jsonList = sources.map((s) => s.toJson()).toList();
-    final jsonString = jsonEncode(jsonList);
-    await prefs.setString(_liveSourcesKey, jsonString);
-  }
-
-  /// 获取直播源列表
-  static Future<List<LiveSource>> getLiveSources() async {
-    final prefs = await SharedPreferences.getInstance();
-    final jsonString = prefs.getString(_liveSourcesKey);
-
-    if (jsonString == null || jsonString.isEmpty) {
-      return [];
-    }
-
-    try {
-      final jsonList = jsonDecode(jsonString) as List;
-      return jsonList.map((json) => LiveSource.fromJson(json)).toList();
-    } catch (e) {
-      return [];
-    }
-  }
-
-  /// 清除直播源
-  static Future<void> clearLiveSources() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_liveSourcesKey);
   }
 
   // ==================== 播放记录 ====================
@@ -327,7 +292,6 @@ class LocalModeStorageService {
   static Future<void> clearAllLocalModeData() async {
     await clearSubscriptionUrl();
     await clearSearchSources();
-    await clearLiveSources();
     await clearPlayRecords();
     await clearFavorites();
     await clearSearchHistory();

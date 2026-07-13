@@ -289,10 +289,7 @@ class PageCacheService
     final cachedData = getCache<List<FavoriteItem>>(cacheKey);
     if (cachedData != null) {
       // 有缓存数据，直接返回
-      // 过滤掉 origin=live 的数据
-      final filteredData =
-          cachedData.where((item) => item.origin != 'live').toList();
-      return DataOperationResult.success(filteredData);
+      return DataOperationResult.success(cachedData);
     }
 
     // 缓存未命中，直接走接口并保存到缓存
@@ -313,12 +310,9 @@ class PageCacheService
       final response = await ApiService.getFavorites(context);
 
       if (response.success && response.data != null) {
-        // 过滤掉 origin=live 的数据
-        final filteredData =
-            response.data!.where((item) => item.origin != 'live').toList();
-        // 缓存过滤后的数据
-        setCache(cacheKey, filteredData);
-        return DataOperationResult.success(filteredData);
+        // 缓存数据
+        setCache(cacheKey, response.data!);
+        return DataOperationResult.success(response.data!);
       }
     } catch (e) {
       return DataOperationResult.error('获取收藏夹失败: ${e.toString()}');
@@ -339,11 +333,8 @@ class PageCacheService
       final response = await ApiService.getFavorites(context);
 
       if (response.success && response.data != null) {
-        // 过滤掉 origin=live 的数据
-        final filteredData =
-            response.data!.where((item) => item.origin != 'live').toList();
         // 更新缓存数据
-        setCache(cacheKey, filteredData);
+        setCache(cacheKey, response.data!);
       }
     } catch (e) {
       // 静默处理错误，不影响主流程
@@ -477,7 +468,7 @@ class PageCacheService
           totalEpisodes: favoriteData['total_episodes'] ?? 0,
           saveTime: favoriteData['save_time'] ??
               DateTime.now().millisecondsSinceEpoch,
-          origin: '', // 默认为空，表示非直播源
+          origin: '',
         );
 
         // 添加到列表开头，保持按save_time降序排列

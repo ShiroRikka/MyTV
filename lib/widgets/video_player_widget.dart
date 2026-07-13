@@ -27,7 +27,6 @@ class VideoPlayerWidget extends StatefulWidget {
   final String? sourceName;
   final Function(bool isWebFullscreen)? onWebFullscreenChanged;
   final VoidCallback? onExitFullScreen;
-  final bool live;
   final Function(bool isPipMode)? onPipModeChanged;
 
   const VideoPlayerWidget({
@@ -49,7 +48,6 @@ class VideoPlayerWidget extends StatefulWidget {
     this.sourceName,
     this.onWebFullscreenChanged,
     this.onExitFullScreen,
-    this.live = false,
     this.onPipModeChanged,
   });
 
@@ -275,15 +273,13 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> with WidgetsBindi
         });
       }
     });
-    if (!widget.live) {
-      _completedSubscription = _player!.stream.completed.listen((completed) {
-        if (!mounted) return;
-        if (completed && !_hasCompleted) {
-          _hasCompleted = true;
-          widget.onVideoCompleted?.call();
-        }
-      });
-    }
+    _completedSubscription = _player!.stream.completed.listen((completed) {
+      if (!mounted) return;
+      if (completed && !_hasCompleted) {
+        _hasCompleted = true;
+        widget.onVideoCompleted?.call();
+      }
+    });
     _durationSubscription = _player!.stream.duration.listen((duration) {
       if (!mounted) return;
       if (duration != Duration.zero) {
@@ -448,7 +444,6 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> with WidgetsBindi
                           _exitWebFullscreenCallback = callback;
                         },
                         onExitFullScreen: widget.onExitFullScreen,
-                        live: widget.live,
                         playbackSpeedListenable: _playbackSpeed,
                         onSetSpeed: _setPlaybackSpeed,
                       )
@@ -469,7 +464,6 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> with WidgetsBindi
                         totalEpisodes: widget.totalEpisodes,
                         sourceName: widget.sourceName,
                         onExitFullScreen: widget.onExitFullScreen,
-                        live: widget.live,
                         playbackSpeedListenable: _playbackSpeed,
                         onSetSpeed: _setPlaybackSpeed,
                         onEnterPipMode: _enterPipMode,

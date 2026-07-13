@@ -27,7 +27,6 @@ import 'package:luna_tv/screens/tv_screen.dart';
 import 'package:luna_tv/screens/anime_screen.dart';
 import 'package:luna_tv/screens/show_screen.dart';
 import 'package:luna_tv/screens/player_screen.dart';
-import 'package:luna_tv/screens/live_screen.dart';
 import 'package:luna_tv/screens/short_drama_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -533,7 +532,6 @@ class _HomeScreenState extends State<HomeScreen> {
         const AnimeScreen(),
         const ShortDramaScreen(),
         const ShowScreen(),
-        const LiveScreen(),
       ],
     );
   }

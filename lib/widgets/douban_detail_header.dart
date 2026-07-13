@@ -228,7 +228,11 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
           // v2.1.9: 手机右侧也显示简介 (填空白, 跟平板一致). 外层加横向
           //   SingleChildScrollView — 用户反馈"手机也是写不下就左滑", 标题/简介
           //   超出可见宽度时可左滑查看. 右侧 meta column 用固定宽度 (不用
-          //   Expanded, 因为 Expanded 跟横向滚动冲突), 宽度 = 可见宽 - 海报 - gap.
+          //   Expanded, 因为 Expanded 跟横向滚动冲突).
+          // v2.1.14: 量标题单行自然宽, metaW = max(可见宽, 标题宽). 之前
+          //   metaW 死扣成可见宽 → Row 总宽 = 可见宽 → 没溢出 → 左滑没东西
+          //   可滑. 改后标题长时 metaW > 可见宽 → Row 溢出 → 左滑生效, 简介
+          //   也在更宽列里少截断. 标题短时 metaW = 可见宽, 不溢出 (跟原来一样).
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
             child: LayoutBuilder(
@@ -237,9 +241,26 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
                 // 海报高度不超过容器高, 不超过 225 (大屏不无限放大)
                 final posterH = maxH < 225 ? maxH : 225.0;
                 final posterW = posterH * 2 / 3;
-                // 右侧 meta 可见宽度 = 总宽 - 海报 - gap - 右 padding.
-                // 给固定宽度让 SingleChildScrollView 能判断溢出.
-                final metaW = constraints.maxWidth - posterW - 14 - 16;
+                // 右侧 meta 可见宽度 = 总宽 - 海报 - gap (padding 已在外层
+                // Padding 扣过, 不再重复减).
+                final availableForMeta =
+                    constraints.maxWidth - posterW - 14;
+                // 量标题单行自然宽, 让 metaW 在标题长时能超出可见宽触发横滑.
+                final titleTp = TextPainter(
+                  text: TextSpan(
+                    text: widget.title,
+                    style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                        height: 1.2),
+                  ),
+                  textDirection: TextDirection.ltr,
+                )..layout();
+                final titleW = titleTp.maxIntrinsicWidth;
+                titleTp.dispose();
+                final metaW = availableForMeta > titleW
+                    ? availableForMeta
+                    : titleW;
                 return SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   physics: const BouncingScrollPhysics(),

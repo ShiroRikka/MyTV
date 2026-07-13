@@ -7,9 +7,6 @@ import 'package:luna_tv/models/favorite_item.dart';
 import 'package:luna_tv/models/search_result.dart';
 import 'package:luna_tv/models/play_record.dart';
 import 'package:luna_tv/models/search_resource.dart';
-import 'package:luna_tv/models/live_source.dart';
-import 'package:luna_tv/models/live_channel.dart';
-import 'package:luna_tv/models/epg_program.dart';
 import 'package:luna_tv/models/search_suggestion.dart';
 
 /// API响应结果类
@@ -720,87 +717,6 @@ class ApiService {
     } catch (e) {
       print('获取搜索源失败: $e');
       return [];
-    }
-  }
-
-  /// 获取直播源列表
-  static Future<List<LiveSource>> getLiveSources() async {
-    try {
-      final response = await get<List<LiveSource>>(
-        '/api/live/sources',
-        fromJson: (data) {
-          final responseData = data as Map<String, dynamic>;
-          final list = responseData['data'] as List<dynamic>;
-          return list
-              .map((item) => LiveSource.fromJson(item as Map<String, dynamic>))
-              .toList();
-        },
-      );
-
-      if (response.success && response.data != null) {
-        return response.data!;
-      } else {
-        print('获取直播源列表失败: ${response.message}');
-        return [];
-      }
-    } catch (e) {
-      print('获取直播源列表失败: $e');
-      return [];
-    }
-  }
-
-  /// 获取直播频道列表
-  static Future<List<LiveChannel>> getLiveChannels(String source) async {
-    try {
-      final response = await get<List<LiveChannel>>(
-        '/api/live/channels',
-        queryParameters: {'source': source},
-        fromJson: (data) {
-          final responseData = data as Map<String, dynamic>;
-          final list = responseData['data'] as List<dynamic>;
-          return list
-              .map((item) => LiveChannel.fromJson(item as Map<String, dynamic>))
-              .toList();
-        },
-      );
-
-      if (response.success && response.data != null) {
-        return response.data!;
-      } else {
-        print('获取直播频道列表失败: ${response.message}');
-        return [];
-      }
-    } catch (e) {
-      print('获取直播频道列表失败: $e');
-      return [];
-    }
-  }
-
-  /// 获取 EPG 节目单
-  static Future<EpgData?> getLiveEpg(String tvgId, String source) async {
-    try {
-      final response = await get<EpgData>(
-        '/api/live/epg',
-        queryParameters: {
-          'tvgId': tvgId,
-          'source': source,
-        },
-        fromJson: (data) {
-          final responseData = data as Map<String, dynamic>;
-          final epgData = responseData['data'] as Map<String, dynamic>;
-          return EpgData.fromJson(epgData);
-        },
-      );
-
-      if (response.success && response.data != null) {
-        return response.data!;
-      } else {
-        print('获取 EPG 节目单失败: ${response.message}');
-        return null;
-      }
-    } catch (e) {
-      print('获取 EPG 节目单失败: $e');
-      return null;
     }
   }
 

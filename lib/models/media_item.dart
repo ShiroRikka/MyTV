@@ -9,7 +9,7 @@ class MediaItem {
   final String? cast;
   final String? duration;
   final String? quality;
-  final String type; // 'movie', 'tv', 'shortdrama', 'live'
+  final String type; // 'movie', 'tv', 'shortdrama'
   final String? source;
 
   const MediaItem({

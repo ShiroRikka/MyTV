@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:luna_tv/models/live_source.dart';
 import 'package:luna_tv/models/search_resource.dart';
 
 List<int> base58decode(String input) {
@@ -11,9 +10,8 @@ List<int> base58decode(String input) {
 /// 订阅内容解析结果
 class SubscriptionContent {
   final List<SearchResource>? searchResources;
-  final List<LiveSource>? liveSources;
 
-  SubscriptionContent({this.searchResources, this.liveSources});
+  SubscriptionContent({this.searchResources});
 }
 
 /// 用于解析订阅内容
@@ -41,25 +39,7 @@ class SubscriptionService {
         });
       }
 
-      List<LiveSource>? liveSources;
-      final liveSourceData = jsonData is Map<String, dynamic> ? jsonData['lives'] as Map<String, dynamic>? : null;
-      if (liveSourceData != null) {
-        liveSources = <LiveSource>[];
-        liveSourceData.forEach((key, value) {
-          final source = value is Map<String, dynamic> ? value : <String, dynamic>{};
-          liveSources!.add(LiveSource(
-            key: source['key'] as String? ?? key,
-            name: source['name'] as String? ?? '',
-            url: source['url'] as String? ?? '',
-            ua: source['ua'] as String? ?? '',
-            epg: source['epg'] as String? ?? '',
-            from: source['from'] as String? ?? '',
-            disabled: false,
-          ));
-        });
-      }
-
-      return SubscriptionContent(searchResources: searchResources, liveSources: liveSources);
+      return SubscriptionContent(searchResources: searchResources);
     } catch (e) {
       return null;
     }
