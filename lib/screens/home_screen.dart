@@ -221,12 +221,31 @@ class _HomeScreenState extends State<HomeScreen> {
       try {
         // v2.1.19: 跟 _loadTmdbBackdrop 同样的 search-first 模式.
         //   7 天 TTL 缓存, 重复进首页 0 网络.
-        final overview = await TmdbService.fetchOverview(
-          title: item.title, year: item.year);
-        if (overview == null || !mounted) continue;
+        // v2.1.21: HeroBannerItem.year 是 String? (e.g. "2023"),
+        //   search 接受 int? year, 用 int.tryParse 转. 不转编译挂
+        //   (v2.1.19/v2.1.20 都挂在这, 'String? can't be assigned to int?').
+        //   转失败 → null, search 走不带 year 匹配 (跟 player_screen
+        //   _loadTmdbBackdrop 用 RegExp 抽 4 位数字的模式一致, 更稳).
+        // v2.1.21: 用 search 拿 (mediaType, id), 不用 fetchOverview —
+        //   fetchOverview 返回 String? (剧情简介), 跟 fetchArt 的 int id
+        //   参数没关系. v2.1.19/v2.1.20 错用 fetchOverview 当 ref 拿
+        //   overview.id, 编译挂 ('String' 没 id 字段) 一直报到这里.
+        //   跟 player_screen._loadTmdbBackdrop 一样的 2 步流程:
+        //     ref = search(title, year)
+        //     art = fetchArt(ref.id, ref.mediaType)
+        final yearInt = (item.year != null && item.year!.isNotEmpty)
+            ? int.tryParse(item.year!)
+            : null;
+        final ref = await TmdbService.search(
+          title: item.title, year: yearInt);
+        if (ref == null || !mounted) continue;
         final art = await TmdbService.fetchArt(
-          id: overview.id, mediaType: overview.mediaType);
-        if (art?.backdropUrl == null || !mounted) continue;
+          id: ref.id, mediaType: ref.mediaType);
+        // v2.1.20: 用 backdropUrl 中间变量 + null 检查, 替代
+        //   art!.backdropUrl! 双重 force unwrap. 跨 await 的 nullable
+        //   narrow 在 Dart 推断里可能不传递, 显式中间变量更稳.
+        final backdropUrl = art?.backdropUrl;
+        if (backdropUrl == null || !mounted) continue;
         if (mounted) {
           setState(() {
             // v2.1.19: 直接替换 imageUrl 字段, 其它字段 (id/title/...)
@@ -235,7 +254,7 @@ class _HomeScreenState extends State<HomeScreen> {
               id: item.id,
               title: item.title,
               subtitle: item.subtitle,
-              imageUrl: art!.backdropUrl!,
+              imageUrl: backdropUrl,
               type: item.type,
               source: 'tmdb', // 标记来源, 走 worker 加速 (跟详情页大头部一致)
               id_: item.id_,
