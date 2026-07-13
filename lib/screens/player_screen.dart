@@ -132,51 +132,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _showSkipIntro = false;
   bool _showSkipOutro = false;
 
-  // v1.0.77: 广告流自动跳过 (新方案, 替换 v1.0.75/v1.0.76 反方向 recovery)
-  // 视频源 m3u8 在广告位置会切到广告子 m3u8 (HLS DISCONTINUITY 切换),
-  // libmpv 切流时 streams.duration 瞬间从主片总时长 (45min) 变成广告段
-  // 时长 (30s). 用这个跳变识别广告, 立刻 seek 回 _lastKnownPosition,
-  // 广告根本不播, 用户无感。
-  //
-  // 为什么用 duration 不用 position 跳变: 用户拖进度条会改 position,
-  // 但 duration 不受影响, 用 duration 不会误判用户操作。60s 阈值保证
-  // 不会把正常小段切换 (e.g. 切到 1min 片头曲) 误判成广告。
-  //
-  // v1.0.75 旧方案用 position 跳变 + episode 锁, 方向反了 (用户反馈):
-  //   旧: 28min 切广告 → position 跳 0 → seek 回 28min → 28min 又是广
-  //   告位 → 又跳 0 → 又 seek → 死循环 (加 episode 锁后停在 0 重播)
-  // v1.0.77 新方案用 duration 跳变:
-  //   新: 28min 切广告 → duration 2700→30 → 立刻 seek 回 28min → 主片
-  //   重新加载 → duration 又发 2700 (是"变大", 30→2700, 不触发) → 不
-  //   会死循环, 用户几乎看不到广告。
-  //
-  // 字段:
-  //   _lastKnownPosition: position stream 每帧更新, 记的是"上一次主
-  //     片正常播的位置"。广告切流时 pos 跳 0, 但 _lastKnownPosition 不
-  //     会被 0 覆盖 (有 `pos > 0` 守门), 保持广告前的 28min。
-  //   _lastDurationForAdDetect: duration stream 每帧更新, 记的是"上
-  //     一次的总时长", 用作对比: 当前 dur vs 上一次 dur, 突然变小超
-  //     60s 就是切广告。
-  //
-  // v2.0.33: 加 position 倒退检测 (兜底). 场景: 视频源在某些广告位
-  // 是「嵌入主片 m3u8」, duration 不变, 上面 duration 跳变检测抓不到.
-  // 但有的源会让 position 跳回 0 (或近 0) 一瞬间再继续. 这种情况
-  // position stream 会出现「pos 突然从 1200 跳到 5」, 且 _scrubbingValue
-  // 是 null (用户没在拖), 且最近 3s 没触发过广告检测 (冷却) — 就当广告
-  // 处理, seek 回 _lastKnownPosition.  限制:
-  //   - 用户主动 seek 回 0 / 开头 → 走 _scrubbingValue != null 守门
-  //   - m3u8 切流已经在 duration listener 处理, 不会到这
-  //   - 完全嵌入 (position 连续不跳) 的广告这个检测也抓不到, 那是源
-  //     端 m3u8 格式决定, 客户端无解, 得 worker 改
+  // _lastKnownPosition: position stream 每帧更新, 记"上一次非 0 位置".
+  // 用于进度同步兜底 (libmpv m3u8 reload 期间 state.position=0,
+  // _currentPosition 也被重置, 用 _lastKnownPosition 拿 reload 前的位置,
+  // 避免 10s 定时器存 0 覆盖云端进度).
+  // v2.1.13: 删掉广告自动跳过逻辑 (duration 跳变 + position 倒退检测 +
+  //   _skipAd helper). 用户反馈反复卡同一广告位 / seek 错乱, 决定移除
+  //   runtime 兜底, 改靠 m3u8 重写层 (视频代理开关) 物理删广告段.
   Duration _lastKnownPosition = Duration.zero;
-  Duration _lastDurationForAdDetect = Duration.zero;
-  DateTime _lastAdDetectAt = DateTime.fromMillisecondsSinceEpoch(0);
-  // v2.0.97: 上次广告跳过的目标位置. 用于检测"同一广告位反复触发":
-  //   如果再次触发广告, 且 _lastKnownPosition 跟这个位置很近 (< 60s),
-  //   说明 seek 回去后 m3u8 reload 又卡在同一广告位 — 这次改 seek 到
-  //   _lastKnownPosition + 30s (跳过广告段), 而不是 seek 回 _lastKnownPosition
-  //   (会再卡一次). 修复用户反馈"卡住 5s 然后回到 5-10 分钟前".
-  Duration _lastAdSkipTarget = Duration.zero;
 
   // 自动播下一集: 防止 position/completed 重复触发
   bool _autoPlayedThisEpisode = false;
@@ -286,37 +249,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     _positionSub = _player.streams.position.listen((pos) {
       if (!mounted) return;
       if (_scrubbingValue == null) {
-        final prevPos = _lastKnownPosition;
         _currentPosition = pos;
-        // v1.0.77: 撤回 v1.0.75/v1.0.76 的反方向 recovery seek (用户反馈
-        // "播放到广告位死循环/重头播广告" 根因). 旧逻辑用 position 跳变
-        // 检测 m3u8 reload, 方向反了 (把用户 seek 回广告位置).
-        //
-        // v1.0.77 新方案见 _durationSub: 用 duration 跳变检测广告切流,
-        // 立刻 seek 回 _lastKnownPosition, 广告根本不播, 不再死循环.
-        //
-        // 这里只保留"记录上一次主片位置"功能 (供 duration stream 检测到
-        // 广告切流时 seek 回去用). 任何非 0 position 都更新, 包括用户拖
-        // 进度条, 拖到哪都算"上次位置". 广告切流时 position 跳 0 不更新
-        // (有 `pos > 0` 守门), _lastKnownPosition 保持广告前的 28min.
+        // 记"上一次非 0 位置" — 用于进度同步兜底 (见 _onPlayerPeriodicSave).
+        // 任何非 0 position 都更新, 包括用户拖进度条. pos=0 不更新
+        // (m3u8 reload 期间保持 reload 前的位置).
         if (pos > Duration.zero) {
           _lastKnownPosition = pos;
-        }
-        // v2.0.33: position 倒退检测 (兜底 — 抓 m3u8 内嵌广告且会让
-        // pos 跳回 0/小值的源). 跟 duration 跳变检测互补:
-        //   - duration 跳变: 抓「m3u8 切流」(1 个广告 30s 单独 m3u8)
-        //   - position 倒退: 抓「内嵌但让 pos 重置」的广告
-        // 守门:
-        //   - _scrubbingValue == null: 用户没在拖进度条
-        //   - prevPos > 10s: 已经在主片播了一段, 不是开场
-        //   - pos < 5s: 突然回到开头附近
-        //   - 倒退幅度 > 5s: 真的跳了, 不是抖动
-        //   - 冷却 + 反复触发处理在 _skipAd 里 (v2.0.97)
-        if (_scrubbingValue == null &&
-            prevPos > const Duration(seconds: 10) &&
-            pos < const Duration(seconds: 5) &&
-            prevPos - pos > const Duration(seconds: 5)) {
-          _skipAd('position 倒退 ${prevPos.inSeconds}s→${pos.inSeconds}s');
         }
         // v1.0.52: 实时刷新时间文字 + 进度条
         // 之前只更新 _currentPosition 但不 setState, 底部栏的
@@ -333,42 +271,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
     _durationSub = _player.streams.duration.listen((dur) {
       if (!mounted) return;
-      final wasDur = _lastDurationForAdDetect;
       _currentDuration = dur;
-      // v2.0.58: 记录时长变化到代理日记, 分析 "优选 IP 时视频只有 4s/6s" bug.
-      //   这是定位该 bug 最直接的信号 — 时长从 43m (2580s) 突然变成 4s/6s
-      //   说明 libmpv 拿到的流被截断 / 拿到错误内容 (代理 502 错误页被当成视频,
-      //   或 m3u8 只剩一个短段). 关掉优选 IP 时长正常 = 代理链路有问题.
-      //   日志策略: 只在时长非零且 (首次 / 跟上次差 >1s / 异常短 <30s) 时记录,
-      //   避免每帧刷屏.
-      if (dur > Duration.zero) {
-        final durSec = dur.inSeconds;
-        final wasSec = wasDur.inSeconds;
-        final isShort = durSec < 30;
-        final changed = (wasSec - durSec).abs() > 1;
-        if (wasSec == 0 || isShort || changed) {
-        }
-      }
-      // v1.0.77: 广告流自动跳过
-      // 检测 streams.duration 突然变小 (从主片 45min 跳到广告 30s),
-      // 差值 > 60s 且是变小 → 立刻 seek 回 _lastKnownPosition, 跳过
-      // 广告段. _lastKnownPosition 由 position stream 持续更新, 一定
-      // 是主片位置 (广告流 position 跳 0 时, _lastKnownPosition 不会
-      // 被 0 覆盖, 仍是广告前的 28min).
-      //
-      // 边界: seek 回去后主片重新加载, duration 又会发 2700s, 此时
-      // wasDur = 30s, dur = 2700s, 是"变大" (30→2700), 不触发, 不
-      // 会死循环.
-      // v2.0.97: 改用 _skipAd helper, 共享冷却 + 同一广告位反复触发
-      //   检测 (冷却 15s 内不重复 seek, 反复触发时跳 +30s 而不是回原位).
-      if (wasDur > Duration.zero &&
-          wasDur - dur > const Duration(seconds: 60)) {
-        _skipAd('duration 跳变 ${wasDur.inSeconds}s→${dur.inSeconds}s');
-      }
-      // 记录这一次 duration, 下一帧对比
-      if (dur > Duration.zero) {
-        _lastDurationForAdDetect = dur;
-      }
+      // v2.1.13: 删掉广告自动跳过逻辑 (duration 跳变检测 + _skipAd).
+      //   用户反馈反复卡同一广告位 / seek 错乱, 决定移除 runtime 兜底,
+      //   改靠 m3u8 重写层 (视频代理开关) 物理删广告段. 这里只保留
+      //   _currentDuration 更新, 供 _updateSkipButtonVisibility 用.
     });
     // streams.completed 兜底: 部分源 position 不走完会直接发 completed
     _player.streams.completed.listen((_) {
@@ -526,47 +433,6 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// SharedPreferences 存储键（按视频标题区分）
   String get _skipPrefKey => 'skip_config_${widget.videoInfo.title}';
 
-  /// v2.0.97: 统一广告跳过 helper. duration 跳变检测 + position 倒退检测
-  /// 都走这个, 保证两个检测点行为一致 + 共享冷却 + 共享"同一广告位反复
-  /// 触发"检测.
-  ///
-  /// 修复用户反馈"播放到广告卡住 5s 最右然后回到 5-10 分钟前播放的位置":
-  ///   根因: 旧逻辑 seek 回 _lastKnownPosition 后, 主片重新加载, position
-  ///   从 0 涨到 5s, 又触发 position 倒退检测 (prev=28min → 5s), 又 seek
-  ///   回 _lastKnownPosition. 反复卡在同一广告位 5s, 直到 m3u8 reload
-  ///   完成 position 涨过 5s 才解脱.
-  ///
-  /// 修法 (3 个改进):
-  ///   1. 冷却从 3s 加到 15s: seek 回去后 m3u8 reload 期间 (5-10s)
-  ///      position 从 0 涨, 15s 冷却能覆盖 reload 期, 不会反复触发.
-  ///   2. 记 _lastAdSkipTarget: 如果再次触发广告且 _lastKnownPosition 跟
-  ///      _lastAdSkipTarget 很近 (< 60s), 说明同一广告位反复触发 — 这次
-  ///      seek 到 _lastKnownPosition + 30s (跳过广告段), 不再 seek 回原位.
-  ///   3. duration 跳变检测也走冷却: 之前 duration 检测没冷却, 容易跟
-  ///      position 检测叠加 (同一广告位触发两次 seek).
-  void _skipAd(String reason) {
-    final now = DateTime.now();
-    if (now.difference(_lastAdDetectAt) < const Duration(seconds: 15)) {
-      return;
-    }
-    if (_lastKnownPosition <= Duration.zero) return;
-    // 同一广告位反复触发检测: _lastKnownPosition 跟上次跳过目标 < 60s
-    final isRepeat = _lastAdSkipTarget > Duration.zero &&
-        (_lastKnownPosition - _lastAdSkipTarget).abs() <
-            const Duration(seconds: 60);
-    final target = isRepeat
-        ? _lastKnownPosition + const Duration(seconds: 30)
-        : _lastKnownPosition;
-    _currentPosition = target;
-    _player.seek(target);
-    _lastAdSkipTarget = target;
-    _lastAdDetectAt = now;
-    // ignore: avoid_print
-    print('[ad-skip v2.0.97] $reason: '
-        'lastKnown=${_lastKnownPosition.inSeconds}s '
-        'repeat=$isRepeat seekTo=${target.inSeconds}s');
-  }
-
   /// 加载跳过片头片尾配置
   Future<void> _loadSkipConfig() async {
     try {
@@ -623,10 +489,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     // 广告流 duration 30s, 跟 v1.0.76 报告的死循环根因同模式.
     // 守门后: 广告流 durSec=30 < 90 不会触发, 不会 seek 错乱.
     // 主片 durSec=2700 > 90 正常判断.
+    // v2.1.13: 加 durSec > 60 守门 — 影片总时长低于 60s 不跳过片头.
+    //   防止广告 (典型 30s) / m3u8 短段被误认为"影片重新播放"而触发
+    //   跳过片头. 主片通常 > 60s, 正常判断不受影响.
     final shouldShowIntro = _skipIntroEnd > 0 &&
         posSec < _skipIntroEnd &&
         posSec > 1 &&
-        durSec > _skipIntroEnd;
+        durSec > _skipIntroEnd &&
+        durSec > 60;
     final hasNextEpisode = _selectedSource != null &&
         _currentEpisodeIndex < _selectedSource!.episodes.length - 1;
     // v1.0.77: shouldShowOutro 同样加 durSec 守门 (广告流 durSec=30
@@ -2169,18 +2039,10 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     // 切集时先把自动切下一集标志重置, 让新一集播完时能再次触发
     _autoPlayedThisEpisode = false;
-    // v1.0.77: 切集时清零 _lastKnownPosition / _lastDurationForAdDetect,
-    // 避免上一集的"主片位置/时长"被新一集沿用导致新一集 open 后立刻被误
-    // 判成广告. (新一集 open 时 duration stream 会从 0 变到新一集总时长,
-    // 此时上一集的 _lastDurationForAdDetect 还是 0, 不会触发, 但保险起
-    // 见显式清零, 跟之前 v1.0.75 的 _lastKnownPosition 清零逻辑同模式)
-    // v2.0.33: 同样清零 _lastAdDetectAt 让新一集能立刻触发 position 倒退
-    // 检测 (不需要等冷却)
+    // 切集时清零 _lastKnownPosition, 避免上一集的"主片位置"被新一集沿用
+    // 导致进度同步兜底用错位置 (v2.1.13 起 _lastKnownPosition 只用于进度
+    // 同步兜底, 广告跳过逻辑已移除, 不需要清其他字段).
     _lastKnownPosition = Duration.zero;
-    _lastDurationForAdDetect = Duration.zero;
-    _lastAdDetectAt = DateTime.fromMillisecondsSinceEpoch(0);
-    // v2.0.97: 同样清零 _lastAdSkipTarget, 新一集不沿用上一集的跳过目标
-    _lastAdSkipTarget = Duration.zero;
 
     // 记住这次要 seek 到的位置, 等 player 缓冲到可以 seek 时用
     // 仅在用户主动开新集时且和云记忆吻合的那次才用
