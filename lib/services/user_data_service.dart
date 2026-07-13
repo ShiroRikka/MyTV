@@ -9,7 +9,6 @@ class UserDataService {
   static const String _doubanImageSourceKey = 'douban_image_source';
   static const String _bangumiDataSourceKey = 'bangumi_data_source';
   static const String _bangumiImageSourceKey = 'bangumi_image_source';
-  static const String _m3u8ProxyUrlKey = 'm3u8_proxy_url';
   static const String _preferSpeedTestKey = 'prefer_speed_test';
   static const String _localSearchKey = 'local_search';
   static const String _isLocalModeKey = 'is_local_mode';
@@ -244,17 +243,6 @@ class UserDataService {
     }
   }
 
-  // 保存 M3U8 代理 URL
-  static Future<void> saveM3u8ProxyUrl(String url) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_m3u8ProxyUrlKey, url);
-  }
-
-  // 获取 M3U8 代理 URL
-  static Future<String> getM3u8ProxyUrl() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_m3u8ProxyUrlKey) ?? '';
-  }
 
   // 保存优选测速设置
   static Future<void> savePreferSpeedTest(bool enabled) async {
@@ -326,11 +314,6 @@ class UserDataService {
   static Future<void> setDoubanImageSource(String source) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_doubanImageSourceKey, source);
-  }
-
-  // 兼容旧接口:设置 M3U8 代理 URL
-  static Future<void> setM3u8ProxyUrl(String url) async {
-    await saveM3u8ProxyUrl(url);
   }
 
   // 兼容旧接口:设置优选测速

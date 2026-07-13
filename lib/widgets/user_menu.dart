@@ -37,7 +37,6 @@ class _UserMenuState extends State<UserMenu> {
   String _doubanImageSource = '直连';
   String _bangumiDataSource = '直连';
   String _bangumiImageSource = '直连';
-  String _m3u8ProxyUrl = '';
   String _version = '';
   bool _preferSpeedTest = true;
   bool _localSearch = false;
@@ -90,7 +89,6 @@ class _UserMenuState extends State<UserMenu> {
         await UserDataService.getBangumiDataSourceDisplayNameAsync();
     final bangumiImageSource =
         await UserDataService.getBangumiImageSourceDisplayNameAsync();
-    final m3u8ProxyUrl = await UserDataService.getM3u8ProxyUrl();
     final preferSpeedTest = await UserDataService.getPreferSpeedTest();
     final localSearch = await UserDataService.getLocalSearch();
     // v2.0.76: 语义重命名 — 字段名跟新语义对齐
@@ -116,7 +114,6 @@ class _UserMenuState extends State<UserMenu> {
         _doubanImageSource = doubanImageSource;
         _bangumiDataSource = bangumiDataSource;
         _bangumiImageSource = bangumiImageSource;
-        _m3u8ProxyUrl = m3u8ProxyUrl;
         _preferSpeedTest = preferSpeedTest;
         _localSearch = localSearch;
         _preferIpEnabled = preferIpEnabled;
@@ -894,107 +891,6 @@ class _UserMenuState extends State<UserMenu> {
     );
   }
 
-  void _showM3u8ProxyUrlDialog() {
-    final controller = TextEditingController(text: _m3u8ProxyUrl);
-
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor:
-              widget.isDarkMode ? const Color(0xFF2c2c2c) : Colors.white,
-          title: Text(
-            'M3U8 代理 URL',
-            style: FontUtils.poppins(context,
-                            fontSize: 18,
-              color: widget.isDarkMode
-                  ? const Color(0xFFffffff)
-                  : const Color(0xFF1f2937),
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          content: TextField(
-            controller: controller,
-            style: FontUtils.poppins(context,
-                            fontSize: 14,
-              color: widget.isDarkMode
-                  ? const Color(0xFFffffff)
-                  : const Color(0xFF1f2937),
-            ),
-            decoration: InputDecoration(
-              hintText: '输入代理 URL（可选）',
-              hintStyle: FontUtils.poppins(context,
-                                fontSize: 14,
-                color: widget.isDarkMode
-                    ? const Color(0xFF9ca3af)
-                    : const Color(0xFF6b7280),
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide(
-                  color: widget.isDarkMode
-                      ? const Color(0xFF374151)
-                      : const Color(0xFFe5e7eb),
-                ),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide(
-                  color: widget.isDarkMode
-                      ? const Color(0xFF374151)
-                      : const Color(0xFFe5e7eb),
-                ),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: const BorderSide(
-                  color: Color(0xFF10b981),
-                  width: 2,
-                ),
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-              child: Text(
-                '取消',
-                style: FontUtils.poppins(context,
-                                    fontSize: 14,
-                  color: widget.isDarkMode
-                      ? const Color(0xFF9ca3af)
-                      : const Color(0xFF6b7280),
-                ),
-              ),
-            ),
-            TextButton(
-              onPressed: () async {
-                final url = controller.text.trim();
-                await UserDataService.saveM3u8ProxyUrl(url);
-                if (!mounted) return;
-                setState(() {
-                  _m3u8ProxyUrl = url;
-                });
-                if (context.mounted) {
-                  Navigator.of(context).pop();
-                }
-              },
-              child: Text(
-                '保存',
-                style: FontUtils.poppins(context,
-                                    fontSize: 14,
-                  color: const Color(0xFF10b981),
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        );
-      },
-    ).whenComplete(controller.dispose);
-  }
 
   Widget _buildInputOption({
     required String title,
@@ -1553,15 +1449,6 @@ class _UserMenuState extends State<UserMenu> {
                 },
                 icon: LucideIcons.image,
                 iconColor: const Color(0xFFf43f5e),
-              ),
-              _buildDivider(),
-              // M3U8 代理 URL 选项
-              _buildInputOption(
-                title: 'M3U8 代理 URL',
-                currentValue: _m3u8ProxyUrl,
-                onTap: _showM3u8ProxyUrlDialog,
-                icon: LucideIcons.link,
-                iconColor: const Color(0xFF6366f1),
               ),
             ],
           ),

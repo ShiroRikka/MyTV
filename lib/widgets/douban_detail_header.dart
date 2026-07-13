@@ -229,10 +229,12 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
           //   SingleChildScrollView — 用户反馈"手机也是写不下就左滑", 标题/简介
           //   超出可见宽度时可左滑查看. 右侧 meta column 用固定宽度 (不用
           //   Expanded, 因为 Expanded 跟横向滚动冲突).
-          // v2.1.14: 量标题单行自然宽, metaW = max(可见宽, 标题宽). 之前
-          //   metaW 死扣成可见宽 → Row 总宽 = 可见宽 → 没溢出 → 左滑没东西
-          //   可滑. 改后标题长时 metaW > 可见宽 → Row 溢出 → 左滑生效, 简介
-          //   也在更宽列里少截断. 标题短时 metaW = 可见宽, 不溢出 (跟原来一样).
+          // v2.1.14: 量标题自然宽决定 metaW — 但标题通常短, metaW 仍=可见宽,
+          //   Row 不溢出, 左滑无效.
+          // v2.1.15: 改量简介自然宽. 简介单行宽 / 7 = 8 行能放下时所需列宽.
+          //   简介长时 desiredW > 可见宽 → metaW = desiredW → Row 溢出 → 左滑
+          //   生效, 简介在更宽列里也能显示更多内容. 简介短时 desiredW < 可见宽
+          //   → metaW = 可见宽, 不溢出 (跟原来一样). 上限 3 倍可见宽避免滑太远.
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
             child: LayoutBuilder(
@@ -245,22 +247,27 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
                 // Padding 扣过, 不再重复减).
                 final availableForMeta =
                     constraints.maxWidth - posterW - 14;
-                // 量标题单行自然宽, 让 metaW 在标题长时能超出可见宽触发横滑.
-                final titleTp = TextPainter(
-                  text: TextSpan(
-                    text: widget.title,
-                    style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w800,
-                        height: 1.2),
-                  ),
-                  textDirection: TextDirection.ltr,
-                )..layout();
-                final titleW = titleTp.maxIntrinsicWidth;
-                titleTp.dispose();
-                final metaW = availableForMeta > titleW
-                    ? availableForMeta
-                    : titleW;
+                // 量简介单行自然宽, 算 8 行能放下时所需列宽 (留 1 行余量用 7).
+                // 简介长时 metaW > 可见宽 → Row 溢出 → 左滑生效.
+                double metaW = availableForMeta;
+                final summary = widget.summary?.trim() ?? '';
+                if (summary.isNotEmpty) {
+                  final summaryTp = TextPainter(
+                    text: TextSpan(
+                      text: summary,
+                      style: const TextStyle(
+                          fontSize: 13, height: 1.5),
+                    ),
+                    textDirection: TextDirection.ltr,
+                  )..layout(maxWidth: double.infinity);
+                  final summaryW = summaryTp.maxIntrinsicWidth;
+                  summaryTp.dispose();
+                  final desiredW = summaryW / 7;
+                  final maxMetaW = availableForMeta * 3;
+                  if (desiredW > availableForMeta) {
+                    metaW = desiredW > maxMetaW ? maxMetaW : desiredW;
+                  }
+                }
                 return SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   physics: const BouncingScrollPhysics(),
