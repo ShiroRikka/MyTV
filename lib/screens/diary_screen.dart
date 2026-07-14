@@ -12,9 +12,14 @@ import 'package:luna_tv/services/theme_service.dart';
 ///   log 实时浮层 ([VideoProxy] xxx 一直滚, 乱), 这次是日记独立页面
 ///   (按时间序, 用户主动点开, 不打扰, 类似 dev console).
 ///
+/// v2.1.22: 日记增强
+///   - 顶部加分类 chip 筛选 (全部 / TMDB / Bangumi / 视频 / 其它), 点击切换
+///   - 单条长按弹菜单 (复制单条 / 删除单条)
+///   - 顶部状态条实时显示当前容量上限 + 持久化状态
+///
 /// UX:
 ///   - AppBar 标题「日记」+ 右侧「清空」+「复制」按钮
-///   - 顶部 chip 显示「共 N 条 / 容量 500」+ 类别筛选 (默认全显示)
+///   - 顶部 chip 显示「共 N 条 / 容量 N 条」+ 5 个分类 chip
 ///   - 主体 ListView 反向滚动 (新条目在底部, 类似聊天记录), 自动滚到底
 ///   - 空状态: 「暂无日记」+ 副标题「去详情页看剧, 失败时会自动记录」
 class DiaryScreen extends StatefulWidget {
@@ -26,6 +31,9 @@ class DiaryScreen extends StatefulWidget {
 
 class _DiaryScreenState extends State<DiaryScreen> {
   final ScrollController _scrollController = ScrollController();
+
+  // v2.1.22: 当前选中的分类 chip (null = 全部)
+  String? _filter;
 
   @override
   void dispose() {
@@ -64,7 +72,7 @@ class _DiaryScreenState extends State<DiaryScreen> {
       ),
     );
     if (ok == true) {
-      DiaryService.clear();
+      await DiaryService.clear();
       if (mounted) setState(() {});
     }
   }
@@ -84,10 +92,96 @@ class _DiaryScreenState extends State<DiaryScreen> {
     );
   }
 
+  // v2.1.22: 单条长按菜单 — 复制 / 删除
+  Future<void> _onEntryLongPress(String entry) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(LucideIcons.copy),
+              title: const Text('复制这条'),
+              onTap: () => Navigator.of(ctx).pop('copy'),
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.trash2,
+                  color: Color(0xFFef4444)),
+              title: const Text('删除这条',
+                  style: TextStyle(color: Color(0xFFef4444))),
+              onTap: () => Navigator.of(ctx).pop('delete'),
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.x),
+              title: const Text('取消'),
+              onTap: () => Navigator.of(ctx).pop(null),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'copy') {
+      await Clipboard.setData(ClipboardData(text: entry));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已复制这条日记到剪贴板')),
+      );
+    } else if (action == 'delete') {
+      // v2.1.22: 单条删除 — DiaryService 没有单条删 API, 直接操作 _entries 不行
+      // (那是私有). 加个单条删方法最干净, 这次就在服务里加.
+      await DiaryService.removeEntry(entry);
+      if (mounted) setState(() {});
+    }
+  }
+
+  // v2.1.22: 分类识别 — 取 [] 里的第一段作为分类, 跟实际调用方约定一致
+  // (e.g. [TMDB] / [Bangumi image] / [Network] / [AD_RESET] / [History] / [Douban summary])
+  String _categoryOf(String entry) {
+    final m = RegExp(r'^\[[^\]]+\]').firstMatch(entry);
+    if (m == null) return '其它';
+    final tag = m.group(0)!.toLowerCase();
+    if (tag.startsWith('[tmdb')) return 'TMDB';
+    if (tag.startsWith('[bangumi')) return 'Bangumi';
+    if (tag.startsWith('[network') ||
+        tag.contains('网络') ||
+        tag.contains('timeout') ||
+        tag.contains('handshake')) {
+      return '网络';
+    }
+    if (tag.startsWith('[player') ||
+        tag.startsWith('[ad_reset') ||
+        tag.startsWith('[history') ||
+        tag.startsWith('[douban')) {
+      return '视频';
+    }
+    return '其它';
+  }
+
+  List<String> _filtered(List<String> all) {
+    if (_filter == null) return all;
+    return all.where((e) => _categoryOf(e) == _filter).toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final entries = DiaryService.getAll();
+    final all = DiaryService.getAll();
+    final entries = _filtered(all);
+
+    // 统计各分类条数
+    final counts = <String, int>{
+      'TMDB': 0,
+      'Bangumi': 0,
+      '网络': 0,
+      '视频': 0,
+      '其它': 0,
+    };
+    for (final e in all) {
+      final c = _categoryOf(e);
+      counts[c] = (counts[c] ?? 0) + 1;
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -107,7 +201,7 @@ class _DiaryScreenState extends State<DiaryScreen> {
       ),
       body: Column(
         children: [
-          // 顶部状态条
+          // v2.1.22: 顶部状态条 — 实时显示容量 + 持久化状态
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -122,22 +216,48 @@ class _DiaryScreenState extends State<DiaryScreen> {
                   color: isDark ? Colors.white70 : Colors.black54,
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  '共 ${entries.length} 条 · 容量上限 500 条',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: isDark ? Colors.white70 : Colors.black54,
+                Expanded(
+                  child: Text(
+                    '共 ${all.length} 条 · 容量上限 ${DiaryService.maxEntries} 条'
+                    '${DiaryService.persist ? " · 持久化" : ""}',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: isDark ? Colors.white70 : Colors.black54,
+                    ),
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                const Spacer(),
                 Text(
-                  '退出 app 自动清空',
+                  DiaryService.clearOnExit ? '退出 app 清空' : '退出保留',
                   style: TextStyle(
                     fontSize: 11,
                     color: isDark ? Colors.white38 : Colors.black38,
                   ),
                 ),
               ],
+            ),
+          ),
+          // v2.1.22: 分类 chip 行
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _filterChip('全部', _filter == null, all.length, null),
+                  const SizedBox(width: 6),
+                  _filterChip('TMDB', _filter == 'TMDB', counts['TMDB'] ?? 0, 'TMDB'),
+                  const SizedBox(width: 6),
+                  _filterChip('Bangumi', _filter == 'Bangumi', counts['Bangumi'] ?? 0, 'Bangumi'),
+                  const SizedBox(width: 6),
+                  _filterChip('网络', _filter == '网络', counts['网络'] ?? 0, '网络'),
+                  const SizedBox(width: 6),
+                  _filterChip('视频', _filter == '视频', counts['视频'] ?? 0, '视频'),
+                  const SizedBox(width: 6),
+                  _filterChip('其它', _filter == '其它', counts['其它'] ?? 0, '其它'),
+                ],
+              ),
             ),
           ),
           // 主体列表
@@ -154,7 +274,7 @@ class _DiaryScreenState extends State<DiaryScreen> {
                         ),
                         const SizedBox(height: 16),
                         Text(
-                          '暂无日记',
+                          _filter == null ? '暂无日记' : '「$_filter」分类下没有日记',
                           style: TextStyle(
                             fontSize: 16,
                             color: isDark ? Colors.white60 : Colors.black54,
@@ -162,7 +282,9 @@ class _DiaryScreenState extends State<DiaryScreen> {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          '去详情页看剧, 失败时会自动记录',
+                          _filter == null
+                              ? '去详情页看剧, 失败时会自动记录'
+                              : '换其他分类看看, 或点「全部」',
                           style: TextStyle(
                             fontSize: 12,
                             color: isDark ? Colors.white38 : Colors.black38,
@@ -183,9 +305,12 @@ class _DiaryScreenState extends State<DiaryScreen> {
                           (entry.contains('error') ||
                               entry.contains('no result') ||
                               entry.contains('no backdrop') ||
-                              entry.contains('skip'));
-                      final isNetworkError =
-                          entry.contains('[Network]') || entry.contains('timeout');
+                              entry.contains('skip') ||
+                              entry.contains('全挂'));
+                      final isNetworkError = _categoryOf(entry) == '网络' ||
+                          entry.contains('timeout') ||
+                          entry.contains('handshake') ||
+                          entry.contains('SocketException');
                       Color? bg;
                       if (isTmdbError) {
                         bg = isDark
@@ -196,23 +321,27 @@ class _DiaryScreenState extends State<DiaryScreen> {
                             ? const Color(0xFF4a3a1a)
                             : const Color(0xFFfef3c7);
                       }
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 4),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: bg,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          entry,
-                          style: TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 12,
-                            height: 1.4,
-                            color: isDark
-                                ? Colors.white.withOpacity(0.9)
-                                : Colors.black87,
+                      return InkWell(
+                        onLongPress: () => _onEntryLongPress(entry),
+                        borderRadius: BorderRadius.circular(4),
+                        child: Container(
+                          margin: const EdgeInsets.only(bottom: 4),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: bg,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            entry,
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 12,
+                              height: 1.4,
+                              color: isDark
+                                  ? Colors.white.withOpacity(0.9)
+                                  : Colors.black87,
+                            ),
                           ),
                         ),
                       );
@@ -221,6 +350,19 @@ class _DiaryScreenState extends State<DiaryScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  // v2.1.22: 单个分类 chip
+  Widget _filterChip(String label, bool selected, int count, String? filter) {
+    return FilterChip(
+      label: Text('$label · $count'),
+      selected: selected,
+      onSelected: (v) {
+        setState(() {
+          _filter = v ? filter : null;
+        });
+      },
     );
   }
 }

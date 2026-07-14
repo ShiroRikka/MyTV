@@ -144,20 +144,26 @@ class TmdbService {
         e is http.ClientException;
   }
 
-  // v2.1.21: 通用 http.get + 双层 fallback + 短超时.
+  // v2.1.22: 通用 http.get + 3 层 retry 链 + 短超时.
   //
-  // 网络/握手/TLS/超时类错 (cf_worker) → 立即 fallback to direct (短超时 6s, 不等满 10s).
-  // direct 失败 (国内被墙 / 抖) → 重试 1 次 (短超时 6s), 给抖的情况一次机会.
-  // 4xx/5xx 走的是 statusCode 分支, 不在这里 catch, 也不 fallback / 重试
-  // (key 失效 / 限流 / 服务异常, 直连也一样失败).
+  // 失败重试链 (cf_worker 模式):
+  //   1) worker 第一次 (cf_worker, 6s)
+  //   2) worker 失败 → retry 1 次 同 worker (6s) — 救客户端 TLS 抖动
+  //   3) worker 二次失败 → fallback direct (6s)
+  //   4) direct 失败 → retry 1 次 direct (6s) — 救国内出口路由抖
+  //   5) 全部失败 → return null
   //
-  // 修 v2.1.20 的 TMDB SSL 握手失败:
-  //   - 旧 10s timeout 太长, 用户手机 OpenSSL 跟 worker TLS 1.3 协商失败
-  //     (SSLV3_ALERT_HANDSHAKE_FAILURE), 等满 10s 才 fallback 到 direct,
-  //     direct 也被墙 → 整段超时卡 20s+.
-  //   - 改 worker 模式 timeout 10s → 6s: 失败立即 fallback, 不等满.
-  //   - direct 加重试 1 次 (6s): 第一次 direct 失败 (网络抖) 立刻重试,
-  //     二次失败才返 null. 国内被墙场景下 retry 帮不上, 但抖的场景能给一次机会.
+  // 失败重试链 (direct 模式, 跳过 step 2 的 worker retry):
+  //   1) direct 第一次 (6s)
+  //   2) direct 失败 → retry 1 次 direct (6s)
+  //   3) 失败 → return null
+  //
+  // 修 v2.1.21 的 "retry 救错地方" 问题:
+  //   v2.1.21 retry direct 是错方向 — worker 节点稳, 抖的是客户端 TLS
+  //   协商, retry 同样 worker 大概率能过. v2.1.22 把 retry 移到 worker 内部.
+  //
+  // 4xx/5xx 走 statusCode 分支, 不在这里 catch, 也不 retry/fallback
+  // (key 失效 / 限流 / 服务异常, retry 无意义).
   static Future<http.Response?> _httpGetWithFallback({
     required String origUrl,
     required String url,
@@ -170,26 +176,47 @@ class TmdbService {
     try {
       return await http.get(Uri.parse(url)).timeout(timeout);
     } catch (e) {
-      // 网络/握手/TLS/超时错 → fallback (仅 cf_worker 模式有意义, direct 走不到这)
-      if (source == 'cf_worker' && _isNetworkInfraError(e)) {
-        DiaryService.add(
-            '[TMDB] cf_worker $tag 网络/握手失败: $e (timeout=${timeout.inSeconds}s), fallback to direct');
-        final directUrl = _buildTmdbApiUrl(origUrl, 'direct');
-        DiaryService.add(
-            '[TMDB] network req (direct fallback $tag): ${_maskKeyInUrl(directUrl, apiKey)}');
-        try {
-          return await http.get(Uri.parse(directUrl)).timeout(timeout);
-        } catch (e2) {
-          // 2) 第二次: direct 失败 → 重试 1 次 direct
+      // 网络/握手/TLS/超时错 → retry + fallback 链
+      if (_isNetworkInfraError(e)) {
+        // ====== cf_worker 模式: retry 1 次 worker → fallback direct ======
+        if (source == 'cf_worker') {
+          // 2) retry 1 次 同 worker
           DiaryService.add(
-              '[TMDB] direct fallback $tag err: $e2, retry 1 次');
+              '[TMDB] cf_worker $tag 网络/握手失败: $e (timeout=${timeout.inSeconds}s), retry 1 次同 worker');
           try {
-            return await http.get(Uri.parse(directUrl)).timeout(timeout);
-          } catch (e3) {
+            return await http.get(Uri.parse(url)).timeout(timeout);
+          } catch (e2) {
+            // 3) worker 二次失败 → fallback direct
             DiaryService.add(
-                '[TMDB] direct retry $tag err: $e3 (cf_worker+direct+retry 全挂)');
-            return null;
+                '[TMDB] cf_worker retry $tag err: $e2, fallback to direct');
+            final directUrl = _buildTmdbApiUrl(origUrl, 'direct');
+            DiaryService.add(
+                '[TMDB] network req (direct fallback $tag): ${_maskKeyInUrl(directUrl, apiKey)}');
+            try {
+              return await http.get(Uri.parse(directUrl)).timeout(timeout);
+            } catch (e3) {
+              // 4) direct 失败 → retry 1 次 direct
+              DiaryService.add(
+                  '[TMDB] direct fallback $tag err: $e3, retry 1 次');
+              try {
+                return await http.get(Uri.parse(directUrl)).timeout(timeout);
+              } catch (e4) {
+                DiaryService.add(
+                    '[TMDB] direct retry $tag err: $e4 (cf_worker+retry+direct+retry 全挂)');
+                return null;
+              }
+            }
           }
+        }
+        // ====== direct 模式: retry 1 次 direct ======
+        DiaryService.add(
+            '[TMDB] direct $tag 网络/握手失败: $e (timeout=${timeout.inSeconds}s), retry 1 次');
+        try {
+          return await http.get(Uri.parse(url)).timeout(timeout);
+        } catch (e2) {
+          DiaryService.add(
+              '[TMDB] direct retry $tag err: $e2 (direct+retry 全挂)');
+          return null;
         }
       }
       // v2.0.99.2: 网络错也写进日记, 用户排查 "TMDB 大背景没出来为啥"

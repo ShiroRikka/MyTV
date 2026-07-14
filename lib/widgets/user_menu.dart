@@ -105,6 +105,11 @@ class _UserMenuState extends State<UserMenu> {
     // v2.0.97: TMDB 数据源 — 跟 Bangumi 数据源一样 UX, 3 选 1
     final tmdbDataSource = await UserDataService.getTmdbDataSourceKey();
 
+    // v2.1.22: 日记 section 配置
+    final diaryClearOnExit = DiaryService.clearOnExit;
+    final diaryMaxEntries = DiaryService.maxEntries;
+    final diaryPersist = DiaryService.persist;
+
     if (mounted) {
       setState(() {
         _isLocalMode = isLocalMode;
@@ -129,6 +134,9 @@ class _UserMenuState extends State<UserMenu> {
         _doubanLoggedIn = doubanLoggedIn;
         _tmdbConfigured = tmdbConfigured;
         _tmdbDataSource = tmdbDataSource;
+        _diaryClearOnExit = diaryClearOnExit;
+        _diaryMaxEntries = diaryMaxEntries;
+        _diaryPersist = diaryPersist;
       });
     }
   }
@@ -1626,6 +1634,50 @@ class _UserMenuState extends State<UserMenu> {
                     ),
                   );
                 },
+              ),
+              // v2.1.22: 日记 section 配置 — 退出清空 / 容量上限 / 持久化
+              _buildToggleOption(
+                title: '退出 app 自动清空',
+                subtitle: '关掉后日记会保留, 但重启 app 不会丢',
+                value: _diaryClearOnExit,
+                onChanged: (value) async {
+                  await DiaryService.setClearOnExit(value);
+                  if (!mounted) return;
+                  setState(() {
+                    _diaryClearOnExit = value;
+                  });
+                },
+                icon: LucideIcons.logOut,
+                iconColor: const Color(0xFF8b5cf6),
+              ),
+              _buildOptionSelector(
+                title: '容量上限',
+                currentValue: '${_diaryMaxEntries} 条',
+                options: const ['100 条', '500 条', '1000 条', '2000 条'],
+                onChanged: (s) async {
+                  final n = int.parse(s.split(' ')[0]);
+                  await DiaryService.setMaxEntries(n);
+                  if (!mounted) return;
+                  setState(() {
+                    _diaryMaxEntries = n;
+                  });
+                },
+                icon: LucideIcons.hardDrive,
+                iconColor: const Color(0xFF8b5cf6),
+              ),
+              _buildToggleOption(
+                title: '持久化日记',
+                subtitle: '开启后写进 SharedPreferences, 跨会话保留',
+                value: _diaryPersist,
+                onChanged: (value) async {
+                  await DiaryService.setPersist(value);
+                  if (!mounted) return;
+                  setState(() {
+                    _diaryPersist = value;
+                  });
+                },
+                icon: LucideIcons.save,
+                iconColor: const Color(0xFF8b5cf6),
               ),
               _buildDivider(),
               // 检查更新按钮
