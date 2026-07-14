@@ -825,26 +825,17 @@ class CfOptimizerHttpOverrides extends HttpOverrides {
 
   @override
   HttpClient createHttpClient(SecurityContext? context) {
-    // v2.1.31: 尝试用 SecurityContext 强制 TLS 1.2 跟 CF 边缘老 cipher 兼容.
-    //   上一版 v2.1.30 用了不存在的 client.setAllowH3ToAnyOfDomains()
-    //   (那是 Chromium API, dart:io 没有), build 失败 3 次.
+    // v2.1.32: **绝不要** new SecurityContext() 替换 context.
+    //   之前 v2.1.30/31 我加了 `context ?? SecurityContext()` 想用 SecurityContext
+    //   配 TLS 1.2 cipher, 但 `SecurityContext()` 默认**不信任任何证书**, 导致
+    //   所有 https 请求 TLS 验证失败 (HandshakeException), 登录 API 跟 image 加载
+    //   全部挂. v2.1.25 时直接 `super.createHttpClient(context)` 没问题, 修回这个.
     //
-    //   真正根因: 客户端 OpenSSL TLS 1.3 cipher 跟 CF 边缘某些 IP 池
-    //   cipher 协商失败 → SSLV3_ALERT_HANDSHAKE_FAILURE.
-    //   dart:io 自身没暴露 setMinTlsVersion API, 但 HttpClient 构造时
-    //   传 SecurityContext 可以注入 cipher / TLS 配置.
-    //
-    //   范围: 只影响 Dart HttpClient (package:http / CachedNetworkImage /
-    //     video_proxy_server / TMDB API / Douban / Bangumi / m3u8 测速).
+    //   影响范围: 只影响 Dart HttpClient (package:http / CachedNetworkImage /
+    //     video_proxy_server / TMDB API / Douban / Bangumi / 登录 API / m3u8 测速).
     //   **视频 m3u8 播放走原生 libmpv (C 库), 完全不受 Dart 端影响.**
     //     (cf_optimizer.dart:444 注释)
-    //
-    //   ⚠️ 如果 client TLS 1.2 还是协商失败, 那只能从 server 端修:
-    //   - CF Dashboard → SSL/TLS → Minimum TLS Version 调到 1.2 或 1.0
-    //   - 或者换 worker zone 名字
-    final securityContext = context ?? SecurityContext();
-    final client = super.createHttpClient(securityContext);
-    return _OptimizingHttpClient(client);
+    return _OptimizingHttpClient(super.createHttpClient(context));
   }
 }
 
