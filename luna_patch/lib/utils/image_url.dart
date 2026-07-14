@@ -2,6 +2,7 @@
 import 'dart:async';
 import 'package:http/http.dart' as http;
 import 'package:luna_tv/services/diary_service.dart';
+import 'package:luna_tv/services/luna_image_http.dart';
 import 'package:luna_tv/services/user_data_service.dart';
 
 // v2.1.28: Worker 健康状态缓存 — image 加载前探测 worker 通不通, 挂了就
