@@ -835,6 +835,23 @@ class CfOptimizerHttpOverrides extends HttpOverrides {
     //     video_proxy_server / TMDB API / Douban / Bangumi / 登录 API / m3u8 测速).
     //   **视频 m3u8 播放走原生 libmpv (C 库), 完全不受 Dart 端影响.**
     //     (cf_optimizer.dart:444 注释)
+    //
+    // v2.1.33 (revert): dart:io **没有 public API 强制 TLS 版本** —
+    //   - `SecureSocket.secure.supportedProtocols` 是给 ALPN (HTTP/2 vs HTTP/1.1),
+    //     不是 TLS 版本
+    //   - `SecurityContext.minimumTlsProtocolVersion` (默认 tls1_2) 只设 floor,
+    //     服务端支持 1.3 时 client 还是走 1.3
+    //   - `ProtocolVersion` 类在 Dart 3.4 不存在 (老 API 删了)
+    //   - BoringSSL 的 `SSL_CTX_set_max_proto_version` 没 dart 包装
+    //   之前 v2.1.33 我试加 connectionFactory 强制 TLS 1.2 用了
+    //   `supportedProtocols: const [ProtocolVersion.tlsV12]`, **编译都不通过** —
+    //   build 会挂. 修回原样.
+    //
+    // 真要从 client 修 TLS 1.3 cipher 协商失败, 必须换 HTTP stack —
+    //   Android MethodChannel + OkHttp/HttpURLConnection (用系统 BoringSSL/Conscrypt),
+    //   或者 package:cronet_http (用 Android Cronet). 这个改动大 (要碰
+    //   android/app/build.gradle.kts + MainActivity.kt + 创建 Kotlin channel +
+    //   Dart wrapper + 24 个 CachedNetworkImage 调用点全改), 跟用户确认再干.
     return _OptimizingHttpClient(super.createHttpClient(context));
   }
 }
