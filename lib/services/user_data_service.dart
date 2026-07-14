@@ -981,7 +981,7 @@ class UserDataService {
   // v2.1.22: Bangumi 数据加速路径日记 (启动首次打, 路径变了重打).
   // 用户反馈"bangumi 日记怎么没有" — 之前只在 cf_worker + 没配 worker 时打一条,
   // 配 worker / 选 cors_proxy / 选直连时都没打. 现在每次首次打,
-  // 走哪条路径一目了然 (worker=api.fn0.qzz.io / ciao-cors / direct).
+  // 走哪条路径一目了然 (worker=api.xx.workers.dev / ciao-cors / direct).
   static void _logBangumiDataPath(String path) {
     if (_lastBangumiDataPathLog == path) return;
     _lastBangumiDataPathLog = path;
@@ -1009,7 +1009,7 @@ class UserDataService {
   /// v2.0.72: 判断配置的 worker 域名是不是有效的 CF Worker.
   ///
   /// v2.0.9 原规则: 必须以 `.workers.dev` 结尾才算 CF Worker.
-  ///   问题: 用户用自定义域名 CNAME 到 worker (e.g. api.xx.fn0.qzz.io),
+  ///   问题: 用户用自定义域名 CNAME 到 worker (e.g. api.xx.workers.dev),
   ///   不以 .workers.dev 结尾 → 图片被拦, 走 ciao-cors 公共代理 (慢 + 403).
   ///   用户反馈"图片那些不写优选 ip 也要走代理".
   ///

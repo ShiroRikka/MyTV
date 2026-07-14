@@ -492,7 +492,7 @@ class _CfAccelerationPageState extends State<CfAccelerationPage> {
   /// v2.0.45: 静态 IP 优选 0KB 警告
   ///
   /// 场景: 用户填了 162.159.x.x 这种通用 CF IP, 但视频 host 是 worker
-  ///   自定义域 (api.xx.fn0.qzz.io). 静态 IP 跟 host 不在同一个 CF zone,
+  ///   自定义域 (api.xx.workers.dev). 静态 IP 跟 host 不在同一个 CF zone,
   ///   TLS 握手失败但 TCP 拨上, race 已返回 → libmpv 拿到空 backend → 0KB.
   /// 修法: 把 host 加进 race 候选 + 推荐用优选域名 (自动 re-resolve).
   Widget _buildIpOptimizationWarning(bool isDark) {
