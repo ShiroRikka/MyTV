@@ -12,9 +12,16 @@
 //     cipher 支持), OkHttpBuilder.connectionSpecs 加 COMPATIBLE_TLS (TLS 1.0+)
 //     避开 TLS 1.3 cipher 协商失败
 //
+// 实现:
+//   - [LunaImageHttp] 继承 [http.BaseClient] (http 1.x 的标准模式: 包一个内层
+//     [http.Client] 兜底). 内层默认是 [http.IOClient] (dart:io)
+//   - Android + GET: 走 [MethodChannel] 让原生 OkHttp 处理
+//   - iOS / 其他 / 非 GET / 原生失败: 退到 [_inner.send] (dart:io 走系统 DNS,
+//     跟 v2.1.25~32 行为兼容, image_url._probeWorkerHealth 自己处理 fallback)
+//
 // 影响范围:
-//   - 只给 [CachedNetworkImage] 用 (在所有 24 个调用点加 httpClient: LunaImageHttp())
-//   - iOS / 其他平台: 退到默认 dart:io (super.send)
+//   - 由 [LunaCacheManager] 通过 [HttpFileService] 间接使用 (跨 17 个
+//     [CachedNetworkImage] 调用点 — 3.4.1 没 httpClient 参数了, 走 cacheManager)
 //   - 视频 m3u8 播放走原生 libmpv (C 库), 完全独立, 不受影响
 //
 // 优选 IP:
@@ -30,21 +37,27 @@ import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 
 import 'package:luna_tv/services/cf_optimizer.dart';
 
 class LunaImageHttp extends http.BaseClient {
   static const _channel = MethodChannel('org.moontechlab.lunatv/image_http');
 
+  // v2.1.33: 内层 http.Client — 用于非 Android / 非 GET / 原生失败时的兜底
+  //   - 默认 [http.IOClient] 走 dart:io (跟 v2.1.25~32 行为一致)
+  //   - 构造函数允许注入自定义 client (测试用)
+  final http.Client _inner;
+
   // v2.1.33: 单例 — OkHttp client 在 Kotlin 端是单例, 这里也单例避免重复
-  //   跨 17 个 [CachedNetworkImage] 共享同一个 [LunaImageHttp] 实例
-  static final LunaImageHttp _instance = LunaImageHttp._();
+  //   跨所有 [CachedNetworkImage] 共享同一个 [LunaImageHttp] 实例
+  static final LunaImageHttp _instance = LunaImageHttp._(http.IOClient());
   factory LunaImageHttp() => _instance;
-  LunaImageHttp._();
+  LunaImageHttp._(this._inner);
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    // Android + GET 才走 MethodChannel. iOS / 其他 / 非 GET 走默认 dart:io.
+    // Android + GET 才走 MethodChannel. iOS / 其他 / 非 GET / 失败 → [_inner].
     if (Platform.isAndroid &&
         request is http.Request &&
         request.method == 'GET') {
@@ -67,17 +80,16 @@ class LunaImageHttp extends http.BaseClient {
           statusCode,
           contentLength: body?.length,
         );
-      } catch (e, st) {
-        // v2.1.33: 失败时退到 dart:io, 让上层 [CachedNetworkImage] 决定
-        //   是否 fallback (走直连 / 显示 errorWidget). 跟 v2.1.25~32 行为兼容.
-        // 注: 这里不重新抛 e 是因为 [http.BaseClient.send] 抛异常会被
-        //   [CachedNetworkImage] 当成"网络失败", 显示 errorWidget. 跟
-        //   我们想要的一致 (image_url._probeWorkerHealth 自己处理 fallback).
+      } catch (e) {
+        // v2.1.33: 失败时退到内层 [http.Client] (dart:io), 让上层
+        //   [CachedNetworkImage] 决定是否 fallback (走直连 / 显示 errorWidget).
+        //   跟 v2.1.25~32 行为兼容. 这里不重新抛 e 是因为 [BaseClient.send]
+        //   抛异常会被 [CachedNetworkImage] 当成"网络失败", 显示 errorWidget.
         //   如果想看 log, 可以打开 assert:
         // assert(() { print('[LunaImageHttp] native failed: $e'); return true; }());
       }
     }
-    return super.send(request);
+    return _inner.send(request);
   }
 
   /// v2.1.33: 拿到 [url] 对应的优选 IP override (overrideHost + overrideIp).

@@ -3,7 +3,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:luna_tv/models/search_result.dart';
 import 'package:luna_tv/models/douban_movie.dart';
 import 'package:luna_tv/utils/image_url.dart';
-import 'package:luna_tv/services/luna_image_http.dart';
+import 'package:luna_tv/services/luna_cache_manager.dart';
 
 class PlayerDetailsPanel extends StatelessWidget {
   final ThemeData theme;
@@ -464,8 +464,8 @@ class PlayerDetailsPanel extends StatelessWidget {
                   return CachedNetworkImage(
                     imageUrl: imageUrl,
                     // v2.1.33: 走 OkHttp (强制 TLS 1.2), 避开 dart:io TLS 1.3
-                    //   cipher 跟 CF edge zone 协商失败
-                    httpClient: LunaImageHttp(),
+                    //   cipher 跟 CF edge zone 协商失败 (走 cacheManager 注入)
+                    cacheManager: LunaCacheManager.instance,
                     fit: BoxFit.cover,
                     width: 120,
                     height: 160,

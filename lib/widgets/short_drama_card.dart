@@ -6,7 +6,7 @@ import 'package:luna_tv/services/theme_service.dart';
 import 'package:luna_tv/utils/font_utils.dart';
 import 'package:luna_tv/utils/device_utils.dart';
 import 'package:luna_tv/utils/image_url.dart';
-import 'package:luna_tv/services/luna_image_http.dart';
+import 'package:luna_tv/services/luna_cache_manager.dart';
 
 /// 短剧卡片组件
 class ShortDramaCard extends StatefulWidget {
@@ -88,8 +88,8 @@ class _ShortDramaCardState extends State<ShortDramaCard> {
                                 return CachedNetworkImage(
                                   imageUrl: imageUrl,
                                   // v2.1.33: 走 OkHttp (强制 TLS 1.2), 避开 dart:io TLS 1.3
-                                  //   cipher 跟 CF edge zone 协商失败
-                                  httpClient: LunaImageHttp(),
+                                  //   cipher 跟 CF edge zone 协商失败 (走 cacheManager 注入)
+                                  cacheManager: LunaCacheManager.instance,
                                   fit: BoxFit.cover,
                                   cacheKey: imageUrl,
                                   httpHeaders: headers,
