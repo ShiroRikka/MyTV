@@ -164,7 +164,7 @@ class VideoProxyServer {
   ///   通才拨 manual**. 这跟 v2.0.45 的"race 选最快" 行为完全不同:
   ///   - race: 拨上就返回, 错就错
   ///   - v2.0.46: 优先 host IP (跟 SNI 匹配, TLS 必过), 失败才用 manual
-  ///   - 用户场景: 配 `162.159.158.162` 静态 IP, target host `api.xx.fn0.qzz.io` →
+  ///   - 用户场景: 配 `162.159.158.162` 静态 IP, target host `api.xx.workers.dev` →
   ///     系统 DNS 解析 host 给 `104.x.x.x` (跟 SNI 匹配的 edge IP) → 先拨 104.x.x.x
   ///     (TLS 成功) → 视频 OK. 162.159.158.162 完全用不到.
   ///   - 代价: 慢 1~2 个 host IP 的拨号时间 (几十 ms), 但消除了 0KB 风险.

@@ -759,7 +759,7 @@ class CfOptimizerHttpOverrides extends HttpOverrides {
   ///   race 候选 **优先用 host DNS 解析的 IP** (跟 SNI 匹配的 CF edge IP),
   ///   手动 IP 排最后. 没缓存时 fire-and-forget 触发一次解析, 下次
   ///   getTopNIpsForVideoProxy 调用就用上. 用户场景:
-  ///   配 `162.159.158.162` 静态 IP, target host `api.xx.fn0.qzz.io` →
+  ///   配 `162.159.158.162` 静态 IP, target host `api.xx.workers.dev` →
   ///   系统 DNS 解析 host 返回 `104.x.x.x` (跟 SNI 匹配的 edge IP, 跟
   ///   手动 IP 不同的 zone) → race 候选 [104.x.x.x, 162.159.158.162] →
   ///   104.x.x.x TCP 拨上 ~30ms, 162.159.158.162 TCP 拨上 ~15ms, race
@@ -775,7 +775,7 @@ class CfOptimizerHttpOverrides extends HttpOverrides {
   ///   的就是 host (系统 DNS 给的 IP, 跟 SNI 匹配), TLS 必然成功.
   ///   手动 IP 永远 fallback — 慢 1 个 IP 的拨号时间 (几十 ms), 但消除了
   ///   0KB 风险. 用户场景 (配 `172.64.229.44` 优选 IP, target
-  ///   `api.xx.fn0.qzz.io`): 系统 DNS 给 `104.x.x.x` (有 cert 的 edge),
+  ///   `api.xx.workers.dev`): 系统 DNS 给 `104.x.x.x` (有 cert 的 edge),
   ///   顺序拨号先拨 `104.x.x.x` (TLS 成功) → 视频 OK, `172.64.229.44`
   ///   完全用不到.
   static List<String> getTopNIpsForVideoProxy(String host, int n) {
@@ -797,7 +797,7 @@ class CfOptimizerHttpOverrides extends HttpOverrides {
       // v2.0.48: 缓存没值 (第一次或解析失败) — **顺序倒过来**,
       //   从 v2.0.46 的 [manual, host] 改成 [host, manual].
       //   根因: 手动 IP (从 cf.877774.xyz 这类优选 IP 服务拿的 fast CF IP)
-      //   跟目标 host (e.g. api.xx.fn0.qzz.io) **不在同一个 CF zone**,
+      //   跟目标 host (e.g. api.xx.workers.dev) **不在同一个 CF zone**,
       //   TCP 拨上 (CF anycast 接受所有 IP) 但 TLS 失败 (edge 没那个
       //   SNI 的 cert). race / 顺序拨号都救不了 — 第一个 TCP 连上的
       //   IP 就被返给 libmpv, 后面 libmpv 做 TLS 才挂, 0KB 死链.

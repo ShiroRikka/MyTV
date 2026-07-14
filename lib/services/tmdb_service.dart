@@ -397,7 +397,7 @@ class TmdbService {
   ///
   /// 缓存 key: "tmdb_art_v2_{mediaType}_{id}"
   /// v2.1.25: cache key 加 _v2 suffix — 之前缓存存的是 worker-wrapped URL
-  ///   (e.g. `https://api.fn0.qzz.io/?url=...image.tmdb.org/...`), 现在改存
+  ///   (e.g. `https://api.xx.workers.dev/?url=...image.tmdb.org/...`), 现在改存
   ///   原始 image.tmdb.org URL, 旧缓存格式跟新逻辑不兼容, 必须 invalidate
   static Future<TmdbArt?> fetchArt({
     required int id,
