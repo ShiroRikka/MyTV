@@ -61,6 +61,11 @@ class _UserMenuState extends State<UserMenu> {
   //   - off: 配了 key 也强制不走 TMDB
   String _tmdbDataSource = 'cf_worker';
 
+  // v2.1.22: 日记 section 配置 (跟 DiaryService 同步)
+  bool _diaryClearOnExit = true;
+  int _diaryMaxEntries = 500;
+  bool _diaryPersist = false;
+
   @override
   void initState() {
     super.initState();
