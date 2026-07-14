@@ -1,5 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:luna_tv/services/diary_service.dart';
+
 class UserDataService {
   static const String _serverUrlKey = 'server_url';
   static const String _usernameKey = 'username';
@@ -890,13 +892,21 @@ class UserDataService {
       // v2.0.12: ciao-cors 改用法, 见 [buildCiaoCorsUrl]
       return buildCiaoCorsUrl(originalUrl);
     }
-    // v2.0.5: 之前 cf_worker case 缺了, 走 fallthrough 到 return originalUrl
-    // 直连 lain.bgm.tv, 国内 403/被墙, 图片加载不出来。
-    // 现在加 case: cf_worker 模式 (没配 CF Worker 域名) 退化成 cors_proxy,
-    // 至少公共代理能加载, 比直连好
+    // v2.0.5 (历史注释): 之前 cf_worker case 缺了, 走 fallthrough 到
+    //   return originalUrl 直连 lain.bgm.tv, 国内 403/被墙, 图片加载不出来.
+    //   v2.0.5 加 case: cf_worker 模式 (没配 CF Worker 域名) 退化成 cors_proxy,
+    //   至少公共代理能加载, 比直连好.
+    //
+    // v2.1.21 改: ciao-cors 公共代理对 lain.bgm.tv 图片仍返 403 (上游拦了,
+    //   见 [buildCiaoCorsUrl] 注释), "退化成 cors_proxy" 实际上图片也加载不出来.
+    //   改成: cf_worker 模式但没配 worker 域名 → 走 originalUrl (直连) +
+    //   日记警告. 直连国内也是 403/被墙, 但行为可预测 (用户选了"直连"就是直连,
+    //   ciao-cors 403 是更糟糕的"看起来走了代理但还是失败").
+    //   配了 worker 域名时上面 if 早就 return 走 worker 了, 不会到这里.
     if (key == 'cf_worker') {
-      // v2.0.12: ciao-cors 改用法
-      return buildCiaoCorsUrl(originalUrl);
+      DiaryService.add(
+          '[Bangumi image] cf_worker 模式但没配 CF Worker 域名, 走直连 (lain.bgm.tv 国内被墙, 配 CF Worker 域名才能加速)');
+      return originalUrl;
     }
     return originalUrl;
   }
