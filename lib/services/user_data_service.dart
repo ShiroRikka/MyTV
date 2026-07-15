@@ -524,61 +524,53 @@ class UserDataService {
     await saveTmdbApiKey(null);
   }
 
-  // ===== v2.0.97: TMDB 数据源 (跟 Bangumi 数据源一样 UX) =====
+  // ===== v2.1.40: TMDB 数据源 (v2.1.40 删 cf_worker / cors_proxy, 只留 direct / off) =====
 
-  /// 保存 TMDB 数据源 (key 值: 'cf_worker' / 'cors_proxy' / 'direct' / 'off')
+  /// 保存 TMDB 数据源 (key 值: 'direct' / 'off')
   ///
-  /// v2.1.39 加 'cors_proxy': 走 `ciao-cors.is-an.org` 公共代理, 跟 Bangumi
-  ///   数据的 'cors_proxy' 一致. 适用场景: 用户没配 CF Worker 域名,
-  ///   又想看 TMDB 海报 (image.tmdb.org 国内被墙). 走 ciao-cors 实测
-  ///   `image.tmdb.org` 返 200 + 真实 JPEG 66KB, 跟 Bangumi API (api.bgm.tv)
-  ///   一样能代理 TMDB.
+  /// v2.1.40 改: 删 'cf_worker' / 'cors_proxy'. 删 TMDB 加速代码后
+  ///   只剩 2 选 1. 老用户存的 'cf_worker' / 'cors_proxy' 自动
+  ///   migrate 到 'direct'.
   static Future<void> saveTmdbDataSource(String key) async {
-    final cleaned = (key == 'direct' || key == 'off' || key == 'cors_proxy')
-        ? key
-        : 'cf_worker';
+    final cleaned = (key == 'off') ? 'off' : 'direct';
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_tmdbDataSourceKey, cleaned);
     _tmdbDataSourceCache = cleaned;
   }
 
-  /// 异步读 TMDB 数据源 key, 默认 'cf_worker'
+  /// 异步读 TMDB 数据源 key, 默认 'direct'
   static Future<String> getTmdbDataSourceKey() async {
     if (_tmdbDataSourceCache != null) return _tmdbDataSourceCache!;
     final prefs = await SharedPreferences.getInstance();
-    final v = prefs.getString(_tmdbDataSourceKey) ?? 'cf_worker';
+    final v = prefs.getString(_tmdbDataSourceKey) ?? 'direct';
     _tmdbDataSourceCache = v;
     return v;
   }
 
   /// 同步读 TMDB 数据源 key (build 时用, 比如 TmdbService._buildTmdbApiUrl)
   static String getTmdbDataSourceSync() {
-    return _tmdbDataSourceCache ?? 'cf_worker';
+    return _tmdbDataSourceCache ?? 'direct';
   }
 
   /// key 值 → 显示名
   static String getTmdbDataSourceDisplayName(String key) {
     switch (key) {
-      case 'direct':
-        return '直连';
       case 'off':
         return '已关闭';
-      case 'cf_worker':
+      case 'direct':
       default:
-        return 'CF Worker 加速';
+        return '直连';
     }
   }
 
   /// 显示名 → key 值
   static String getTmdbDataSourceKeyFromDisplayName(String name) {
     switch (name) {
-      case '直连':
-        return 'direct';
       case '已关闭':
         return 'off';
-      case 'CF Worker 加速':
+      case '直连':
       default:
-        return 'cf_worker';
+        return 'direct';
     }
   }
 
@@ -715,11 +707,16 @@ class UserDataService {
     return '$publicCorsProxyBase/https://$targetUrl';
   }
 
-  // 保存 Bangumi 数据源设置（key 值：direct / cors_proxy / cf_worker）
+  // ===== v2.1.40: Bangumi 数据源 (删 cf_worker / cors_proxy, 只留 direct) =====
+
+  /// 保存 Bangumi 数据源 (v2.1.40 改: 强制 'direct', 老值 migrate)
   static Future<void> saveBangumiDataSource(String key) async {
+    // v2.1.40: 删加速后只接受 'direct'. 'cf_worker' / 'cors_proxy' /
+    //   其他老值全部 migrate 到 'direct' (直连).
+    final cleaned = 'direct';
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_bangumiDataSourceKey, key);
-    _bangumiDataSourceCache = key;
+    await prefs.setString(_bangumiDataSourceKey, cleaned);
+    _bangumiDataSourceCache = cleaned;
   }
 
   // 获取 Bangumi 数据源 key
@@ -731,73 +728,37 @@ class UserDataService {
     return v;
   }
 
-  // v2.1.22: Bangumi 加速路径节流日记 — 启动首次打, 路径变了重打
-  // (用 path 字符串去重, 不打 URL 避免 key / 长 ID 灌进日记)
-  static String? _lastBangumiDataPathLog;
-  static String? _lastBangumiImagePathLog;
-  // v2.1.25: TMDB 图片加速路径节流日记 (跟 Bangumi 平行)
-  static String? _lastTmdbImagePathLog;
+  // v2.1.40: 删 _lastBangumiDataPathLog / _lastBangumiImagePathLog /
+  //   _lastTmdbImagePathLog — 加速代码全删了, 这些日记字段也不需要了.
 
   // 获取 Bangumi 数据源显示名（异步）
   static Future<String> getBangumiDataSourceDisplayNameAsync() async {
-    final key = await getBangumiDataSourceKey();
-    return getBangumiDataSourceDisplayName(key);
+    return getBangumiDataSourceDisplayName('direct');
   }
 
   // 获取 Bangumi 图片源显示名（异步）
   static Future<String> getBangumiImageSourceDisplayNameAsync() async {
-    final key = await getBangumiImageSourceKey();
-    return getBangumiImageSourceDisplayName(key);
+    return getBangumiImageSourceDisplayName('direct');
   }
 
-  // Bangumi 数据源显示名映射
+  // v2.1.40: Bangumi 数据源显示名 — 只返 '直连'
   static String getBangumiDataSourceDisplayName(String key) {
-    switch (key) {
-      case 'cors_proxy':
-        return 'Cors Proxy By Zwei';
-      case 'cf_worker':
-        return 'CF Worker 加速';
-      case 'direct':
-      default:
-        return '直连';
-    }
+    return '直连';
   }
 
+  // v2.1.40: 显示名 → key 只接受 '直连'
   static String getBangumiDataSourceKeyFromDisplayName(String name) {
-    switch (name) {
-      case 'Cors Proxy By Zwei':
-        return 'cors_proxy';
-      case 'CF Worker 加速':
-        return 'cf_worker';
-      case '直连':
-      default:
-        return 'direct';
-    }
+    return 'direct';
   }
 
-  // Bangumi 图片源显示名映射
+  // v2.1.40: Bangumi 图片源显示名 — 只返 '直连'
   static String getBangumiImageSourceDisplayName(String key) {
-    switch (key) {
-      case 'cors_proxy':
-        return 'Cors Proxy By Zwei';
-      case 'cf_worker':
-        return 'CF Worker 加速';
-      case 'direct':
-      default:
-        return '直连';
-    }
+    return '直连';
   }
 
+  // v2.1.40: 显示名 → key 只接受 '直连'
   static String getBangumiImageSourceKeyFromDisplayName(String name) {
-    switch (name) {
-      case 'Cors Proxy By Zwei':
-        return 'cors_proxy';
-      case 'CF Worker 加速':
-        return 'cf_worker';
-      case '直连':
-      default:
-        return 'direct';
-    }
+    return 'direct';
   }
 
   // 获取 Bangumi 数据源显示名称（异步）
@@ -805,239 +766,63 @@ class UserDataService {
     return _bangumiDataSourceCache ?? 'direct';
   }
 
-  // 保存 Bangumi 图片源设置（key 值：direct / cf_worker）
+  // v2.1.40: 保存 Bangumi 图片源 — 强制 'direct'
   static Future<void> saveBangumiImageSource(String key) async {
+    final cleaned = 'direct';
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_bangumiImageSourceKey, key);
-    _bangumiImageSourceCache = key;
+    await prefs.setString(_bangumiImageSourceKey, cleaned);
+    _bangumiImageSourceCache = cleaned;
   }
 
-  // 获取 Bangumi 图片源 key
+  // v2.1.40: 获取 Bangumi 图片源 key, 默认 'direct'
   static Future<String> getBangumiImageSourceKey() async {
     if (_bangumiImageSourceCache != null) return _bangumiImageSourceCache!;
     final prefs = await SharedPreferences.getInstance();
-    // 旧版本没存过这个 key,默认跟 Bangumi 数据源对齐:
-    // 0) 没配过 → 默认 'cors_proxy' (和 Bangumi 数据源默认一致,
-    //    给老用户一个可用的选择,直连在国内往往访问不到)
-    // 1) 配了 → 用用户选的
+    // 旧版本可能存过 'cors_proxy' / 'cf_worker', v2.1.40 全部视为 'direct'
     final stored = prefs.getString(_bangumiImageSourceKey);
-    if (stored != null && stored.isNotEmpty) {
+    if (stored != null && stored.isNotEmpty && stored == 'direct') {
       _bangumiImageSourceCache = stored;
       return stored;
     }
-    // 第一次启动,没有这个 key,默认 cors_proxy
-    _bangumiImageSourceCache = 'cors_proxy';
-    await prefs.setString(_bangumiImageSourceKey, 'cors_proxy');
-    return 'cors_proxy';
+    // 老值或首次启动 → 统一存 'direct'
+    _bangumiImageSourceCache = 'direct';
+    await prefs.setString(_bangumiImageSourceKey, 'direct');
+    return 'direct';
   }
 
-  // 同步获取 Bangumi 图片源 key
+  // v2.1.40: 同步获取 Bangumi 图片源 key, 默认 'direct'
   static String getBangumiImageSourceKeySync() {
-    return _bangumiImageSourceCache ?? 'cors_proxy';
+    return _bangumiImageSourceCache ?? 'direct';
   }
 
-  /// 是否配了 CF Worker 域名(给 Bangumi 数据请求做兜底判断用)
-  static bool hasCfWorkerDomain() {
-    final d = _cfWorkerDomainCache;
-    return d != null && d.isNotEmpty;
-  }
+  // v2.1.40: 删 hasCfWorkerDomain — Bangumi 数据 fetch 改直连后, 没人调了.
+  //   CF Worker 域名本身保留 (video 加速还在用).
 
   /// 构造 Bangumi 数据请求 URL
   ///
-  /// 优先级：CF Worker 域名（只要配了就用，不受 CF Worker 加速开关控制）
-  /// > 用户选的 cors_proxy > 直连
-  ///
-  /// 设计：B 站番剧代理是"只要配置了加速源地址就一直生效"，
-  /// 不和源加速（player 测速）的开关绑死。
+  /// v2.1.40 改: 删 CF Worker / ciao-cors 加速, 一律直连.
+  ///   老加速逻辑 (worker 域名 / ciao-cors / 兜底) 全删, 现在只
+  ///   返 originalUrl. CF Worker 域名本身保留, 视频加速还在用.
   static String buildBangumiDataUrl(String originalUrl) {
-    // 1) CF Worker 域名:只看域名是否配了,不看开关
-    final worker = _cfWorkerDomainCache;
-    if (worker != null && worker.isNotEmpty) {
-      _logBangumiDataPath('worker:$worker');
-      return 'https://$worker/?url=${Uri.encodeComponent(originalUrl)}';
-    }
-
-    // 2) 公共 CORS 代理
-    final key = getBangumiDataSourceKeySync();
-    if (key == 'cors_proxy') {
-      // v2.0.12: ciao-cors 改用法 (?url= → path 拼接),
-      // 老用法返 400 "Invalid URL format", 见 [buildCiaoCorsUrl]
-      _logBangumiDataPath('ciao-cors');
-      return buildCiaoCorsUrl(originalUrl);
-    }
-    _logBangumiDataPath('direct');
     return originalUrl;
   }
 
   /// 构造 Bangumi 图片请求 URL
   ///
-  /// 优先级（和 Bangumi 数据源对齐）：
-  /// 1. CF Worker 域名（只要配了就用，不受 CF Worker 加速开关控制）
-  /// 2. 用户选的 cors_proxy（公共 CORS 代理）
-  /// 3. 用户选的 cf_worker（CF Worker 加速）— v2.0.5 新增
-  /// 4. 直连
-  ///
-  /// 注意：publicCorsProxyBase 对 lain.bgm.tv 返 403，
-  /// 所以 cors_proxy 模式下图片依然可能加载失败，但用户自己选了
-  /// 就是"已知风险"，给个选择总比没有好。
+  /// v2.1.40 改: 删 CF Worker / ciao-cors 加速, 一律直连 lain.bgm.tv.
+  ///   老加速逻辑 (worker 域名 / ciao-cors / 兜底) 全删.
   static String buildBangumiImageUrl(String originalUrl) {
-    // 1) CF Worker 域名:只看域名是否配了,不看开关
-    //
-    // v2.0.9: 加 worker 域名有效性校验, 避免填错域名导致 404
-    //
-    // 之前只看 _cfWorkerDomainCache 是否非空, 但用户可能填错:
-    //   - 填了 netlify site (api08.netlify.app), 不是 CF Worker, 返 404
-    //   - 填了普通自建域名 (example.com), 没有 worker 反代, 返 404
-    //   - 填了失效 worker 域名, 返 404 / 502
-    //
-    // 这些情况下, 之前会直接走 worker URL 返 404, 图片加载不出来
-    // 修法: worker 域名必须以 `.workers.dev` 结尾, 或者域名解析指向
-    // CF Worker 才认. 这里**简化判断** — 只信 `.workers.dev` 结尾的,
-    // 其他域名一概当"没配 worker"处理, 让下面的 fallthrough 走
-    // 用户选的图片源 (cors_proxy / cf_worker / direct)
-    //
-    // ⚠️ 注意: 如果用户自己买域名 CNAME 到 .workers.dev (e.g. cdn.example.com
-    // CNAME xxx.workers.dev), 这个简化判断会漏掉. 这种情况请用真正的
-    // *.workers.dev 域名, 或后续加自定义域名白名单配置
-    final worker = _cfWorkerDomainCache;
-    if (worker != null && worker.isNotEmpty && _isValidWorkerDomain(worker)) {
-      _logBangumiImagePath('worker:$worker');
-      return 'https://$worker/?url=${Uri.encodeComponent(originalUrl)}';
-    }
-
-    // 2) 用户选的图片源
-    final key = getBangumiImageSourceKeySync();
-    if (key == 'cors_proxy') {
-      // v2.0.12: ciao-cors 改用法, 见 [buildCiaoCorsUrl]
-      _logBangumiImagePath('ciao-cors');
-      return buildCiaoCorsUrl(originalUrl);
-    }
-    // v2.0.5 (历史注释): 之前 cf_worker case 缺了, 走 fallthrough 到
-    //   return originalUrl 直连 lain.bgm.tv, 国内 403/被墙, 图片加载不出来.
-    //   v2.0.5 加 case: cf_worker 模式 (没配 CF Worker 域名) 退化成 cors_proxy,
-    //   至少公共代理能加载, 比直连好.
-    //
-    // v2.1.21 改: ciao-cors 公共代理对 lain.bgm.tv 图片仍返 403 (上游拦了,
-    //   见 [buildCiaoCorsUrl] 注释), "退化成 cors_proxy" 实际上图片也加载不出来.
-    //   改成: cf_worker 模式但没配 worker 域名 → 走 originalUrl (直连) +
-    //   日记警告. 直连国内也是 403/被墙, 但行为可预测 (用户选了"直连"就是直连,
-    //   ciao-cors 403 是更糟糕的"看起来走了代理但还是失败").
-    //   配了 worker 域名时上面 if 早就 return 走 worker 了, 不会到这里.
-    if (key == 'cf_worker') {
-      DiaryService.add(
-          '[Bangumi image] cf_worker 模式但没配 CF Worker 域名, 走直连 (lain.bgm.tv 国内被墙, 配 CF Worker 域名才能加速)');
-      _logBangumiImagePath('direct(via cf_worker fallthrough)');
-      return originalUrl;
-    }
-    _logBangumiImagePath('direct');
     return originalUrl;
   }
 
-  /// 构造 TMDB 图片请求 URL (跟 [buildBangumiImageUrl] 平行, 风格一致)
+  /// 构造 TMDB 图片请求 URL
   ///
-  /// v2.1.25 加: TMDB image CDN (image.tmdb.org) 国内被墙, 走 worker 加速
-  /// 才能加载. 跟 Bangumi 图一个模式:
-  /// 1) TMDB 数据源是 'off' → return originalUrl (TMDB 整体关了, 也不会到这,
-  ///   fetchArt 入口就 return null 了. 兜底 return originalUrl 防意外)
-  /// 2) TMDB 数据源是 'direct' → return originalUrl (用户强制直连, 不走代理)
-  /// 3) TMDB 数据源是 'cf_worker' (默认) + 配 worker 域名 → wrap
-  ///   `https://$worker/?url=<encoded fullUrl>`, 让 worker 去拉 image.tmdb.org
-  /// 4) 'cf_worker' 模式但没配 worker 域名 → return originalUrl (直连)
-  ///   + 日记警告, 引导用户去配 worker
-  ///
-  /// 跟 [buildBangumiImageUrl] 的区别: TMDB 数据源 v2.1.39 之前只有
-  /// 'cf_worker' / 'direct' / 'off' 3 选 1, 没有 'cors_proxy'. v2.1.39
-  /// 加 'cors_proxy' 公共代理选项 (走 ciao-cors.is-an.org, 实测能代理
-  /// image.tmdb.org). 现在跟 Bangumi 一样 4 选 1: 'cf_worker' (默认) /
-  /// 'cors_proxy' / 'direct' / 'off'.
-  ///
-  /// v2.1.25 之前: TMDB image URL 在 [TmdbService.fetchArt] 里被
-  ///   [_buildTmdbApiUrl] wrap 了 (跟 API URL 一起 wrap). 但 wrap 跟
-  ///   "用户配的 TMDB 数据源"绑定得不够灵活 — 消费者 (image_url.dart /
-  ///   douban_detail_header.dart) 拿到的 URL 已经是 wrap 好的, 想改
-  ///   加速路径得改 fetchArt 内部. 抽到 `buildTmdbImageUrl` 后跟 Bangumi
-  ///   一个模式, 加速路径集中在一个地方管.
-  ///
-  /// v2.1.25 改: TmdbService.fetchArt 改返原始 image.tmdb.org URL,
-  ///   消费者 ([image_url.dart] tmdb case / [douban_detail_header.dart])
-  ///   调 `buildTmdbImageUrl` 走包装. 跟 [buildBangumiImageUrl] 1:1 平行.
-  ///
-  /// v2.1.39 加 'cors_proxy' 分支: 走 ciao-cors.is-an.org 公共代理.
-  ///   实测 image.tmdb.org/t/p/w500/xxx.jpg → 200 + 真实 JPEG, 跟
-  ///   api.bgm.tv 一样能代理. 适用: 用户没配 CF Worker 又想看 TMDB 海报.
+  /// v2.1.40 改: 删 CF Worker / ciao-cors 加速, 一律直连 image.tmdb.org.
+  ///   老 4 选 1 逻辑 (cf_worker / cors_proxy / direct / off) 全删, 现在
+  ///   只看 TMDB 数据源是不是 'off' (整体关闭) — 关闭了仍返原 URL
+  ///   (上层 fetchArt 入口就 return null 了, 这里只是兜底).
   static String buildTmdbImageUrl(String originalUrl) {
-    final source = getTmdbDataSourceSync();
-    if (source == 'off' || source == 'direct') {
-      _logTmdbImagePath(source);
-      return originalUrl;
-    }
-    // v2.1.39: 'cors_proxy' 模式 — 走 ciao-cors.is-an.org 公共代理.
-    // 跟 Bangumi 数据 'cors_proxy' 走同一个 publicCorsProxyBase.
-    if (source == 'cors_proxy') {
-      _logTmdbImagePath('ciao-cors');
-      return buildCiaoCorsUrl(originalUrl);
-    }
-    // 'cf_worker' (默认) — 跟 Bangumi 一个判断, 配了 worker 域名且域名
-    // 有效就走 worker, 没配就直连 + 日记警告
-    final worker = _cfWorkerDomainCache;
-    if (worker != null && worker.isNotEmpty && _isValidWorkerDomain(worker)) {
-      _logTmdbImagePath('worker:$worker');
-      return 'https://$worker/?url=${Uri.encodeComponent(originalUrl)}';
-    }
-    // cf_worker 模式但没配 worker 域名 — 直连 + 日记警告 (跟 Bangumi 平行)
-    //
-    // v2.1.25 加 _tmdbDataSourceCache != null 守门: warmupCfWorkerConfig 还没跑
-    // 时 _tmdbDataSourceCache 是 null, getTmdbDataSourceSync 默认返 'cf_worker',
-    // 走到这里会误报"没配 worker". 缓存没初始化时静默返 originalUrl, 等 warmup
-    // 后再判断 (buildTmdbImageUrl 一般在 UI 渲染时调, warmup 早就跑完了)
-    if (_tmdbDataSourceCache != null) {
-      DiaryService.add(
-          '[TMDB image] cf_worker 模式但没配 CF Worker 域名, 走直连 (image.tmdb.org 国内被墙, 配 CF Worker 域名才能加速)');
-      _logTmdbImagePath('direct(via cf_worker fallthrough)');
-    }
     return originalUrl;
-  }
-
-  // v2.1.22: Bangumi 数据加速路径日记 (启动首次打, 路径变了重打).
-  // 用户反馈"bangumi 日记怎么没有" — 之前只在 cf_worker + 没配 worker 时打一条,
-  // 配 worker / 选 cors_proxy / 选直连时都没打. 现在每次首次打,
-  // 走哪条路径一目了然 (worker=api.xx.workers.dev / ciao-cors / direct).
-  static void _logBangumiDataPath(String path) {
-    if (_lastBangumiDataPathLog == path) return;
-    _lastBangumiDataPathLog = path;
-    DiaryService.add('[Bangumi data] 加速: $path');
-  }
-
-  // v2.1.22: Bangumi 图片加速路径日记 (同 _logBangumiDataPath).
-  // 跟数据分开, 因为图片走 worker 还是 ciao-cors 是不同问题
-  // (worker 走通了 → 图加载; ciao-cors 走 lain.bgm.tv 403 → 图加载失败).
-  static void _logBangumiImagePath(String path) {
-    if (_lastBangumiImagePathLog == path) return;
-    _lastBangumiImagePathLog = path;
-    DiaryService.add('[Bangumi image] 加速: $path');
-  }
-
-  // v2.1.25: TMDB 图片加速路径日记 (跟 _logBangumiImagePath 平行).
-  // 跟 Bangumi 分开, 因为 TMDB 走的是 image.tmdb.org (跟 api.themoviedb.org
-  // 完全不同的 host, 国内都墙但走的代理路径独立), 日志分开排查更清晰.
-  static void _logTmdbImagePath(String path) {
-    if (_lastTmdbImagePathLog == path) return;
-    _lastTmdbImagePathLog = path;
-    DiaryService.add('[TMDB image] 加速: $path');
-  }
-
-  /// v2.0.72: 判断配置的 worker 域名是不是有效的 CF Worker.
-  ///
-  /// v2.0.9 原规则: 必须以 `.workers.dev` 结尾才算 CF Worker.
-  ///   问题: 用户用自定义域名 CNAME 到 worker (e.g. api.xx.workers.dev),
-  ///   不以 .workers.dev 结尾 → 图片被拦, 走 ciao-cors 公共代理 (慢 + 403).
-  ///   用户反馈"图片那些不写优选 ip 也要走代理".
-  ///
-  /// v2.0.72 新规则: 只要域名配了就认 (用户在 CF 加速页配的就是 worker 域名,
-  ///   不需要额外校验). 如果配错域名导致 404, 用户自己改域名就行, 比
-  ///   强制走 ciao-cors 体验好.
-  static bool _isValidWorkerDomain(String domain) {
-    return domain.isNotEmpty;
   }
 
   // Bangumi 数据源 key 同步初始化（main.dart 启动时调用）
@@ -1071,7 +856,7 @@ class UserDataService {
     // v2.0.97: 缓存 TMDB 数据源, 给 TmdbService._buildTmdbApiUrl 同步读
     if (_tmdbDataSourceCache == null) {
       final prefs = await SharedPreferences.getInstance();
-      _tmdbDataSourceCache = prefs.getString(_tmdbDataSourceKey) ?? 'cf_worker';
+      _tmdbDataSourceCache = prefs.getString(_tmdbDataSourceKey) ?? 'direct';
     }
   }
 }

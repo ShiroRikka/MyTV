@@ -96,42 +96,16 @@ class TmdbService {
     return current.trim();
   }
 
-  /// v2.0.97: 构造 API / image URL — 根据 TMDB 数据源 4 选 1 选路径
+  /// v2.1.40: 构造 API / image URL — 删 cf_worker / cors_proxy 加速, 只直连
   ///
-  /// - 'cf_worker' (默认, 跟 v2.0.94 ~ v2.0.96 一致): 配 worker 域名时
-  ///   wrap `https://$worker/?url=<encoded fullUrl>`, 没配 worker 域名
-  ///   时直连 fullUrl. CF Worker 加速跟豆瓣/番剧图一个模式.
-  /// - 'cors_proxy' (v2.1.39 加): 走 `ciao-cors.is-an.org` 公共代理, 实测
-  ///   能代理 api.themoviedb.org (跟 image.tmdb.org 一样). 适用: 用户没配
-  ///   CF Worker 又想用 TMDB (search/overview/credits) 数据.
-  /// - 'direct': 强制直连 fullUrl, 不走 worker. 给用户在国内 worker 域名
-  ///   被墙 / 想用真直连的时用.
-  /// - 'off': 配了 TMDB key 也强制不走 TMDB. search / fetchArt 调用方
-  ///   开头判 `source == 'off'` 直接 return null, 不调 _buildTmdbApiUrl.
-  ///
-  /// 跟 Bangumi 数据源 (cf_worker / direct / cors_proxy) 风格一致.
-  /// v2.1.39 加 'cors_proxy' 后 4 选 1, 跟 Bangumi 一样.
-  ///
-  /// v2.1.39 改: 之前注释 "TMDB 跟 Bangumi 一样用 worker 加速, 不需要
-  ///   cors_proxy 第三方代理" 改成 "跟 Bangumi 一样 4 选 1, 含 cors_proxy".
-  ///   实测 ciao-cors 能代理 TMDB (跟 Bangumi 一样), 之前只是没人测.
+  /// v2.1.40 改: 删 'cf_worker' (CORSAPI 套娃) 和 'cors_proxy' (ciao-cors
+  ///   公共代理) 两个分支. 现在 TMDB 数据源只有 'direct' (直连) /
+  ///   'off' (已关闭) 2 选 1, 本函数对 'direct' 直接返原 URL.
+  ///   'off' 情况调用方 (search/fetchArt) 入口就 return null 了, 不会到这里.
+  ///   老加速代码 (worker 域名判断 / ciao-cors 包装) 全删.
   static String _buildTmdbApiUrl(String fullUrl, String source) {
-    switch (source) {
-      case 'direct':
-        return fullUrl;
-      case 'cors_proxy':
-        // v2.1.39: 走 ciao-cors.is-an.org 公共代理, 跟 Bangumi 'cors_proxy' 一致.
-        // 注意: 调用方 [_httpGetWithFallback] 会在 source == 'cors_proxy' 时
-        //   加 'X-Requested-With: XMLHttpRequest' header, 否则 ciao-cors 返 403.
-        return UserDataService.buildCiaoCorsUrl(fullUrl);
-      case 'cf_worker':
-      default:
-        final worker = UserDataService.getCfWorkerDomainSync();
-        if (worker.isNotEmpty) {
-          return 'https://$worker/?url=${Uri.encodeComponent(fullUrl)}';
-        }
-        return fullUrl;
-    }
+    // v2.1.40: 删加速后只剩 'direct' 路径, 1:1 返原 URL.
+    return fullUrl;
   }
 
   // v2.1.2: 把 URL 里的 api_key=… 替换成前4+…+后4, 避免日记明文打印 key
@@ -149,9 +123,11 @@ class TmdbService {
     return '${key.substring(0, 4)}…${key.substring(key.length - 4)}';
   }
 
-  // v2.1.2: 网络/握手/TLS/超时类错误 → 自动 fallback to direct (仅当 source=cf_worker).
-  // 4xx/5xx 走的是 statusCode 分支, 不在这里 catch, 也不 fallback
-  // (key 失效 / 限流 / 服务异常, 直连也一样失败).
+  // v2.1.40: 网络/握手/TLS/超时类错误 → retry 1 次 direct.
+  // 4xx/5xx 走的是 statusCode 分支, 不在这里 catch, 也不 retry
+  // (key 失效 / 限流 / 服务异常, retry 无意义).
+  // v2.1.40 改: 删 cf_worker 兜底 (v2.1.2 注释"自动 fallback 1 次 direct"),
+  //   加速删了只 direct 模式, 改 retry 1 次 direct 救客户端出口路由抖.
   static bool _isNetworkInfraError(Object e) {
     return e is SocketException ||
         e is HandshakeException ||
@@ -160,38 +136,16 @@ class TmdbService {
         e is http.ClientException;
   }
 
-  // v2.1.22: 通用 http.get + 3 层 retry 链 + 短超时.
+  // v2.1.40: 通用 http.get + 1 层 retry + 短超时. 删 cf_worker / cors_proxy 加速.
   //
-  // 失败重试链 (cf_worker 模式):
-  //   1) worker 第一次 (cf_worker, 6s)
-  //   2) worker 失败 → retry 1 次 同 worker (6s) — 救客户端 TLS 抖动
-  //   3) worker 二次失败 → fallback direct (6s)
-  //   4) direct 失败 → retry 1 次 direct (6s) — 救国内出口路由抖
-  //   5) 全部失败 → return null
-  //
-  // 失败重试链 (cors_proxy 模式, v2.1.39 加):
-  //   1) ciao-cors 第一次 (6s) — 必须带 X-Requested-With: XMLHttpRequest
-  //   2) ciao-cors 失败 → retry 1 次 ciao-cors (6s) — 救 ciao-cors 自身抖
-  //   3) ciao-cors 二次失败 → fallback direct (6s)
-  //   4) direct 失败 → retry 1 次 direct (6s)
-  //   5) 全部失败 → return null
-  //
-  // 失败重试链 (direct 模式, 跳过 step 2 的 worker retry):
+  // v2.1.40 改: 删 'cf_worker' (CORSAPI worker 加速) 和 'cors_proxy'
+  //   (ciao-cors 公共代理) 两条重试链, 只剩 direct 模式:
   //   1) direct 第一次 (6s)
-  //   2) direct 失败 → retry 1 次 direct (6s)
-  //   3) 失败 → return null
+  //   2) direct 网络/握手/TLS/超时错 → retry 1 次 direct (6s) — 救国内出口路由抖
+  //   3) 全部失败 → return null
   //
-  // 修 v2.1.21 的 "retry 救错地方" 问题:
-  //   v2.1.21 retry direct 是错方向 — worker 节点稳, 抖的是客户端 TLS
-  //   协商, retry 同样 worker 大概率能过. v2.1.22 把 retry 移到 worker 内部.
-  //
-  // 4xx/5xx 走 statusCode 分支, 不在这里 catch, 也不 retry/fallback
-  // (key 失效 / 限流 / 服务异常, retry 无意义).
-  //
-  // v2.1.39 加 [headers] 参数: 传 [Map<String, String>], 用在所有
-  //   http.get 调用上. 主要给 ciao-cors 用 — 必须带
-  //   `X-Requested-With: XMLHttpRequest`, 否则 403.
-  //   不传 = 跟 v2.1.22 行为一致, 不带额外 header.
+  // v2.1.39 删了 [headers] 参数: ciao-cors 没了, 不需要 X-Requested-With
+  //   注入. 跟 v2.1.22 行为一致, 不带额外 header.
   static Future<http.Response?> _httpGetWithFallback({
     required String origUrl,
     required String url,
@@ -199,93 +153,13 @@ class TmdbService {
     required String apiKey,
     required String tag,
     Duration timeout = const Duration(seconds: 6),
-    Map<String, String>? headers,
   }) async {
-    // v2.1.39: ciao-cors 强制要 X-Requested-With, 否则 403. 跟 Bangumi 的
-    //   bangumi_service.dart:83 一样. 调用方传过来的 [headers] (cors_proxy 模式
-    //   通常不传, 由这里自动加) 会先合并, 调用方能 override.
-    final effectiveHeaders = <String, String>{
-      if (headers != null) ...headers,
-      if (source == 'cors_proxy') 'X-Requested-With': 'XMLHttpRequest',
-    };
-    // 1) 第一次: cf_worker 模式 → worker; cors_proxy 模式 → ciao-cors;
-    //    direct 模式 → direct
+    // direct 模式: 第一次
     try {
-      return await http
-          .get(Uri.parse(url), headers: effectiveHeaders)
-          .timeout(timeout);
+      return await http.get(Uri.parse(url)).timeout(timeout);
     } catch (e) {
-      // 网络/握手/TLS/超时错 → retry + fallback 链
+      // 网络/握手/TLS/超时错 → retry 1 次 direct
       if (_isNetworkInfraError(e)) {
-        // ====== cf_worker 模式: retry 1 次 worker → fallback direct ======
-        if (source == 'cf_worker') {
-          // 2) retry 1 次 同 worker
-          DiaryService.add(
-              '[TMDB] cf_worker $tag 网络/握手失败: $e (timeout=${timeout.inSeconds}s), retry 1 次同 worker');
-          try {
-            return await http
-                .get(Uri.parse(url), headers: effectiveHeaders)
-                .timeout(timeout);
-          } catch (e2) {
-            // 3) worker 二次失败 → fallback direct
-            DiaryService.add(
-                '[TMDB] cf_worker retry $tag err: $e2, fallback to direct');
-            final directUrl = _buildTmdbApiUrl(origUrl, 'direct');
-            DiaryService.add(
-                '[TMDB] network req (direct fallback $tag): ${_maskKeyInUrl(directUrl, apiKey)}');
-            try {
-              return await http
-                  .get(Uri.parse(directUrl))
-                  .timeout(timeout);
-            } catch (e3) {
-              // 4) direct 失败 → retry 1 次 direct
-              DiaryService.add(
-                  '[TMDB] direct fallback $tag err: $e3, retry 1 次');
-              try {
-                return await http
-                    .get(Uri.parse(directUrl))
-                    .timeout(timeout);
-              } catch (e4) {
-                DiaryService.add(
-                    '[TMDB] direct retry $tag err: $e4 (cf_worker+retry+direct+retry 全挂)');
-                return null;
-              }
-            }
-          }
-        }
-        // ====== cors_proxy 模式 (v2.1.39): retry 1 次 ciao-cors → fallback direct ======
-        if (source == 'cors_proxy') {
-          // 2) retry 1 次 ciao-cors
-          DiaryService.add(
-              '[TMDB] cors_proxy $tag 网络/握手失败: $e (timeout=${timeout.inSeconds}s), retry 1 次同 ciao-cors');
-          try {
-            return await http
-                .get(Uri.parse(url), headers: effectiveHeaders)
-                .timeout(timeout);
-          } catch (e2) {
-            // 3) ciao-cors 二次失败 → fallback direct
-            DiaryService.add(
-                '[TMDB] cors_proxy retry $tag err: $e2, fallback to direct');
-            final directUrl = _buildTmdbApiUrl(origUrl, 'direct');
-            DiaryService.add(
-                '[TMDB] network req (direct fallback $tag): ${_maskKeyInUrl(directUrl, apiKey)}');
-            try {
-              return await http.get(Uri.parse(directUrl)).timeout(timeout);
-            } catch (e3) {
-              // 4) direct 失败 → retry 1 次 direct
-              DiaryService.add(
-                  '[TMDB] direct fallback $tag err: $e3, retry 1 次');
-              try {
-                return await http.get(Uri.parse(directUrl)).timeout(timeout);
-              } catch (e4) {
-                DiaryService.add(
-                    '[TMDB] direct retry $tag err: $e4 (cors_proxy+retry+direct+retry 全挂)');
-                return null;
-              }
-            }
-          }
-        }
-        // ====== direct 模式: retry 1 次 direct ======
         DiaryService.add(
             '[TMDB] direct $tag 网络/握手失败: $e (timeout=${timeout.inSeconds}s), retry 1 次');
         try {
@@ -378,8 +252,8 @@ class TmdbService {
     final url = _buildTmdbApiUrl(origUrl, source);
     DiaryService.add('[TMDB] network req: ${_maskKeyInUrl(url, apiKey)}');
 
-    // v2.1.2: try cf_worker first, 网络/握手/TLS/超时类错自动 fallback 1 次 direct.
-    // 4xx/5xx 不 fallback (key 失效 / 限流, 直连也一样失败).
+    // v2.1.40: try direct first, 网络/握手/TLS/超时错 retry 1 次 direct.
+    // 4xx/5xx 不 retry (key 失效 / 限流, retry 无意义).
     final http.Response? resp = await _httpGetWithFallback(
       origUrl: origUrl,
       url: url,
@@ -531,7 +405,7 @@ class TmdbService {
       return null;
     }
     if (responses[0] == null || responses[1] == null) {
-      DiaryService.add('[TMDB] fetchArt 全部网络/握手失败 (cf_worker+direct 都挂了)');
+      DiaryService.add('[TMDB] fetchArt 全部网络/握手失败 (direct+retry 都挂了)');
       return null;
     }
     if (responses[0]!.statusCode != 200) {

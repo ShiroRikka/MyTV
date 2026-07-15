@@ -56,11 +56,11 @@ class _UserMenuState extends State<UserMenu> {
   // v2.0.93: TMDB API Key (v3) — 详情页大头部走 TMDB search/multi 拿
   //   精准 w1280 backdrop 替代豆瓣 coverUrl. 配了 = true, 走精准识别.
   bool _tmdbConfigured = false;
-  // v2.0.97: TMDB 数据源 (跟 Bangumi 数据源一样 UX, 3 选 1)
-  //   - cf_worker (默认, 跟 v2.0.94 ~ v2.0.96 一致): 配 worker wrap
-  //   - direct: 强制直连, 不走 worker
-  //   - off: 配了 key 也强制不走 TMDB
-  String _tmdbDataSource = 'cf_worker';
+  // v2.0.97: TMDB 数据源 (跟 Bangumi 数据源一样 UX, 默认 'direct')
+  //   v2.1.40 改: 默认从 'cf_worker' 改成 'direct' (加速删了, 直连是
+  //   唯一可选的 TMDB 数据源). 老用户存的 'cf_worker' / 'cors_proxy'
+  //   在 saveTmdbDataSource 里 migrate 到 'direct'.
+  String _tmdbDataSource = 'direct';
 
   // v2.1.22: 日记 section 配置 (跟 DiaryService 同步)
   bool _diaryClearOnExit = true;
@@ -1421,50 +1421,9 @@ class _UserMenuState extends State<UserMenu> {
                 iconColor: const Color(0xFF14b8a6),
               ),
               _buildDivider(),
-              // Bangumi 数据源选项
-              _buildOptionSelector(
-                title: 'Bangumi 数据源',
-                currentValue: _bangumiDataSource,
-                options: const [
-                  '直连',
-                  'Cors Proxy By Zwei',
-                  'CF Worker 加速',
-                ],
-                onChanged: (value) async {
-                  final key = UserDataService
-                      .getBangumiDataSourceKeyFromDisplayName(value);
-                  await UserDataService.saveBangumiDataSource(key);
-                  if (!mounted) return;
-                  setState(() {
-                    _bangumiDataSource = value;
-                  });
-                },
-                icon: LucideIcons.database,
-                iconColor: const Color(0xFFec4899),
-              ),
-              _buildDivider(),
-              // Bangumi 图片源选项
-              _buildOptionSelector(
-                title: 'Bangumi 图片源',
-                currentValue: _bangumiImageSource,
-                options: const [
-                  '直连',
-                  'Cors Proxy By Zwei',
-                  'CF Worker 加速',
-                ],
-                onChanged: (value) async {
-                  final key = UserDataService
-                      .getBangumiImageSourceKeyFromDisplayName(value);
-                  await UserDataService.saveBangumiImageSource(key);
-                  if (!mounted) return;
-                  setState(() {
-                    _bangumiImageSource = value;
-                  });
-                },
-                icon: LucideIcons.image,
-                iconColor: const Color(0xFFf43f5e),
-              ),
-              _buildDivider(),
+              // v2.1.40: 删 Bangumi 数据源 / 图片源 selector — 加速代码
+              //   删了 Bangumi 数据/图片只能直连, 没有"加速选项"可挑了.
+              //   UI 上整个 selector 移除, 跟"删 2 选 1 / 4 选 1 选项" 一致.
               // v2.1.19: TMDB 数据源从「海报墙」挪到「数据源」section —
               //   跟豆瓣数据源 / Bangumi 数据源放一起, 跟其他数据源 1:1 UX.
               //   用户反馈 "TMDB 数据源不应该放到数据源栏目吗" — 跟 Bangumi
@@ -1475,19 +1434,16 @@ class _UserMenuState extends State<UserMenu> {
               //   「关闭」语义, 关了就没数据源了. 真要关 → 走 "清除 TMDB
               //   缓存"上方条件渲染行? 不, 删 API key 就走豆瓣兜底 (跟
               //   v2.0.93 行为一致). 数据源选项就专心管"怎么连".
-              // v2.1.39: 加 'CORS 公共代理 (ciao-cors)' 选项, 3 选 1.
-              //   实测 ciao-cors 能代理 image.tmdb.org (200 + 真实 JPEG),
-              //   跟 api.bgm.tv 一样能代理 TMDB. 适用: 没配 CF Worker 域名
-              //   又想看 TMDB 海报/数据 (search/overview/credits).
-              //   重试链: ciao-cors → retry 1 次 → fallback direct → retry 1 次.
+              // v2.1.40: 删 CF Worker / CORS 公共代理, 改回 '已关闭' +
+              //   '直连' 2 选 1. "已关闭" 重新加回来 — 现在没加速可挑,
+              //   反而需要个明确"关闭 TMDB" 的语义, 跟"直连"区分开.
               _buildOptionSelector(
                 title: 'TMDB 数据源',
                 currentValue: UserDataService.getTmdbDataSourceDisplayName(
                     _tmdbDataSource),
                 options: const [
-                  'CF Worker 加速',
-                  'CORS 公共代理 (ciao-cors)',
                   '直连',
+                  '已关闭',
                 ],
                 onChanged: (value) async {
                   final key = UserDataService
@@ -1500,6 +1456,7 @@ class _UserMenuState extends State<UserMenu> {
                   // v2.0.98: 没配 key 时切了不生效, 告诉用户为啥.
                   //   配了 key 的用户切了直接生效, 不打扰.
                   // v2.1.19: 行为不变, 只是挪位置 + 删"已关闭".
+                  // v2.1.40: 行为不变.
                   if (!_tmdbConfigured) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(

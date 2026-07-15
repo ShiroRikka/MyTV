@@ -1,53 +1,9 @@
 // 通用图片地址处理工具
-import 'dart:async';
-import 'package:http/http.dart' as http;
-import 'package:luna_tv/services/diary_service.dart';
+//
+// v2.1.40 改: 删 TMDB / Bangumi 加速代码 (CF Worker 探测 / ciao-cors 包装
+//   / worker 健康检查) 整段, 一律直连. Douban 加速保留 (CDN 切换 / 高清升级
+//   不是 TMDB/Bangumi 加速, 用户没让删, 也不属于本次任务范围).
 import 'package:luna_tv/services/user_data_service.dart';
-
-// v2.1.28: Worker 健康状态缓存 — image 加载前探测 worker 通不通, 挂了就
-//   走直连, 跟 search/overview/credits 一样的 retry 兜底思路.
-// 之前 v2.1.25 ~ v2.1.27 image 走 CachedNetworkImage 不进 DiaryService,
-//   worker 挂时 image 静默挂, 用户看不到失败信息也不知道能切.
-// 改成探测 + 30s 缓存: worker 通就 wrap, 挂就直连, 探测 1 次结果复用 30s.
-class _WorkerHealthCache {
-  static const _cacheTtl = Duration(seconds: 30);
-  // null = 还没探测过, true = worker 通, false = worker 挂
-  static bool? _alive;
-  static DateTime? _expiry;
-
-  static bool? get alive {
-    if (_expiry == null) return null;
-    if (DateTime.now().isAfter(_expiry!)) return null;
-    return _alive;
-  }
-
-  static void set(bool value) {
-    _alive = value;
-    _expiry = DateTime.now().add(_cacheTtl);
-  }
-}
-
-/// 探测 worker 域名 1 次, HEAD 3s 超时.
-/// 返回: true=通 / false=挂 / null=已探测 (用缓存).
-Future<bool?> _probeWorkerHealth(String worker) async {
-  final cached = _WorkerHealthCache.alive;
-  if (cached != null) return cached;
-  try {
-    final resp = await http
-        .head(Uri.parse('https://$worker/'))
-        .timeout(const Duration(seconds: 3));
-    final ok = resp.statusCode < 500;
-    _WorkerHealthCache.set(ok);
-    DiaryService.add(
-        '[Worker health] $worker: ${ok ? "alive" : "dead (${resp.statusCode})"}, cache 30s');
-    return ok;
-  } catch (e) {
-    _WorkerHealthCache.set(false);
-    DiaryService.add(
-        '[Worker health] $worker: dead ($e), cache 30s');
-    return false;
-  }
-}
 
 /// 升级豆瓣图片 URL 到更高分辨率（用于大图展示场景如 Hero Banner）。
 ///
@@ -97,6 +53,11 @@ String _upgradeDoubanCoverUrl(String url) {
 ///   即把 `s_/m_ratio_poster` 升级到 `l_ratio_poster` (公开图最大尺寸, 约 600×900)。
 ///   未登录则保持调用方传入的默认行为,不影响现有体验。
 /// 返回可直接用于加载的图片地址。
+///
+/// v2.1.40 改: TMDB / Bangumi 分支只做 http→https 升级, 不再 wrap 加速 URL.
+///   [UserDataService.buildBangumiImageUrl] / [buildTmdbImageUrl] 现在是
+///   1:1 返原 URL 的 passthrough (加速删了). 这里手动走 https 升级跟
+///   v2.0.74 之前的行为对齐. 删了 CF Worker 健康探测 / 30s 缓存整段.
 Future<String> getImageUrl(
   String originalUrl,
   String? source, {
@@ -134,50 +95,17 @@ Future<String> getImageUrl(
         return processed;
     }
   }
-  // Bangumi 图片 URL 统一使用 HTTPS,优先走 CF Worker 加速
+  // v2.1.40: Bangumi 图片 URL 统一走 HTTPS, 不再 wrap 加速.
+  //   老 CF Worker 探测 / 30s 缓存全删 (cf_worker / ciao-cors 都没了).
   if (source == 'bangumi' && originalUrl.isNotEmpty) {
-    String processed = originalUrl;
-    if (processed.startsWith('//')) {
-      processed = 'https:$processed';
-    } else {
-      processed = processed.replaceFirst('http://', 'https://');
+    if (originalUrl.startsWith('//')) {
+      return 'https:$originalUrl';
     }
-    // v2.1.28: 探测 worker 健康, 挂了就走直连.
-    // buildBangumiImageUrl 内部已经按"配 worker + cf_worker mode"判断,
-    //   但 worker TLS 挂 (跟 search 同样的 SSLV3_ALERT_HANDSHAKE_FAILURE)
-    //   时 wrap 出来的 URL 还是 fail, image 静默挂.
-    // 这里先探测 worker 域名 1 次, 30s 缓存, 探测失败返直连.
-    final worker = UserDataService.getCfWorkerDomainSync();
-    if (worker.isNotEmpty) {
-      final alive = await _probeWorkerHealth(worker);
-      if (alive == false) {
-        DiaryService.add(
-            '[Bangumi image] worker $worker 探测挂, 走直连 (${processed.length} chars)');
-        return processed;
-      }
-    }
-    return UserDataService.buildBangumiImageUrl(processed);
+    return originalUrl.replaceFirst('http://', 'https://');
   }
-  // v2.1.25: TMDB 图片 URL 走 CF Worker 加速 (跟 Bangumi 平行).
-  // 之前 v2.0.94 ~ v2.1.24 是 [TmdbService.fetchArt] 内部 wrap 的,
-  // v2.1.25 改回返原始 image.tmdb.org URL, 消费者 (这里 + douban_detail_header)
-  // 统一调 [UserDataService.buildTmdbImageUrl] 走包装.
-  // v2.1.39: TMDB 数据源加 'cors_proxy' (ciao-cors.is-an.org 公共代理) 选项,
-  //   跟 Bangumi 4 选 1: 'cf_worker' / 'cors_proxy' / 'direct' / 'off'.
-  //   实测 image.tmdb.org 走 ciao-cors 返 200 + 真实 JPEG, 跟 api.bgm.tv
-  //   一样能代理, 给没配 CF Worker 的用户兜底看 TMDB 海报.
+  // v2.1.40: TMDB 图片 URL 不再 wrap, 一律直连 image.tmdb.org.
   if (source == 'tmdb' && originalUrl.isNotEmpty) {
-    // v2.1.28: 跟 Bangumi 平行, 探测 worker 健康, 挂了就走直连.
-    final worker = UserDataService.getCfWorkerDomainSync();
-    if (worker.isNotEmpty) {
-      final alive = await _probeWorkerHealth(worker);
-      if (alive == false) {
-        DiaryService.add(
-            '[TMDB image] worker $worker 探测挂, 走直连 (${originalUrl.length} chars)');
-        return originalUrl;
-      }
-    }
-    return UserDataService.buildTmdbImageUrl(originalUrl);
+    return originalUrl;
   }
   return originalUrl;
 }
@@ -220,9 +148,9 @@ Future<String> getDoubanCoverUrl(String coverUrl) async {
 /// 注意：只有当 [source] 为 'douban' 或 URL 指向 douban 域名时才添加 Referer/UA。
 /// bangumi 源（lain.bgm.tv）需要 UA + Referer，否则图片请求会被拒绝。
 ///
-/// 重要：原始 URL 可能是被 CF Worker / ciao-cors 代理过的
-/// (形如 https://xx.workers.dev/?url=https%3A%2F%2Flain.bgm.tv%2F...),
-/// 所以判断 bgm.tv 时要全 URL 搜,不能只匹配域名段。
+/// v2.1.40 改: 删 ciao-cors 代理的 X-Requested-With 注入分支 (加速删了
+///   ciao-cors 不会再出现). 保留 douban cookie 注入 / bgm.tv Referer+UA
+///   等反盗链处理.
 Map<String, String>? getImageRequestHeaders(String imageUrl, String? source) {
   final bool isDoubanSource = (source == 'douban') ||
       RegExp(r'https?://([^/]+\.)?douban(io|)\.com', caseSensitive: false)
@@ -245,11 +173,11 @@ Map<String, String>? getImageRequestHeaders(String imageUrl, String? source) {
   }
 
   // Bangumi 图片服务器 lain.bgm.tv 需要 User-Agent + Referer
-  // 全 URL 搜 bgm.tv,避免被代理后 URL 域名变成 workers.dev 而漏检
+  // v2.1.40: 删 ciao-cors X-Requested-With 分支 (加速没了, 不会再走代理 URL).
   final bool isBangumiSource = (source == 'bangumi') ||
       imageUrl.toLowerCase().contains('bgm.tv');
   if (isBangumiSource) {
-    final Map<String, String> headers = {
+    return {
       // lain.bgm.tv 和 api.bgm.tv 都吃 bgm.tv v0 API 同款
       // "App/Version (URL)" UA 格式,Chrome UA 反而会 403
       'User-Agent':
@@ -257,15 +185,7 @@ Map<String, String>? getImageRequestHeaders(String imageUrl, String? source) {
       'Referer': 'https://bgm.tv/',
       'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
     };
-    // v2.0.12: ciao-cors 代理 Bangumi 图片时必须带 X-Requested-With,
-    // 否则新 API (path 拼接) 会 403
-    if (imageUrl.contains(UserDataService.publicCorsProxyBase)) {
-      headers['X-Requested-With'] = 'XMLHttpRequest';
-    }
-    return headers;
   }
 
   return null;
 }
-
-
