@@ -5,9 +5,16 @@ import 'package:http/http.dart' as http;
 import 'package:luna_tv/models/bangumi.dart';
 import 'package:luna_tv/services/api_service.dart';
 import 'package:luna_tv/services/douban_cache_service.dart';
+import 'package:luna_tv/services/user_data_service.dart';
 
 /// Bangumi 数据服务 (函数级缓存, 一天过期)
 ///
+/// v2.1.42 改: 加 'bangumi_proxy' 加速 — Bangumi 数据源选 worker 加速且
+///   配了 worker URL 时, api.bgm.tv URL 走 [UserDataService.buildBangumiDataUrl]
+///   wrap 成 `${workerUrl}/bangumi/...` (path-based). 跟 v2.1.40 之前
+///   CF Worker 套娃 (`?url=`) 不一样: path-based worker 不需要 URL encode,
+///   日志 / 日记 / Cache-Control 都干净. 没配 worker URL 或数据源选 'direct'
+///   → 1:1 走直连, 跟 v2.1.40 行为一致.
 /// v2.1.40 改: 删 CF Worker (CORSAPI 套娃) / ciao-cors 公共代理加速,
 ///   一律直连 api.bgm.tv. 删了 _fetchBangumi / _secureSocketGet /
 ///   _BgmSocketReader / dart:io 依赖 / cf_optimizer 引用.
@@ -64,8 +71,13 @@ class BangumiService {
 
     // 未命中缓存，请求接口
     // v2.1.40 改: 删 CF Worker / ciao-cors 兜底, 一律直连 api.bgm.tv
+    // v2.1.42 改: 加 'bangumi_proxy' 分支 — Bangumi 数据源选 worker
+    //   加速时, buildBangumiDataUrl 内部 wrap 成 `${workerUrl}/bangumi/...`
+    //   (path-based). 选 'direct' / 没配 worker URL → 1:1 返原 URL.
     try {
       const apiUrl = 'https://api.bgm.tv/calendar';
+      // v2.1.42: wrap URL via buildBangumiDataUrl (1:1 返 / 走 worker)
+      final proxiedUrl = UserDataService.buildBangumiDataUrl(apiUrl);
 
       const headers = <String, String>{
         // ⚠️ api.bgm.tv v0 API 强制要求 User-Agent 是
@@ -80,7 +92,7 @@ class BangumiService {
 
       // v2.1.40: 网络/握手/超时错 retry 1 次 (救国内出口路由抖),
       //   没了 worker / ciao-cors 多级 fallback.
-      final http.Response? response = await _httpGetWithRetry(apiUrl, headers);
+      final http.Response? response = await _httpGetWithRetry(proxiedUrl, headers);
       if (response == null || response.statusCode != 200) {
         return ApiResponse.error(
           '获取 Bangumi 日历失败: ${response?.statusCode ?? 'no response'}',

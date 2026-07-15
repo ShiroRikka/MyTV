@@ -36,8 +36,11 @@ class _UserMenuState extends State<UserMenu> {
   String _role = 'user';
   String _doubanDataSource = '直连';
   String _doubanImageSource = '直连';
-  String _bangumiDataSource = '直连';
-  String _bangumiImageSource = '直连';
+  // v2.1.42 改: 跟 v2.1.41 TMDB 一样, 字段存 key 值 ('bangumi_proxy' / 'direct'),
+  //   UI 显示时调 [getBangumiDataSourceDisplayName] 转. v2.1.40 这里存的是
+  //   显示名 ('直连'), 跟新模式不一致, 这次改回 key.
+  String _bangumiDataSource = 'direct';
+  String _bangumiImageSource = 'direct';
   String _version = '';
   bool _preferSpeedTest = true;
   bool _localSearch = false;
@@ -100,10 +103,9 @@ class _UserMenuState extends State<UserMenu> {
         await UserDataService.getDoubanDataSourceDisplayName();
     final doubanImageSource =
         await UserDataService.getDoubanImageSourceDisplayName();
-    final bangumiDataSource =
-        await UserDataService.getBangumiDataSourceDisplayNameAsync();
-    final bangumiImageSource =
-        await UserDataService.getBangumiImageSourceDisplayNameAsync();
+    // v2.1.42 改: 跟 v2.1.41 TMDB 一样, 存 key 值, UI 显示时再转显示名
+    final bangumiDataSource = await UserDataService.getBangumiDataSourceKey();
+    final bangumiImageSource = await UserDataService.getBangumiImageSourceKey();
     final preferSpeedTest = await UserDataService.getPreferSpeedTest();
     final localSearch = await UserDataService.getLocalSearch();
     // v2.0.76: 语义重命名 — 字段名跟新语义对齐
@@ -1712,14 +1714,103 @@ class _UserMenuState extends State<UserMenu> {
                     : const Color(0xFF9ca3af),
               ),
               _buildDivider(),
+              // v2.1.42: Bangumi 数据源 selector (跟 v2.1.41 TMDB 同 UX).
+              //   v2.1.40 整个删了, 这次跟 TMDB 一起加回.
+              //   2 选 1: 'Bangumi Worker 加速' / '直连'. 配了 worker
+              //   URL 但选 'bangumi_proxy' 没配 → 弹 SnackBar 警告 + 落
+              //   '直连' (跟 TMDB 同行为, 复用 _tmdbProxyDomain).
+              _buildOptionSelector(
+                title: 'Bangumi 数据源',
+                currentValue: UserDataService.getBangumiDataSourceDisplayName(
+                    _bangumiDataSource),
+                options: const [
+                  'Bangumi Worker 加速',
+                  '直连',
+                ],
+                onChanged: (value) async {
+                  final key = UserDataService
+                      .getBangumiDataSourceKeyFromDisplayName(value);
+                  if (key == 'bangumi_proxy' && _tmdbProxyDomain.isEmpty) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          '请先在「TMDB / Bangumi 代理 URL」输入 worker 地址, 已自动回落「直连」',
+                        ),
+                        duration: Duration(seconds: 3),
+                      ),
+                    );
+                    await UserDataService.saveBangumiDataSource('direct');
+                    if (!mounted) return;
+                    setState(() {
+                      _bangumiDataSource = 'direct';
+                    });
+                    return;
+                  }
+                  await UserDataService.saveBangumiDataSource(key);
+                  if (!mounted) return;
+                  setState(() {
+                    _bangumiDataSource = key;
+                  });
+                },
+                icon: LucideIcons.calendar,
+                iconColor: _tmdbProxyDomain.isEmpty
+                    ? const Color(0xFF9ca3af)
+                    : const Color(0xFF22C55E),
+              ),
+              _buildDivider(),
+              // v2.1.42: Bangumi 图片源 selector (跟数据源是 2 个独立开关).
+              _buildOptionSelector(
+                title: 'Bangumi 图片源',
+                currentValue: UserDataService.getBangumiImageSourceDisplayName(
+                    _bangumiImageSource),
+                options: const [
+                  'Bangumi Worker 加速',
+                  '直连',
+                ],
+                onChanged: (value) async {
+                  final key = UserDataService
+                      .getBangumiImageSourceKeyFromDisplayName(value);
+                  if (key == 'bangumi_proxy' && _tmdbProxyDomain.isEmpty) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          '请先在「TMDB / Bangumi 代理 URL」输入 worker 地址, 已自动回落「直连」',
+                        ),
+                        duration: Duration(seconds: 3),
+                      ),
+                    );
+                    await UserDataService.saveBangumiImageSource('direct');
+                    if (!mounted) return;
+                    setState(() {
+                      _bangumiImageSource = 'direct';
+                    });
+                    return;
+                  }
+                  await UserDataService.saveBangumiImageSource(key);
+                  if (!mounted) return;
+                  setState(() {
+                    _bangumiImageSource = key;
+                  });
+                },
+                icon: LucideIcons.image,
+                iconColor: _tmdbProxyDomain.isEmpty
+                    ? const Color(0xFF9ca3af)
+                    : const Color(0xFF22C55E),
+              ),
+              _buildDivider(),
               // v2.1.41: TMDB 代理 URL 输入行 — 用户自部署 [djsevenx1/tmdb-proxy]
               //   到 Cloudflare Pages 拿到的 https://xxx.pages.dev. 配了
               //   「TMDB 数据源」选 'TMDB Worker 加速' 才会用上, 没配选
               //   '直连' 也允许配 (先存着, 切的时候不用再输一次).
               //   跟 [TMDB API Key] (在「海报墙」section) 同 UX — 点击
               //   弹 dialog, 单行 TextField, 保存.
+              // v2.1.42 改: label 改成 "TMDB / Bangumi 代理 URL" — 同一个
+              //   worker 同时服务 TMDB (/movie/...) 和 Bangumi (/bangumi/...
+              //   /bgm-img/...), 共用 _tmdbProxyDomain 字段.
               _buildInputOption(
-                title: 'TMDB 代理 URL',
+                title: 'TMDB / Bangumi 代理 URL',
                 currentValue: _tmdbProxyDomain.isEmpty
                     ? '未配置'
                     : _tmdbProxyDomain,

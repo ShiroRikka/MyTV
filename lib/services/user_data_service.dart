@@ -815,92 +815,162 @@ class UserDataService {
     return '$publicCorsProxyBase/https://$targetUrl';
   }
 
-  // ===== v2.1.40: Bangumi 数据源 (删 cf_worker / cors_proxy, 只留 direct) =====
+  // ===== v2.1.42: Bangumi 数据源 (v2.1.40 删, v2.1.42 跟 TMDB 一起加回 'bangumi_proxy') =====
 
-  /// 保存 Bangumi 数据源 (v2.1.40 改: 强制 'direct', 老值 migrate)
+  /// 保存 Bangumi 数据源 (key 值: 'bangumi_proxy' / 'direct')
+  ///
+  /// v2.1.42 改: 重新加 'bangumi_proxy' (跟 v2.1.41 TMDB 的 tmdb_proxy
+  ///   一样的设计, 共用 _tmdbProxyDomain worker URL). 删 'off' /
+  ///   'cf_worker' / 'cors_proxy' 任何老值 → 'direct'.
+  ///   'bangumi_proxy' 但 worker URL 没配 → 自动回落到 'direct'.
+  /// v2.1.40 改: 删 'cf_worker' / 'cors_proxy'. 删 Bangumi 加速代码
+  ///   后只剩 'direct' 一档. 老值 migrate 到 'direct'.
   static Future<void> saveBangumiDataSource(String key) async {
-    // v2.1.40: 删加速后只接受 'direct'. 'cf_worker' / 'cors_proxy' /
-    //   其他老值全部 migrate 到 'direct' (直连).
-    final cleaned = 'direct';
+    String cleaned;
+    if (key == 'bangumi_proxy') {
+      // v2.1.42: bangumi_proxy 但 worker URL 没配 → 直接落 'direct'.
+      final proxy = getTmdbProxyDomainSync();
+      cleaned = proxy.isNotEmpty ? 'bangumi_proxy' : 'direct';
+    } else if (key == 'direct') {
+      cleaned = 'direct';
+    } else {
+      // 兜底: 老值 / 任何脏数据 → 'direct'
+      cleaned = 'direct';
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_bangumiDataSourceKey, cleaned);
     _bangumiDataSourceCache = cleaned;
   }
 
-  // 获取 Bangumi 数据源 key
+  /// 异步读 Bangumi 数据源 key, 默认值看 worker URL 是否配了
+  ///
+  /// v2.1.42 改: 跟 v2.1.41 TMDB 一样, 默认值按 worker URL 推断.
+  ///   配了 worker URL 默认 'bangumi_proxy', 没配默认 'direct'.
+  ///   老用户存的值保持不变.
   static Future<String> getBangumiDataSourceKey() async {
     if (_bangumiDataSourceCache != null) return _bangumiDataSourceCache!;
     final prefs = await SharedPreferences.getInstance();
-    final v = prefs.getString(_bangumiDataSourceKey) ?? 'direct';
-    _bangumiDataSourceCache = v;
-    return v;
+    final v = prefs.getString(_bangumiDataSourceKey);
+    if (v != null && (v == 'bangumi_proxy' || v == 'direct')) {
+      _bangumiDataSourceCache = v;
+      return v;
+    }
+    // 老值 / 没存 → 按 worker URL 推断默认
+    final proxy = getTmdbProxyDomainSync();
+    final def = proxy.isNotEmpty ? 'bangumi_proxy' : 'direct';
+    _bangumiDataSourceCache = def;
+    return def;
   }
 
-  // v2.1.40: 删 _lastBangumiDataPathLog / _lastBangumiImagePathLog /
-  //   _lastTmdbImagePathLog — 加速代码全删了, 这些日记字段也不需要了.
-
-  // 获取 Bangumi 数据源显示名（异步）
-  static Future<String> getBangumiDataSourceDisplayNameAsync() async {
-    return getBangumiDataSourceDisplayName('direct');
-  }
-
-  // 获取 Bangumi 图片源显示名（异步）
-  static Future<String> getBangumiImageSourceDisplayNameAsync() async {
-    return getBangumiImageSourceDisplayName('direct');
-  }
-
-  // v2.1.40: Bangumi 数据源显示名 — 只返 '直连'
-  static String getBangumiDataSourceDisplayName(String key) {
-    return '直连';
-  }
-
-  // v2.1.40: 显示名 → key 只接受 '直连'
-  static String getBangumiDataSourceKeyFromDisplayName(String name) {
-    return 'direct';
-  }
-
-  // v2.1.40: Bangumi 图片源显示名 — 只返 '直连'
-  static String getBangumiImageSourceDisplayName(String key) {
-    return '直连';
-  }
-
-  // v2.1.40: 显示名 → key 只接受 '直连'
-  static String getBangumiImageSourceKeyFromDisplayName(String name) {
-    return 'direct';
-  }
-
-  // 获取 Bangumi 数据源显示名称（异步）
+  /// 同步读 Bangumi 数据源 key (build 时用, 比如 BangumiService
+  /// 拼 api.bgm.tv URL 时)
   static String getBangumiDataSourceKeySync() {
-    return _bangumiDataSourceCache ?? 'direct';
+    if (_bangumiDataSourceCache != null) return _bangumiDataSourceCache!;
+    // 缓存没 warmup (老路径), 兜底走 default
+    final proxy = getTmdbProxyDomainSync();
+    return proxy.isNotEmpty ? 'bangumi_proxy' : 'direct';
   }
 
-  // v2.1.40: 保存 Bangumi 图片源 — 强制 'direct'
+  // 获取 Bangumi 数据源显示名（异步, 跟老 UX 兼容, 默认 'direct'）
+  static Future<String> getBangumiDataSourceDisplayNameAsync() async {
+    return getBangumiDataSourceDisplayName(
+        await getBangumiDataSourceKey());
+  }
+
+  // 获取 Bangumi 图片源显示名（异步, 跟老 UX 兼容, 默认 'direct'）
+  static Future<String> getBangumiImageSourceDisplayNameAsync() async {
+    return getBangumiImageSourceDisplayName(
+        await getBangumiImageSourceKey());
+  }
+
+  /// key 值 → 显示名
+  ///
+  /// v2.1.42 改: 'bangumi_proxy' → 'Bangumi Worker 加速'.
+  ///   跟 TMDB Worker 加速区分 (worker 是同一个, 路径前缀不同).
+  static String getBangumiDataSourceDisplayName(String key) {
+    switch (key) {
+      case 'bangumi_proxy':
+        return 'Bangumi Worker 加速';
+      case 'direct':
+      default:
+        return '直连';
+    }
+  }
+
+  /// 显示名 → key 值
+  static String getBangumiDataSourceKeyFromDisplayName(String name) {
+    switch (name) {
+      case 'Bangumi Worker 加速':
+        return 'bangumi_proxy';
+      case '直连':
+      default:
+        return 'direct';
+    }
+  }
+
+  /// key 值 → 显示名 (Bangumi 图片源)
+  static String getBangumiImageSourceDisplayName(String key) {
+    switch (key) {
+      case 'bangumi_proxy':
+        return 'Bangumi Worker 加速';
+      case 'direct':
+      default:
+        return '直连';
+    }
+  }
+
+  /// 显示名 → key 值 (Bangumi 图片源)
+  static String getBangumiImageSourceKeyFromDisplayName(String name) {
+    switch (name) {
+      case 'Bangumi Worker 加速':
+        return 'bangumi_proxy';
+      case '直连':
+      default:
+        return 'direct';
+    }
+  }
+
+  /// v2.1.42: 保存 Bangumi 图片源 (跟数据源一样 2 选 1)
+  ///
+  /// 跟数据源是 2 个独立开关: 用户可以数据走 worker 加速, 图片直连
+  /// (e.g. lain.bgm.tv 在某运营商可达, 走 worker 反而绕). 或者
+  /// 反过来. 默认 2 个都看 worker URL 配没配推断.
   static Future<void> saveBangumiImageSource(String key) async {
-    final cleaned = 'direct';
+    String cleaned;
+    if (key == 'bangumi_proxy') {
+      final proxy = getTmdbProxyDomainSync();
+      cleaned = proxy.isNotEmpty ? 'bangumi_proxy' : 'direct';
+    } else if (key == 'direct') {
+      cleaned = 'direct';
+    } else {
+      cleaned = 'direct';
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_bangumiImageSourceKey, cleaned);
     _bangumiImageSourceCache = cleaned;
   }
 
-  // v2.1.40: 获取 Bangumi 图片源 key, 默认 'direct'
+  /// 异步读 Bangumi 图片源 key, 默认值看 worker URL
   static Future<String> getBangumiImageSourceKey() async {
     if (_bangumiImageSourceCache != null) return _bangumiImageSourceCache!;
     final prefs = await SharedPreferences.getInstance();
-    // 旧版本可能存过 'cors_proxy' / 'cf_worker', v2.1.40 全部视为 'direct'
-    final stored = prefs.getString(_bangumiImageSourceKey);
-    if (stored != null && stored.isNotEmpty && stored == 'direct') {
-      _bangumiImageSourceCache = stored;
-      return stored;
+    final v = prefs.getString(_bangumiImageSourceKey);
+    if (v != null && (v == 'bangumi_proxy' || v == 'direct')) {
+      _bangumiImageSourceCache = v;
+      return v;
     }
-    // 老值或首次启动 → 统一存 'direct'
-    _bangumiImageSourceCache = 'direct';
-    await prefs.setString(_bangumiImageSourceKey, 'direct');
-    return 'direct';
+    // 老值 / 没存 → 按 worker URL 推断默认
+    final proxy = getTmdbProxyDomainSync();
+    final def = proxy.isNotEmpty ? 'bangumi_proxy' : 'direct';
+    _bangumiImageSourceCache = def;
+    return def;
   }
 
-  // v2.1.40: 同步获取 Bangumi 图片源 key, 默认 'direct'
+  /// 同步读 Bangumi 图片源 key
   static String getBangumiImageSourceKeySync() {
-    return _bangumiImageSourceCache ?? 'direct';
+    if (_bangumiImageSourceCache != null) return _bangumiImageSourceCache!;
+    final proxy = getTmdbProxyDomainSync();
+    return proxy.isNotEmpty ? 'bangumi_proxy' : 'direct';
   }
 
   // v2.1.40: 删 hasCfWorkerDomain — Bangumi 数据 fetch 改直连后, 没人调了.
@@ -908,18 +978,63 @@ class UserDataService {
 
   /// 构造 Bangumi 数据请求 URL
   ///
-  /// v2.1.40 改: 删 CF Worker / ciao-cors 加速, 一律直连.
-  ///   老加速逻辑 (worker 域名 / ciao-cors / 兜底) 全删, 现在只
-  ///   返 originalUrl. CF Worker 域名本身保留, 视频加速还在用.
+  /// v2.1.42 改: 加 'bangumi_proxy' 分支 — Bangumi 数据源选 worker
+  ///   加速且配了 worker URL 时, 走 path-based: 剥 `api.bgm.tv` 前缀,
+  ///   拼 `${workerUrl}/bangumi`, 例:
+  ///     https://api.bgm.tv/calendar
+  ///     → https://tmdb-8d1.pages.dev/bangumi/calendar
+  ///     https://api.bgm.tv/v0/subjects/123
+  ///     → https://tmdb-8d1.pages.dev/bangumi/v0/subjects/123
+  ///   worker 端 ([djsevenx1/tmdb-proxy] fork HuntzzZ) 拿 `/bangumi/...`
+  ///   path 转给 api.bgm.tv, Authorization 透传. 跟 v2.0.77 之前
+  ///   cf_worker 套娃 (`?url=`) 不一样: path-based worker 不需要
+  ///   URL encode, 日志 / 日记 / Cache-Control 都干净.
+  /// v2.1.40 改: 删 cf_worker / ciao-cors 加速, 1:1 返原 URL.
+  /// v2.1.42: 加 'bangumi_proxy' 分支, 其他仍 1:1 返 (老用户 + 未配
+  ///   worker URL 的).
   static String buildBangumiDataUrl(String originalUrl) {
+    if (originalUrl.isEmpty) return originalUrl;
+    final source = getBangumiDataSourceKeySync();
+    if (source == 'bangumi_proxy') {
+      final proxy = getTmdbProxyDomainSync();
+      if (proxy.isNotEmpty && originalUrl.startsWith('https://api.bgm.tv')) {
+        // 'https://api.bgm.tv/calendar' → 'https://proxy/bangumi/calendar'
+        return originalUrl.replaceFirst(
+          'https://api.bgm.tv',
+          '$proxy/bangumi',
+        );
+      }
+    }
     return originalUrl;
   }
 
   /// 构造 Bangumi 图片请求 URL
   ///
-  /// v2.1.40 改: 删 CF Worker / ciao-cors 加速, 一律直连 lain.bgm.tv.
-  ///   老加速逻辑 (worker 域名 / ciao-cors / 兜底) 全删.
+  /// v2.1.42 改: 加 'bangumi_proxy' 分支 — Bangumi 图片源选 worker
+  ///   加速且配了 worker URL 时, 走 path-based: 剥 `lain.bgm.tv` 前缀,
+  ///   拼 `${workerUrl}/bgm-img`, 例:
+  ///     https://lain.bgm.tv/img/.../abc.jpg
+  ///     → https://tmdb-8d1.pages.dev/bgm-img/img/.../abc.jpg
+  ///   worker 端 ([djsevenx1/tmdb-proxy] fork HuntzzZ) 拿 `/bgm-img/...`
+  ///   path 转给 lain.bgm.tv, 自动加 Referer: https://bgm.tv/ 绕过反盗链.
+  ///   国内反盗链偶尔 403, 走 worker 反而成功率高. 跟 v2.0.74 之前
+  ///   cf_worker 套娃 (用 `?url=` 转) 不一样: path-based worker 不需要
+  ///   URL encode, 日志 / 日记 / Cache-Control 都干净.
+  /// v2.1.40 改: 删 cf_worker / ciao-cors 加速, 1:1 返原 URL.
+  /// v2.1.42: 加 'bangumi_proxy' 分支, 其他仍 1:1 返 (老用户 + 未配
+  ///   worker URL 的).
   static String buildBangumiImageUrl(String originalUrl) {
+    if (originalUrl.isEmpty) return originalUrl;
+    final source = getBangumiImageSourceKeySync();
+    if (source == 'bangumi_proxy') {
+      final proxy = getTmdbProxyDomainSync();
+      if (proxy.isNotEmpty && originalUrl.startsWith('https://lain.bgm.tv')) {
+        return originalUrl.replaceFirst(
+          'https://lain.bgm.tv',
+          '$proxy/bgm-img',
+        );
+      }
+    }
     return originalUrl;
   }
 
@@ -954,14 +1069,31 @@ class UserDataService {
   }
 
   // Bangumi 数据源 key 同步初始化（main.dart 启动时调用）
+  //
+  // v2.1.42 改: 跟 v2.1.41 TMDB warmup 一样, 读 prefs 后按 worker URL
+  //   推断默认. 老值 (cf_worker / cors_proxy) → 'direct'.
   static Future<void> warmupBangumiConfig() async {
     if (_bangumiDataSourceCache == null) {
       final prefs = await SharedPreferences.getInstance();
-      _bangumiDataSourceCache = prefs.getString(_bangumiDataSourceKey) ?? 'direct';
+      final stored = prefs.getString(_bangumiDataSourceKey);
+      if (stored == 'bangumi_proxy' || stored == 'direct') {
+        _bangumiDataSourceCache = stored;
+      } else {
+        // 老值 / 没存 → 按 worker URL 推断默认
+        final proxy = prefs.getString(_tmdbProxyDomainKey) ?? '';
+        _bangumiDataSourceCache = proxy.isNotEmpty ? 'bangumi_proxy' : 'direct';
+      }
     }
     if (_bangumiImageSourceCache == null) {
       final prefs = await SharedPreferences.getInstance();
-      _bangumiImageSourceCache = prefs.getString(_bangumiImageSourceKey) ?? 'direct';
+      final stored = prefs.getString(_bangumiImageSourceKey);
+      if (stored == 'bangumi_proxy' || stored == 'direct') {
+        _bangumiImageSourceCache = stored;
+      } else {
+        // 老值 / 没存 → 按 worker URL 推断默认
+        final proxy = prefs.getString(_tmdbProxyDomainKey) ?? '';
+        _bangumiImageSourceCache = proxy.isNotEmpty ? 'bangumi_proxy' : 'direct';
+      }
     }
   }
 

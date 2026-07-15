@@ -1,5 +1,9 @@
 // 通用图片地址处理工具
 //
+// v2.1.42 改: Bangumi 分支调 [UserDataService.buildBangumiImageUrl], 内部
+//   按 Bangumi 图片源是不是 'bangumi_proxy' + 配 worker URL, 是的话
+//   wrap 成 path-based worker URL (例: https://lain.bgm.tv/img/.../abc.jpg
+//   → https://tmdb-8d1.pages.dev/bgm-img/img/.../abc.jpg).
 // v2.1.41 改: TMDB 分支调 [UserDataService.buildTmdbImageUrl], 内部
 //   看 TMDB 数据源是不是 'tmdb_proxy' + 配 worker URL, 是的话 wrap
 //   成 path-based worker URL. 没配/没选 → 1:1 返原 URL.
@@ -98,13 +102,13 @@ Future<String> getImageUrl(
         return processed;
     }
   }
-  // v2.1.40: Bangumi 图片 URL 统一走 HTTPS, 不再 wrap 加速.
-  //   老 CF Worker 探测 / 30s 缓存全删 (cf_worker / ciao-cors 都没了).
+  // v2.1.42: Bangumi 图片 URL 调 [UserDataService.buildBangumiImageUrl],
+  //   内部按当前 Bangumi 图片源选择 + worker URL 配置决定是否走
+  //   path-based worker 加速 (例: https://lain.bgm.tv/img/.../abc.jpg →
+  //   https://tmdb-8d1.pages.dev/bgm-img/img/.../abc.jpg). 老 v2.1.40
+  //   直连逻辑保留 (没选 bangumi_proxy 或没配 worker URL 时 1:1 返).
   if (source == 'bangumi' && originalUrl.isNotEmpty) {
-    if (originalUrl.startsWith('//')) {
-      return 'https:$originalUrl';
-    }
-    return originalUrl.replaceFirst('http://', 'https://');
+    return UserDataService.buildBangumiImageUrl(originalUrl);
   }
   // v2.1.41: TMDB 图片 URL 调 [UserDataService.buildTmdbImageUrl], 内部
   //   按当前 TMDB 数据源选择 + worker URL 配置决定是否走 path-based
