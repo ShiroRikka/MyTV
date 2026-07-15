@@ -2,7 +2,9 @@
 
 > 一款基于 Flutter 的 LunaTV Android 客户端。
 
-主打开箱即用的多源聚合搜索 + 高质量本地播放,搭配 **[CORSAPI](https://github.com/djsevenx1/CORSAPI)** 配套 CF Worker 解决 Bangumi / 源加速 / m3u8 重写。
+主打开箱即用的多源聚合搜索 + 高质量本地播放,搭配:
+- **[CORSAPI](https://github.com/djsevenx1/CORSAPI)** — CF Worker,负责 m3u8 加速 / .ts 重写 / 源测速
+- **[djsevenx1/tmdb-proxy](https://github.com/djsevenx1/tmdb-proxy)** — CF Worker,负责 TMDB API / 图片 / Bangumi 数据 / 图片 加速 (v2.1.41+ 用户自部署)
 
 ## 平台支持
 
@@ -15,7 +17,7 @@
 
 ### 内容浏览
 - **首页轮播 + 多分区** — 继续播放、热门电影、热门剧集、新番放送(Bangumi)、热门综艺、热门短剧
-- **TMDB 海报墙 (可选, v2.0.38)** — 配 TMDB API Key 后,首页「热门电影」「热门剧集」section 自动替换为 TMDB 横滚海报墙 (w185 海报 + 标题 + 评分);详情页头部从 110x150 小海报升级为 16:9 大背景 + 简介。**不填 key = 行为完全不变**, 跟「优选 IP」字段一个 UX
+- **TMDB 海报墙 (v2.0.38+, v2.1.41+ 走 tmdb-proxy)** — 配 TMDB API Key 后,首页「热门电影」「热门剧集」section 自动替换为 TMDB 横滚海报墙 (w185 海报 + 标题 + 评分);详情页头部从 110x150 小海报升级为 16:9 大背景 + 简介。**v2.1.41+**: 配了「TMDB / Bangumi 代理 URL」(自部署 [djsevenx1/tmdb-proxy](https://github.com/djsevenx1/tmdb-proxy)) 后,TMDB API + 图片走 worker 加速,解决国内 GFW。**不填 key = 行为完全不变**, 跟「优选 IP」字段一个 UX
 - **分类筛选** — 电视剧 / 电影 / 综艺 / 动漫 多种筛选维度(类型、地区、年代、平台、排序)
 - **短剧专区** — 独立分类聚合,横滑切换
 - **搜索** — 全局搜索,跨源聚合结果
@@ -48,25 +50,37 @@
 
 ### 高级特性
 
-#### CF Worker 加速 + Bangumi 代理
+#### CF Worker 加速 (双 worker 架构)
 
-搭配配套的 [CORSAPI](https://github.com/djsevenx1/CORSAPI) Cloudflare Worker,菜单填入 worker 域名即可启用:
+LunaTV-Mobile 用 **2 个独立 CF Worker** 解决不同问题,互不干扰:
 
-| 模块 | 走法 |
-|---|---|
-| **CF Worker 加速(源测速 / m3u8)** | 走 worker `/m3u8?url=` 端点,自动重写 .ts 链接 |
-| **Bangumi 数据(api.bgm.tv/calendar + /v0/subjects/...)** | worker → ciao-cors → 直连, 多级 fallback |
-| **Bangumi 图片(lain.bgm.tv)** | worker, 自动补 `App/Version (URL)` UA + `Referer: https://bgm.tv/` |
-| **TMDB API (v2.0.36)** | 走 worker 通用 `/?url=` 端点, `https://api.themoviedb.org/3/...?api_key=xxx` 整段作为 query 透传给上游;**1 天本地内存缓存** (重复打开几乎零网络) |
+| Worker | 仓库 | 负责 | 触发条件 |
+|---|---|---|---|
+| **CORSAPI** | [djsevenx1/CORSAPI](https://github.com/djsevenx1/CORSAPI) | m3u8 加速 / .ts 重写 / 源测速 / 视频流代理 | 设「CF Worker 加速源域名」(如 `xxx.workers.dev`),开关打开 |
+| **tmdb-proxy** (v2.1.41+) | [djsevenx1/tmdb-proxy](https://github.com/djsevenx1/tmdb-proxy) | TMDB API / TMDB 图片 / Bangumi 数据 / Bangumi 图片 | 设「TMDB / Bangumi 代理 URL」(如 `https://tmdb-8d1.pages.dev`),TMDB + Bangumi 3 个数据源默认自动选 Worker 加速 |
 
-> **关键**:CF Worker 域名配了,即使「CF Worker 加速」开关关着,Bangumi 代理也会生效(只认域名不认开关,符合预期)。
+**tmdb-proxy** 路由 (path-based,比老 `?url=` 套娃干净):
+- `/movie/{id}` `/tv/{id}` `/search/...` `/movie/{id}/images` 等 → `api.themoviedb.org/3/...`
+- `/image/{size}/{file}` → `image.tmdb.org/t/p/{size}/{file}` (1 天 CDN cache)
+- `/bangumi/{path}` → `api.bgm.tv/{path}` (Authorization 透传)
+- `/bgm-img/{path}` → `lain.bgm.tv/{path}` (自动加 `Referer: https://bgm.tv/` 绕过反盗链)
+
+`api_key` 从 App 「TMDB API Key」读,worker 透传,不用去 CF Dashboard 配 env。
+
+> **v2.1.40 变更**: 删了 ciao-cors 公共代理 fallback + CORSAPI 套娃的 Bangumi 加速。原因: ciao-cors 对 `lain.bgm.tv` 反盗链图片 403 已知,失败率太高,留公共代理反而坑人。v2.1.41+ 改走自部署 tmdb-proxy,完全可控。
 
 #### 图片源
-- **豆瓣图片源**:`official_cdn` / `cdn_tencent` / `cdn_aliyun` / `direct`
-- **Bangumi 数据源**:`直连` / `Cors Proxy By Zwei` / `CF Worker 加速`
-- **Bangumi 图片源**:`直连` / `Cors Proxy By Zwei` / `CF Worker 加速`
-- Bangumi 强制补 `LunaTV-Mobile/1.0 (https://github.com/...)` UA(api.bgm.tv v0 API 严格校验)
-- 豆瓣小图自动升级为 `l_ratio_poster` 大图(首页轮播等大图场景)
+
+| 数据源 | 选项 | 说明 |
+|---|---|---|
+| **豆瓣数据源** | `直连` / 4 种 CDN | v0.77 起默认,4 种 CDN 切换 |
+| **豆瓣图片源** | `直连` / 4 种 CDN | 登录豆瓣后小图自动升级为 `l_ratio_poster` 大图 |
+| **TMDB 数据源** (v2.1.41+) | `TMDB Worker 加速` / `直连` | 2 选 1,没「已关闭」(用户反馈),默认按 worker URL 配没配决定 |
+| **Bangumi 数据源** (v2.1.42+) | `Bangumi Worker 加速` / `直连` | v2.1.40 整个删, v2.1.42 加回,2 选 1,跟数据源 / 图片源共享 worker URL |
+| **Bangumi 图片源** (v2.1.42+) | `Bangumi Worker 加速` / `直连` | 同上,数据 / 图片是 2 个独立开关 |
+
+- Bangumi 强制补 `LunaTV-Mobile/1.0 (https://github.com/...)` UA (api.bgm.tv v0 API 严格校验)
+- 豆瓣小图自动升级为 `l_ratio_poster` 大图 (首页轮播等大图场景)
 - 图片内存缓存按 `devicePixelRatio × 显示尺寸` 精确解码,避免模糊与内存浪费
 
 #### 软件更新
@@ -127,14 +141,16 @@ GitHub Actions 在 `main` 分支 push + 打 tag `v*.*.*` 时自动构建。
 | 本地搜索 | 启用本地缓存加速搜索 |
 | 豆瓣数据源 | `直连` / 4 种 CDN 切换 |
 | 豆瓣图片源 | `直连` / 4 种 CDN 切换 |
-| Bangumi 数据源 | `直连` / `Cors Proxy By Zwei` / `CF Worker 加速` |
-| Bangumi 图片源 | `直连` / `Cors Proxy By Zwei` / `CF Worker 加速` |
+| **TMDB 数据源** (v2.1.41+) | `TMDB Worker 加速` / `直连`,2 选 1 |
+| **Bangumi 数据源** (v2.1.42+) | `Bangumi Worker 加速` / `直连`,2 选 1 |
+| **Bangumi 图片源** (v2.1.42+) | `Bangumi Worker 加速` / `直连`,2 选 1,跟数据源独立 |
+| **TMDB / Bangumi 代理 URL** (v2.1.41+, 改名 v2.1.42) | 自部署 [djsevenx1/tmdb-proxy](https://github.com/djsevenx1/tmdb-proxy) 拿到的 https://xxx.pages.dev,空 = 全部走直连. 共用同一个 URL,TMDB 和 Bangumi 都用它 |
 | M3U8 代理 URL | 留空则不用,填了则 m3u8 走 worker |
-| **CF Worker 加速** | 开关,只控制源测速 / m3u8 |
-| **CF Worker 加速源域名** | worker 域名 (如 `xxx.workers.dev`),配了之后 Bangumi 代理 + TMDB API 代理也自动启用(不受上面开关影响) |
+| **CF Worker 加速** | 开关,只控制源测速 / m3u8 (走 CORSAPI) |
+| **CF Worker 加速源域名** | CORSAPI worker 域名 (如 `xxx.workers.dev`),配了之后视频 / m3u8 走 worker |
 | **优选 IP (可选)** | 填 IPv4 (静态) 或优选域名 (如 `cf.877774.xyz`,启动 + 5min 自动重新解析);留空 = 用系统 DNS |
 | **视频代理加速** | 开关,打开后 libmpv 走本地代理 → 优选 IP → CF edge (v2.0.34 加回来, v2.0.39 真正生效) |
-| **TMDB API Key (可选, v2.0.35)** | 填了自动启用首页 TMDB 海报墙 + 详情页 TMDB 大背景, 走 CORSAPI worker 加速;**留空 = 首页 / 详情页保持原 Douban 海报, 行为完全不变** (跟「优选 IP」一个 UX 思路, 字段本身就是开关, 不另加 toggle) |
+| **TMDB API Key (可选, v2.0.35, v2.1.41+ 配合 tmdb-proxy)** | 填了自动启用首页 TMDB 海报墙 + 详情页 TMDB 大背景. v2.1.41+: 配上「TMDB / Bangumi 代理 URL」后,worker 自动用这个 key 调 TMDB,不用去 CF Dashboard 配 env. **留空 = 首页 / 详情页保持原 Douban 海报, 行为完全不变** |
 
 ## 贡献
 
@@ -151,10 +167,14 @@ GitHub Actions 在 `main` 分支 push + 打 tag `v*.*.*` 时自动构建。
 
 - [LunaTV](https://github.com/MoonTechLab/LunaTV) — 原始 Web 项目
 - [Selene](https://github.com/MoonTechLab/Selene) — Flutter 移动端/桌面端源起项目
-- [CORSAPI](https://github.com/djsevenx1/CORSAPI) — 配套 CF Worker 后端,处理 Bangumi 代理 / m3u8 重写
+- [CORSAPI](https://github.com/djsevenx1/CORSAPI) — 配套 CF Worker 后端,处理 m3u8 加速 / .ts 重写 / 源测速 / 视频流代理
+- [djsevenx1/tmdb-proxy](https://github.com/djsevenx1/tmdb-proxy) — 配套 CF Worker 后端,处理 TMDB API / 图片 + Bangumi 数据 / 图片 加速 (v2.1.41+, fork 自 [HuntzzZ/tmdb-proxy](https://github.com/HuntzzZ/tmdb-proxy))
+- [HuntzzZ/tmdb-proxy](https://github.com/HuntzzZ/tmdb-proxy) — tmdb-proxy 上游项目
 - [media_kit](https://github.com/media-kit/media-kit) — Flutter 媒体播放
 - [dlna_dart](https://github.com/dlna-dart/dlna_dart) — DLNA 投屏
 - [cached_network_image](https://github.com/Baseflow/flutter_cached_network_image) — 网络图片缓存
 - [Bangumi](https://bangumi.tv/) — 番剧数据源
+- [TMDB](https://www.themoviedb.org/) — 影视元数据源
 - [豆瓣](https://movie.douban.com/) — 影评与海报源
-- [ciao-cors](https://ciao-cors.is-an.org/) — 公共 CORS 代理,Bangumi 数据 fallback
+
+> **v2.1.40 变更**: 删了 ciao-cors 公共代理依赖。`ciao-cors.is-an.org` 对 `lain.bgm.tv` 反盗链图片 403 已知,留公共代理失败率太高。TMDB / Bangumi 加速改走用户自部署的 tmdb-proxy,完全可控。
