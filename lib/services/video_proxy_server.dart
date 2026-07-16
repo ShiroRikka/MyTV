@@ -76,6 +76,7 @@ class VideoProxyStatus {
   int totalFetchErrors = 0;           // 累计 fetch 错误次数
   int totalM3u8Hits = 0;              // 累计 m3u8 代理次数
   int totalM3u8AdStripped = 0;        // 累计 ad 段删除数
+  int totalFetchedBytes = 0;          // v2.2.0: 累计代理下载字节 (player 算实时下载速度用)
 
   /// v2.1.40: 触发 tryStart 决策时记一笔
   void recordTryStart({
@@ -114,6 +115,9 @@ class VideoProxyStatus {
       totalFetchErrors++;
     }
     if (isM3u8) totalM3u8Hits++;
+    if (bytes != null && bytes > 0) {
+      totalFetchedBytes += bytes;
+    }
   }
 }
 

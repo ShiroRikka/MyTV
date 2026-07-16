@@ -1,7 +1,7 @@
 name: luna_tv
 description: "LunaTV-inspired Flutter client"
 publish_to: 'none'
-version: 2.1.53+50
+version: 2.2.0+51
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -29,9 +29,24 @@ dependencies:
   intl: ^0.20.2
   dio: ^5.7.0
   dlna_dart: ^0.0.5
-  media_kit: ^1.2.6
-  media_kit_video: 1.2.5
-  media_kit_libs_video: 1.0.7
+  # v2.2.0: 卸 libmpv (media_kit) 改 ExoPlayer (AndroidX Media3).
+  #   走官方 video_player 包 (Flutter 团队维护, Android 端底层是 Media3
+  #   ExoPlayer 1.4.x, 跟 build.gradle 里的 media3-exoplayer 1.4.1 是
+  #   同一份). media3 1.4 已经是 AndroidX 标准, 不再需要 libmpv 的 .so,
+  #   包体积 -30MB.
+  #   - 视频代理 URL (127.0.0.1:PORT/m3u8?url=...) 跟以前一样用,
+  #     libmpv 走的就是这个 URL, ExoPlayer 也认 http://
+  #   - 带宽流继续走 1s 轮询代理服务 (VideoProxyStatus 已有), 不依赖
+  #     ExoPlayer Listener.onBandwidthSample (Dart 端 video_player 不暴露)
+  #   - 默认硬解 (Media3 默认就是硬解 + codec 自适应, 不需要手动 hwdec=)
+  #   只支持 Android+iOS, macOS/web 跟以前一样不编
+  # 注: 锁 ^2.10.1 而非 2.11.x, 因为 2.11.0+ 要求 Dart SDK >=3.10.0,
+  #   CI 用的 Flutter 3.32.5 自带 Dart 3.8.1, 解不出. 升 Flutter 到 3.44.6
+  #   也行 (pub 推荐), 但风险更大 (3.32.5 → 3.44.6 API 可能 break,
+  #   编译 + dart API 兼容性都要重测). 降 video_player 风险最小:
+  #   2.10.1 跟 2.11.x API 几乎一致, ExoPlayer 2.x 老一点但 build.gradle
+  #   显式列 androidx.media3 1.4.1 会覆盖 transitive, 实际生效还是 1.4.1.
+  video_player: ^2.10.1
   screen_brightness: 0.2.2+1
   volume_controller: 2.0.8
   # macos_window_utils: ^1.0.4
@@ -40,8 +55,7 @@ dependencies:
   lucide_icons_flutter: ^3.1.14+1
   # 编码
   gbk_codec: ^0.4.0
-  # FFI (libmpv 调 mpv_set_property_string 设 http-proxy, media_kit 1.2.6 Player 类没这个方法)
-  ffi: ^2.1.3
+  # v2.2.0: 删了 dart:ffi (libmpv FFI 绑定 MpvFFI 没了, ExoPlayer 是纯原生 AndroidX)
 
   # gal: ^2.0.1
   # app_settings: ^4.1.1

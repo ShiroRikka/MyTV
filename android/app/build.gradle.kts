@@ -73,4 +73,17 @@ flutter {
 //   - 不影响视频 m3u8 播放 (libmpv C 库, 完全独立)
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // v2.2.0: ExoPlayer (AndroidX Media3) 原生依赖 — Dart 端走
+    //   video_player ^2.11.1, 内部依赖 androidx.media3 1.4.x. 显式
+    //   列在这里以确保 transitively resolve 到的版本跟代码里硬编码的
+    //   _LAST_KNOWN_GOOD 1.4.1 一致, 避免某个传递依赖拉了别的 media3
+    //   版本导致 ABI 不兼容.
+    //   之前 libmpv 走的 .so, ~30MB; ExoPlayer 纯 Java, 减小包体积.
+    //   1.4.x 是稳定版, 跟 video_player 2.11.1 兼容.
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")      // HLS
+    implementation("androidx.media3:media3-exoplayer-dash:1.4.1")     // DASH
+    implementation("androidx.media3:media3-ui:1.4.1")                 // PlayerView
+    implementation("androidx.media3:media3-datasource-okhttp:1.4.1")  // OkHttp DataSource
+    implementation("androidx.media3:media3-common:1.4.1")
 }

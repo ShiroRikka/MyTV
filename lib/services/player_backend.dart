@@ -47,6 +47,8 @@ class MediaTrackInfo {
 abstract class PlayerBackend {
   // ── 状态 (同步读) ───────────────────────────────────────────
   bool get isPlaying;
+  bool get isBuffering;     // v2.2.0: 替代 media_kit 的 state.buffering
+  bool get isCompleted;     // v2.2.0: 替代 media_kit 的 state.completed
   Duration get position;
   Duration get duration;
   double get volume;     // 0.0-1.0
@@ -71,6 +73,9 @@ abstract class PlayerBackend {
   });
   Future<void> play();
   Future<void> pause();
+  /// v2.2.0: 替代 media_kit 的 Player.stop() — 停播放但保留 player 实例
+  ///   (下一集可以重新 open). 跟 dispose() 不同, dispose 会 release 整个 player.
+  Future<void> stop();
   Future<void> seek(Duration position);
   Future<void> setVolume(double volume); // 0.0-1.0
   Future<void> setSpeed(double speed);   // 0.25-4.0

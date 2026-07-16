@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:media_kit/media_kit.dart';
 import 'package:provider/provider.dart';
+// v2.2.0: 卸 media_kit (libmpv) 改 ExoPlayer (AndroidX Media3).
+//   MediaKit.ensureInitialized() 不再需要 — ExoPlayer 是 AndroidX Java 库,
+//   Android 进程启动时平台侧自动加载, Dart 端零额外动作.
 
 import 'package:luna_tv/screens/bilibili_screen.dart';
 import 'package:luna_tv/screens/douban_detail_screen.dart';
@@ -31,8 +33,10 @@ import 'package:luna_tv/services/user_data_service.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 初始化 media_kit（移动端播放器仍需）
-  MediaKit.ensureInitialized();
+  // v2.2.0: ExoPlayer (AndroidX Media3) 是 AndroidX Java 库, 不需要
+  //   Dart 端 ensureInitialized. 之前 media_kit 的 MediaKit.ensureInitialized()
+  //   是因为 libmpv .so 走 FFI 加载, 现在 ExoPlayer 走 platform channel, 启动
+  //   时 Android 进程自己加载 Media3 类, Dart 端零额外动作.
 
   // v2.1.22: 启动时加载日记配置 (容量/退出清空/持久化) + 可选加载历史日记.
   // 必须在 add() 被任何地方调之前 load, 不然 SharedPreferences 里的配置

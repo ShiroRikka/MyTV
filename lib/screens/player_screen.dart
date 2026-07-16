@@ -4,11 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:media_kit/media_kit.dart';
+// v2.2.0: 卸 libmpv (media_kit) 改 ExoPlayer (AndroidX Media3).
+//   走官方 video_player 包, Dart 端只暴露 VideoPlayerController 抽象 API.
+//   实际渲染用 video_player 的 VideoPlayer widget (基于 Media3 PlayerView).
 
-import 'package:media_kit_video/media_kit_video.dart';
 import 'package:volume_controller/volume_controller.dart';
 import 'package:screen_brightness/screen_brightness.dart';
+import 'package:video_player/video_player.dart';
 import 'package:luna_tv/services/api_service.dart';
 import 'package:luna_tv/services/diary_service.dart';
 import 'package:luna_tv/services/douban_service.dart';
@@ -16,7 +18,8 @@ import 'package:luna_tv/services/page_cache_service.dart';
 import 'package:luna_tv/services/user_data_service.dart';
 import 'package:luna_tv/services/m3u8_service.dart';
 import 'package:luna_tv/services/video_proxy_server.dart';
-import 'package:luna_tv/services/mpv_ffi.dart';
+import 'package:luna_tv/services/player_backend.dart';
+import 'package:luna_tv/services/exo_player_backend.dart';
 import 'package:luna_tv/models/douban_movie.dart';
 import 'package:luna_tv/models/play_record.dart';
 import 'package:luna_tv/models/search_result.dart';
@@ -27,6 +30,7 @@ import 'package:luna_tv/services/luna_cache_manager.dart';
 import 'package:luna_tv/utils/image_url.dart';
 import 'package:luna_tv/widgets/douban_detail_header.dart';
 import 'package:luna_tv/widgets/dlna_device_dialog.dart';
+import 'package:luna_tv/widgets/exo_player_view.dart';
 import 'package:dlna_dart/dlna.dart';
 import 'package:luna_tv/services/tmdb_service.dart';
 import 'package:provider/provider.dart';
@@ -62,10 +66,12 @@ class _SourcePingItem {
 
 class _PlayerScreenState extends State<PlayerScreen>
     with WidgetsBindingObserver {
-  // 播放器
-  late final Player _player;
-  late final VideoController _controller;
-  // v2.0.16: 视频代理 (让 libmpv 走优选 IP)
+  // 播放器 — v2.2.0: 卸 libmpv 改 ExoPlayer (AndroidX Media3).
+  //   通过 PlayerBackend 抽象 (ExoPlayerBackend 实现) 操作, 不直接耦合
+  //   video_player. ExoPlayerBackend 内部持 VideoPlayerController, widget
+  //   层通过 rawController getter 拿到底层 controller 渲染 VideoPlayer.
+  ExoPlayerBackend? _player;
+  // v2.0.16: 视频代理 (让 ExoPlayer 走优选 IP)
   VideoProxyServer? _videoProxy;
   // v2.0.34: 顶部「加速状态」指示器用, 视频代理实际在跑时为 true
   bool _videoProxyActive = false;
@@ -138,7 +144,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   // 视频尺寸（用于判断横竖屏全屏）
   int _videoWidth = 0;
   int _videoHeight = 0;
-  StreamSubscription<VideoParams>? _videoParamsSub;
+  // v2.2.0: 删 _videoParamsSub (libmpv streams.videoParams 替代)
+  //   video size 从 backend.width/height 读 (在 positionStream listener 里同步)
 
   // 跳过片头片尾
   int _skipIntroEnd = 0; // 片头结束时间（秒），0 表示不跳
@@ -217,21 +224,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   @override
   void initState() {
     super.initState();
-    _player = Player();
-    _controller = VideoController(_player);
-    // v2.0.96: 给 libmpv 配播放调优 (hwdec/cache/framedrop).
-    //   修复用户反馈「播放一有事卡住, 声音还有, 然后突然快速播放一段」:
-    //   Player() 默认无任何 mpv 配置 → 软解 + framedrop=vo → 复杂片段丢视频帧
-    //   保音频同步 → 音还在画面卡 → 解码追上后 burst = "快速播放一段".
-    //   调优内容见 MpvFFI.applyPlaybackTuning 注释. fire-and-forget, 失败静默
-    //   回退默认行为 (不影响播放, 只是没有调优效果).
-    unawaited(() async {
-      if (!MpvFFI.isAvailable) return;
-      try {
-        final handle = await _player.handle;
-        MpvFFI.applyPlaybackTuning(handle);
-      } catch (_) {}
-    }());
+    // v2.2.0: 卸 libmpv 改 ExoPlayer (AndroidX Media3).
+    //   ExoPlayerBackend.create 异步装配 video_player VideoPlayerController
+    //   (底层就是 Media3 ExoPlayer 1.4.x). 必须在 initState 里 await 才能
+    //   拿到底层 controller. 之前的 MpvFFI.applyPlaybackTuning 不需要
+    //   (Media3 默认就是硬解 + 自适应 buffer, 不需要手动配).
+    unawaited(_initPlayerAsync());
     // v2.0.51: 选集 PageView 初始化
     _episodesPageController = PageController();
     _pageControllerNotifier.value = _episodesPageController;
@@ -267,74 +265,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     _loadDoubanSummary();
     // v2.1.17: 拉 TMDB 演员 (跟 _loadTmdbBackdrop 同样静默 fallback)
     _loadTmdbCast();
-    // 监听视频参数，获取宽高用于全屏方向判断
-    _videoParamsSub = _player.streams.videoParams.listen((params) {
-      final w = params.dw ?? params.w ?? 0;
-      final h = params.dh ?? params.h ?? 0;
-      if (w > 0 && h > 0 && (w != _videoWidth || h != _videoHeight)) {
-        setState(() {
-          _videoWidth = w;
-          _videoHeight = h;
-        });
-      }
-    });
-    // 监听播放位置和总时长，用于跳过片头片尾 / 自动播下一集
-    _positionSub = _player.streams.position.listen((pos) {
-      if (!mounted) return;
-      if (_scrubbingValue == null) {
-        _currentPosition = pos;
-        // 记"上一次非 0 位置" — 用于进度同步兜底 (见 _onPlayerPeriodicSave).
-        // 任何非 0 position 都更新, 包括用户拖进度条. pos=0 不更新
-        // (m3u8 reload 期间保持 reload 前的位置).
-        if (pos > Duration.zero) {
-          _lastKnownPosition = pos;
-        }
-        // v1.0.52: 实时刷新时间文字 + 进度条
-        // 之前只更新 _currentPosition 但不 setState, 底部栏的
-        // "${pos} / ${dur}" 时间文字 + 进度条 thumb 永远停在打开时那一帧,
-        // 只有 _updateSkipButtonVisibility 命中 visibility 变化时才会 setState
-        // (而且只切 skip 按钮, 不会重算时间文字)
-        if (_isControlsVisible) {
-          setState(() {});
-        }
-        _updateSkipButtonVisibility();
-        // 自动播下一集: 距离结尾 < 1.5s 且还没自动切过
-        _maybeAutoPlayNext();
-      }
-    });
-    _durationSub = _player.streams.duration.listen((dur) {
-      if (!mounted) return;
-      _currentDuration = dur;
-      // v2.1.13: 删掉广告自动跳过逻辑 (duration 跳变检测 + _skipAd).
-      //   用户反馈反复卡同一广告位 / seek 错乱, 决定移除 runtime 兜底,
-      //   改靠 m3u8 重写层 (视频代理开关) 物理删广告段. 这里只保留
-      //   _currentDuration 更新, 供 _updateSkipButtonVisibility 用.
-    });
-    // streams.completed 兜底: 部分源 position 不走完会直接发 completed
-    _player.streams.completed.listen((_) {
-      _autoPlayNextEpisode();
-    });
-    // 监听播放/暂停状态,用于控制栏图标
-    _player.streams.playing.listen((playing) {
-      if (!mounted) return;
-      setState(() {
-        _isPlaying = playing;
-      });
-      if (playing) {
-        _scheduleHideControls();
-      } else {
-        // 暂停时保持控制栏显示
-        _showControls();
-      }
-    });
-    // v2.0.58: 缓冲状态转换日志, 分析 "优选 IP 4s 卡顿" — 卡顿时会反复
-    //   buffering true/false, 跟时长变化日志配合能看出是哪一帧挂的.
-    _player.streams.buffering.listen((b) {
-      if (!mounted) return;
-    });
-    // v2.0.58: 播放错误日志 (mpv 报错时立刻记到日记, 用户能看到真因)
-    _player.streams.error.listen((e) {
-    });
     // 加载跳过片头片尾配置
     _loadSkipConfig();
     // 加载倍速持久化
@@ -345,10 +275,76 @@ class _PlayerScreenState extends State<PlayerScreen>
     _loadSources();
   }
 
+  /// v2.2.0: 异步初始化 ExoPlayer + 订阅所有 stream.
+  ///   initState 同步段不能 await, 包到 unawaited 里跑.
+  ///   必须等 backend 创建完才能订阅流 (否则 NPE).
+  Future<void> _initPlayerAsync() async {
+    try {
+      _player = await ExoPlayerBackend.create();
+    } catch (e, st) {
+      DiaryService.add('[ExoPlayer] init FAIL: $e\n$st');
+      return;
+    }
+    if (!mounted) return;
+
+    // v2.2.0: 订阅 backend 的所有 stream. libmpv 时代是 _player!.XStream,
+    //   现在统一走 _player!.XStream. 注意所有 stream listener 都要判
+    //   !mounted 提前 return, 防止 setState 在 widget 销毁后触发.
+    _positionSub = _player!.positionStream.listen((pos) {
+      if (!mounted) return;
+      if (_scrubbingValue == null) {
+        _currentPosition = pos;
+        if (pos > Duration.zero) {
+          _lastKnownPosition = pos;
+        }
+        if (_isControlsVisible) {
+          setState(() {});
+        }
+        // 视频宽高同步 (替代 libmpv 的 videoParams)
+        final w = _player!.width;
+        final h = _player!.height;
+        if (w > 0 && h > 0 && (w != _videoWidth || h != _videoHeight)) {
+          setState(() {
+            _videoWidth = w;
+            _videoHeight = h;
+          });
+        }
+        _updateSkipButtonVisibility();
+        _maybeAutoPlayNext();
+      }
+    });
+    _durationSub = _player!.durationStream.listen((dur) {
+      if (!mounted) return;
+      _currentDuration = dur;
+    });
+    // v2.2.0: completedStream 替代 streams.completed
+    _player!.completedStream.listen((_) {
+      _autoPlayNextEpisode();
+    });
+    _player!.playingStream.listen((playing) {
+      if (!mounted) return;
+      setState(() {
+        _isPlaying = playing;
+      });
+      if (playing) {
+        _scheduleHideControls();
+      } else {
+        _showControls();
+      }
+    });
+    // v2.2.0: bufferingStream — Media3 缓冲状态变化, 给 UI 决定是否显示 spinner
+    _player!.bufferingStream.listen((b) {
+      if (!mounted) return;
+      setState(() {
+        _isBuffering = b;
+      });
+    });
+  }
+
   @override
   void dispose() {
     // v1.0.50: 退出时最后一次保存, 改成 await 真的完成再 dispose _player
-    // 之前是 fire-and-forget, _player.stop() 同步把 state.position 重置成 0,
+    // 之前是 fire-and-forget, _player!.stop() 同步把 state.position 重置成 0,
     // saveCurrentProgress 那个 fire-and-forget 没机会拿到正确 position 就被 super.dispose 切断
     // (虽然 _currentPosition 兜底有值, 但 PageCacheService().savePlayRecord 走网络
     //  没 await 完进程被上滑/杀就丢, playTime 没写盘)
@@ -358,7 +354,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     _progressTimer?.cancel();
     _hideControlsTimer?.cancel();
     _seekHintTimer?.cancel();
-    _videoParamsSub?.cancel();
     _positionSub?.cancel();
     _durationSub?.cancel();
     // v2.0.51: 释放选集 PageView 控制器
@@ -409,11 +404,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         } catch (_) {}
       }
     }
+    // v2.2.0: backend.dispose() 内部 release 整个 player (ExoPlayer.release).
+    //   跟 libmpv 时代的 _player!.stop() + _player!.dispose() 等价, 一次到位.
     try {
-      await _player.stop();
-    } catch (_) {}
-    try {
-      await _player.dispose();
+      await _player?.dispose();
     } catch (_) {}
   }
 
@@ -570,7 +564,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // v1.0.58: 自动模式才自动 seek, 手动模式显示按钮让用户点
     if (_scrubbingValue == null) {
       if (_autoSkipIntro && shouldShowIntro) {
-        _player.seek(Duration(seconds: _skipIntroEnd));
+        _player!.seek(Duration(seconds: _skipIntroEnd));
         // v1.0.58: 立即隐藏按钮, 避免按钮在 seek 完前闪烁
         if (_showSkipIntro) {
           setState(() { _showSkipIntro = false; });
@@ -622,7 +616,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// 手动跳过片头
   void _skipIntro() {
     if (_skipIntroEnd > 0) {
-      _player.seek(Duration(seconds: _skipIntroEnd));
+      _player!.seek(Duration(seconds: _skipIntroEnd));
     }
   }
 
@@ -982,15 +976,15 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// 切换播放/暂停
   void _togglePlayPause() {
     if (_isPlaying) {
-      _player.pause();
+      _player!.pause();
     } else {
-      _player.play();
+      _player!.play();
     }
   }
 
   /// 设置倍速
   void _setPlaybackRate(double rate) {
-    _player.setRate(rate);
+    _player!.setSpeed(rate);
     setState(() => _playbackRate = rate);
     SharedPreferences.getInstance().then((prefs) {
       prefs.setDouble('player_playback_rate', rate);
@@ -1004,7 +998,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       final rate = prefs.getDouble('player_playback_rate') ?? 1.0;
       if (mounted) {
         setState(() => _playbackRate = rate);
-        _player.setRate(rate);
+        _player!.setSpeed(rate);
       }
     } catch (_) {}
   }
@@ -1146,7 +1140,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final newMs = (_currentPosition.inMilliseconds + deltaMs)
         .clamp(0, _currentDuration.inMilliseconds)
         .toInt();
-    _player.seek(Duration(milliseconds: newMs));
+    _player!.seek(Duration(milliseconds: newMs));
     final isForward = deltaMs >= 0;
     setState(() {
       _seekHintText = isForward ? '快进${(deltaMs / 1000).round()}s' : '快退${(-deltaMs / 1000).round()}s';
@@ -1178,7 +1172,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final dur = _currentDuration.inMilliseconds.toDouble();
     if (dur > 0) {
       final pos = (value.clamp(0.0, 1.0)) * dur;
-      _player.seek(Duration(milliseconds: pos.toInt()));
+      _player!.seek(Duration(milliseconds: pos.toInt()));
     }
     setState(() {
       _scrubbingValue = null;
@@ -1218,23 +1212,24 @@ class _PlayerScreenState extends State<PlayerScreen>
     int playTime = 0;
     int totalTime = 0;
     try {
-      final state = _player.state;
-      Duration pos = state.position;
-      // v1.0.49 兜底: state.position 在 stop/pause 后可能回 0 或 stream 还没回传,
+      // v2.2.0: backend 直接提供 position/duration/isPlaying/isCompleted
+      //   不再有 _player!.state.X 聚合字段.
+      Duration pos = _player!.position;
+      // v1.0.49 兜底: position 在 stop/pause 后可能回 0 或 stream 还没回传,
       // 用本地 _currentPosition (stream 一直在跟) 兜底, 保证退出前最后一帧
       // 还有效的 position 能写盘
       if (pos < _currentPosition) pos = _currentPosition;
-      // v1.0.75 兜底: libmpv m3u8 reload 期间, state.completed=true 且
-      // state.position=0, _currentPosition 也被 stream 发射 0 重置, 三者都是 0.
+      // v1.0.75 兜底: reload 期间, isCompleted=true 且
+      // position=0, _currentPosition 也被 stream 发射 0 重置, 三者都是 0.
       // 此时用 _lastKnownPosition 拿"上次的非 0 position", 避免 10s 定时器存 0
       // 覆盖云端进度. _lastKnownPosition 只在 streams.position 收到 pos > 0 时
-      // 才更新, reload 完 libmpv 重新播时 pos 会从 0 涨, 兜底期间它还停在原值.
+      // 才更新, reload 完重新播时 pos 会从 0 涨, 兜底期间它还停在原值.
       if (pos < _lastKnownPosition) pos = _lastKnownPosition;
 
       // 正在播放 或 有进度且未播完 (用 !completed 表示)
-      if (state.playing || (pos > Duration.zero && !state.completed)) {
+      if (_player!.isPlaying || (pos > Duration.zero && !_player!.isCompleted)) {
         playTime = pos.inMilliseconds;
-        totalTime = state.duration.inMilliseconds;
+        totalTime = _player!.duration.inMilliseconds;
       }
     } catch (_) {}
 
@@ -1305,10 +1300,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   }) async {
     if (_currentPosition > Duration.zero) return;
     // player 都没在播, 等也是白等, 直接 return
-    if (!_player.state.playing) return;
+    if (!_player!.isPlaying) return;
     final completer = Completer<void>();
     late StreamSubscription<Duration> sub;
-    sub = _player.streams.position.listen((pos) {
+    sub = _player!.positionStream.listen((pos) {
       if (pos > Duration.zero && !completer.isCompleted) {
         completer.complete();
       }
@@ -1902,125 +1897,44 @@ class _PlayerScreenState extends State<PlayerScreen>
     _startSpeedSampling();
   }
 
-  /// v2.0.88: 1Hz 采样 libmpv 各种 property, 算实时下载速度
+  /// v2.2.0: 1Hz 采样代理服务的 fetchedBytes, 算实时下载速度.
   ///
-  /// 演化 (4 轮迭代):
-  ///   v2.0.34: 用 getPropertyString 读 demuxer-bytes → 永远 null (libmpv 文档
-  ///            明说对 Number 类型返 NULL) → 永远 0 B/s
-  ///   v2.0.86: 改用 getPropertyI64 走专用 API → 还是 0 B/s (装上还是 0)
-  ///   v2.0.87: 改用 mpv_get_property 通用 API (走 void* union) + 加诊断 tile
-  ///            → 用户装上打开诊断 tile, 看到 `mpv_get_property(input-bitrate, DOUBLE)
-  ///            返 rc=-8` (PROPERTY_UNAVAILABLE). 说明 libmpv 内部没在播, 加上
-  ///            input-bitrate 在 libmpv 0.36 是 int64 不是 double (v2.0.86 写错 format)
-  ///   v2.0.88: 扩 fallback 链 + 加播放状态文本 fallback
+  /// 旧 libmpv 时代读 mpv property (demuxer-bytes / input-bitrate 等) 算
+  ///   实时下载速度, ExoPlayer (Media3) Dart 端 video_player 不暴露
+  ///   Listener.onBandwidthSample. 但 VideoProxyServer.fetchedBytes
+  ///   一直记总下载字节, 直接从这个差值算 delta 即可 — 比 libmpv
+  ///   那条 fallback 链 (5 个 property 兜底) 还准.
   ///
-  /// 修法 (v2.0.88):
-  ///   1. demuxer-bytes 改成走通用 getPropertyAny (INT64 format), 跟 v2.0.87 一致
-  ///   2. 加 demuxer-cache-bytes fallback (跟 demuxer-bytes 类似但走 cache layer)
-  ///   3. input-bitrate 改用 INT64 format (v2.0.86 写错用 DOUBLE, libmpv 实际是 int64)
-  ///   4. 加 video-bitrate + audio-bitrate + sub-bitrate (DOUBLE, bps) 兜底
-  ///   5. 加播放状态 fallback: idle-active / pause → 显示「缓冲中 / 暂停 / 未开播」
-  ///      文本状态, 不再永远 0 B/s 骗用户
-  ///
-  /// 字段类型映射 (libmpv 0.36 文档, 单位都是 **bits per second**):
-  ///   - demuxer-bytes: int64 (累计字节)
-  ///   - demuxer-cache-bytes: int64 (累计 cache 字节)
-  ///   - cache-size: int64 (累计 cache 字节, 同上但不同名)
-  ///   - input-bitrate: int64 (输入 bitrate, bps)
-  ///   - video-bitrate: double (bps)
-  ///   - audio-bitrate: double (bps)
-  ///   - sub-bitrate: double (bps)
-  ///   - idle-active: bool (player 是否闲置)
-  ///   - pause: bool (是否暂停)
+  /// 字段对照:
+  ///   - 旧 demuxer-bytes (int64)        → VideoProxyStatus.fetchedBytes (int)
+  ///   - 旧 input-bitrate (int64, bps)   → 算 delta (bytes / ms * 1000)
+  ///   - 旧 idle-active / pause          → 后端 isPlaying / isBuffering
   void _startSpeedSampling() {
     _speedSampleTimer?.cancel();
     _lastDemuxerBytes = 0;
     _lastSampleMs = 0;
     _downloadSpeedBps = 0;
-    _playbackStateText = ''; // v2.0.88: 文本状态 fallback
-    _speedSampleTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+    _playbackStateText = '';
+    _speedSampleTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      if (!MpvFFI.isAvailable) return;
       try {
-        final handle = await _player.handle;
-        if (handle == 0) return;
-
-        // 1. 主路径: 读累计下载字节 (demuxer-bytes)
-        //   v2.0.87 改用通用 mpv_get_property (INT64 format). 拿到后算 delta = bps.
-        int? cur = MpvFFI.getPropertyI64(handle, 'demuxer-bytes');
-        cur ??= MpvFFI.getPropertyI64(handle, 'demuxer-cache-bytes');
-        cur ??= MpvFFI.getPropertyI64(handle, 'cache-size');
-        if (cur != null) {
-          final now = DateTime.now().millisecondsSinceEpoch;
-          if (_lastSampleMs == 0 || cur < _lastDemuxerBytes) {
-            // 首次采样 / demuxer 重置 (切集), 只记基线, 不算速度
-            _lastDemuxerBytes = cur;
-            _lastSampleMs = now;
-            return;
-          }
-          final deltaBytes = cur - _lastDemuxerBytes;
-          final deltaMs = now - _lastSampleMs;
-          if (deltaMs <= 0) return;
-          final bps = deltaBytes * 1000.0 / deltaMs;
+        final cur = VideoProxyStatus.instance.totalFetchedBytes;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (_lastSampleMs == 0 || cur < _lastDemuxerBytes) {
           _lastDemuxerBytes = cur;
           _lastSampleMs = now;
-          if (mounted) {
-            setState(() {
-              _downloadSpeedBps = bps;
-              _playbackStateText = ''; // 有速度, 清掉文本
-            });
-          }
           return;
         }
-
-        // 2. v2.0.90 兜底: input-bitrate 瞬时码率 (int64, bps)
-        //   v2.0.88 错用 `* 1024 / 8` (按 kibit/s 算), 实际 libmpv 0.36 文档明说
-        //   input-bitrate 单位是 **bits per second (bps)**, 1024-based 是错的.
-        //   用户装 v2.0.89 后显示 414.51 MB/s (反推真实值 ≈ 3.4 Mbit/s, 1080p HLS 合理),
-        //   我 * 1024 / 8 多乘 1024 倍. 改 `/ 8` (bit → Byte).
-        final inputBps = MpvFFI.getPropertyI64(handle, 'input-bitrate');
-        if (inputBps != null && inputBps > 0 && mounted) {
-          // input-bitrate 是 bps (bits per second), 直接 / 8 = Bytes/s
-          final bps = inputBps / 8;
-          setState(() {
-            _downloadSpeedBps = bps.toDouble();
-            _playbackStateText = '';
-          });
-          return;
-        }
-
-        // 3. v2.0.90 兜底: video + audio + sub bitrate 加起来 (DOUBLE, bps)
-        //   同样修 v2.0.88 的 `* 1024 / 8` 错, 实际是 bps, 改 `/ 8`.
-        final v = MpvFFI.getPropertyDouble(handle, 'video-bitrate') ?? 0;
-        final a = MpvFFI.getPropertyDouble(handle, 'audio-bitrate') ?? 0;
-        final s = MpvFFI.getPropertyDouble(handle, 'sub-bitrate') ?? 0;
-        final totalBps = v + a + s;
-        if (totalBps > 0 && mounted) {
-          final bps = totalBps / 8; // bps (bits per second) → Bytes/s
+        final deltaBytes = cur - _lastDemuxerBytes;
+        final deltaMs = now - _lastSampleMs;
+        if (deltaMs <= 0) return;
+        final bps = deltaBytes * 1000.0 / deltaMs;
+        _lastDemuxerBytes = cur;
+        _lastSampleMs = now;
+        if (mounted) {
           setState(() {
             _downloadSpeedBps = bps;
-            _playbackStateText = '';
-          });
-          return;
-        }
-
-        // 4. v2.0.88 文本状态 fallback: 显示「缓冲中 / 暂停 / 未开播」, 不再永远 0 B/s 骗用户
-        final idle = MpvFFI.getPropertyAny(handle, 'idle-active', kMpvFormatBool);
-        final paused = MpvFFI.getPropertyAny(handle, 'pause', kMpvFormatBool);
-        String stateText = '';
-        if (paused == true) {
-          stateText = '已暂停';
-        } else if (idle == true) {
-          stateText = '未开播 / 缓冲中';
-        } else {
-          // player 在播但所有 property 都拿不到 (拿不到 demuxer-bytes 也拿不到 bitrate)
-          // 罕见情况, 显示「测量中...」让用户知道在采
-          stateText = '测量中...';
-        }
-        if (mounted && stateText != _playbackStateText) {
-          setState(() {
-            _playbackStateText = stateText;
-            _downloadSpeedBps = 0; // 文本状态时不算速度, 避免跳数
+            _playbackStateText = ''; // 有速度, 清掉文本
           });
         }
       } catch (_) {}
@@ -2177,7 +2091,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // v1.0.56: 必须在 setState 之前调! 之前是 setState 之后调,
     // setState 改了 _currentEpisodeIndex 成新集, _saveCurrentProgress
     // 内部 `index: _currentEpisodeIndex + 1` 算出的是**新集 index**,
-    // 但此时 _player.stop() 还没调, pos / _currentPosition / state.duration
+    // 但此时 _player!.stop() 还没调, pos / _currentPosition / state.duration
     // 都还是**旧集**的值 — 错配 (playTime=旧集, index=新集)
     //
     // 用户场景 (v1.0.54 之前 streams.completed 误触发):
@@ -2245,20 +2159,20 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   原 URL vs playUrl (buildProxiedUrl 之后) 能看出 CF Worker 是否介入;
     //   代理是否起能看出 .ts 段是否走优选 IP.
     try {
-      await _player.stop();
-      await _player.open(Media(playUrl));
+      await _player!.stop();
+      await _player!.open(playUrl);
       // 云记忆恢复
       //
       // v1.0.61 fix: v1.0.60 等了 position stream, 但根因是 player 在
       // `open()` 后没进入 playing 状态 (某些 libmpv / 网络场景下不 auto-play),
       // 停在 stopped. 在 stopped 状态下:
       //   1. position stream 不会回 (因为没在播)
-      //   2. _player.seek() 被 libmpv 静默丢, state.position 仍是 0
+      //   2. _player!.seek() 被 libmpv 静默丢, state.position 仍是 0
       //   3. v1.0.60 的 "250ms 后检查 position, 不对就重试" 也救不回来,
       //      因为 state.position 永远 0, 重试的 seek 同样被丢
       // 表现: 用户装 v1.0.60 后还是从 0 开始播
       // 修法:
-      //   1. 显式 _player.play() 强制 player 进入 playing 状态
+      //   1. 显式 _player!.play() 强制 player 进入 playing 状态
       //   2. 监听 streams.buffering, 等 buffering 完成 (从 true→false)
       //   3. 再 seek
       //   4. 用 streams.position 验证 (而不是 state.position, state 是
@@ -2266,13 +2180,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (resumeAt != null) {
         // 1. 显式 play 强制进入 playing 状态
         try {
-          await _player.play();
+          await _player!.play();
         } catch (_) {}
         // 2. 等 buffering 完成
         await _waitForBufferingComplete(timeout: const Duration(seconds: 5));
         // 3. seek
         try {
-          await _player.seek(resumeAt);
+          await _player!.seek(resumeAt);
         } catch (_) {}
         // 4. 验证: 用 position stream 检查 position 是否到 resumeAt 附近,
         // 250ms 内没到就重试一次
@@ -2280,7 +2194,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final ok = await _verifySeekByStream(resumeAt);
         if (!ok) {
           try {
-            await _player.seek(resumeAt);
+            await _player!.seek(resumeAt);
           } catch (_) {}
           // 再验证一次
           await Future.delayed(const Duration(milliseconds: 250));
@@ -2337,7 +2251,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }) async {
     final completer = Completer<void>();
     late StreamSubscription<Duration> sub;
-    sub = _player.streams.position.listen((_) {
+    sub = _player!.positionStream.listen((_) {
       if (!completer.isCompleted) {
         completer.complete();
       }
@@ -2365,13 +2279,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   }) async {
     // 先看一下当前 buffering 状态, 如果本来就是 false, 立即返回
     try {
-      if (!_player.state.buffering) {
+      if (!_player!.isBuffering) {
         return;
       }
     } catch (_) {}
     final completer = Completer<void>();
     late StreamSubscription<bool> sub;
-    sub = _player.streams.buffering.listen((isBuffering) {
+    sub = _player!.bufferingStream.listen((isBuffering) {
       if (!isBuffering && !completer.isCompleted) {
         completer.complete();
       }
@@ -2388,7 +2302,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// 用 position stream 验证 seek 是否生效
   ///
-  /// v1.0.61: \_player.state.position 是快照, libmpv 在某些场景下不会
+  /// v1.0.61: \_player!.position 是快照, libmpv 在某些场景下不会
   /// 及时更新 state, 但 streams.position 会在 buffer decode 完成后
   /// 立即回新位置. 用 stream 验证比用 state 可靠.
   ///
@@ -2401,7 +2315,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final completer = Completer<bool>();
     late StreamSubscription<Duration> sub;
     var hit = false;
-    sub = _player.streams.position.listen((pos) {
+    sub = _player!.positionStream.listen((pos) {
       if (!hit && pos >= resumeAt - const Duration(seconds: 1)) {
         hit = true;
         if (!completer.isCompleted) completer.complete(true);
@@ -2438,7 +2352,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               }
               // 从播放页返回详情页: 恢复竖屏, 暂停播放
               try {
-                await _player.stop();
+                await _player!.stop();
               } catch (_) {}
               await _onExitFullscreen();
               if (mounted) {
@@ -3750,7 +3664,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   // 还在后台继续播,detail 视图上还能听到声音
                   () async {
                     try {
-                      await _player.stop();
+                      await _player!.stop();
                     } catch (_) {}
                     if (!mounted) return;
                     await _onExitFullscreen();
@@ -3914,10 +3828,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _seekBySeconds(int seconds, String hint) {
     final newPos = _currentPosition + Duration(seconds: seconds);
     if (seconds < 0) {
-      _player.seek(newPos < Duration.zero ? Duration.zero : newPos);
+      _player!.seek(newPos < Duration.zero ? Duration.zero : newPos);
     } else {
       final max = _currentDuration;
-      _player.seek(newPos > max ? max : newPos);
+      _player!.seek(newPos > max ? max : newPos);
     }
     // 显示提示文字, 1秒后消失
     _seekHintTimer?.cancel();
@@ -4614,8 +4528,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   不能让 player UI 卡死.
     try {
       // 1. pause (如果正在播)
-      if (_player.state.playing) {
-        await _player.pause();
+      if (_player!.isPlaying) {
+        await _player!.pause();
         if (!mounted) return;
       }
       // 2. 退全屏
@@ -4642,7 +4556,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       // 4. showDialog
       if (!mounted) return;
-      final resumePos = _player.state.position;
+      final resumePos = _player!.position;
       await showDialog(
         context: context,
         builder: (dialogContext) => DLNADeviceDialog(
@@ -4675,7 +4589,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   ///   投屏成功时只 _isCasting 状态切换, 还在播放视图 (控件 cast_connected
   ///   图标). PlayerScreen 投屏后直接停本地 player + 切回 detail 视图,
   ///   顶部栏显示「已投屏到 XXX」+ cast_connected 绿色按钮 + 「停止投屏」
-  ///   选项. 用户可以切回本地播放 (调 device.stop() + 重启 _player.open()).
+  ///   选项. 用户可以切回本地播放 (调 device.stop() + 重启 _player!.open()).
   Future<void> _onDLNACastStarted(dynamic device) async {
     try {
       DiaryService.add(
@@ -4686,7 +4600,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       });
       // 停本地 player (TV 已经在播, 避免双声道 / 浪费流量)
       try {
-        await _player.stop();
+        await _player!.stop();
       } catch (e) {
         DiaryService.add('[DLNA] stop local player err: $e');
       }
@@ -4732,7 +4646,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final playUrl = _currentPlayUrl;
     if (playUrl.isNotEmpty && mounted) {
       try {
-        await _player.open(Media(playUrl));
+        await _player!.open(playUrl);
         DiaryService.add(
             '[DLNA] stop cast: resume local play, url=$playUrl');
       } catch (e) {
@@ -5068,12 +4982,11 @@ class _PlayerScreenState extends State<PlayerScreen>
                 child: Stack(
                   alignment: Alignment.center,
                   children: [
-                    Video(
-                      controller: _controller,
-                      controls: NoVideoControls,
-                      onEnterFullscreen: _onEnterFullscreen,
-                      onExitFullscreen: _onExitFullscreen,
-                    ),
+                    // v2.2.0: 卸 libmpv Video() 改 ExoPlayerView.
+                    //   内部用 video_player.VideoPlayer 渲染 (Media3 PlayerView).
+                    //   UI 控件 (LunaTV 自定义底栏/顶栏/手势) 全部在外层
+                    //   Stack 上, 这里只是个视频画面的薄壳.
+                    ExoPlayerView(backend: _player!),
                     if (_isBuffering)
                       const SizedBox(
                         width: 36,
