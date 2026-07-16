@@ -734,21 +734,114 @@ class UserDataService {
   /// - 普通链接 →  `https://<worker>/?url=<encoded>`
   ///
   /// [forceM3u8] 强制按 m3u8 端点处理（即使链接不一定是 .m3u8 后缀，比如 master playlist 无后缀）。
+  ///
+  /// v2.1.43.2 改: 加详细 DiaryService 日记, 跟 v2.1.43 Bangumi/TMDB 加速
+  ///   平行. 视频播放是热路径 (m3u8 解析会调几十次 — 每个 segment URL 都要
+  ///   wrap), 用一次性 hint flag + m3u8-per-call 跳过避免日记爆:
+  ///   - 视频代理关: 一次性 hint "视频代理关 (走直连原源)" + 每次都记
+  ///     "[Video] buildProxiedUrl passthrough: reason=video_proxy_off, in=..."
+  ///     (太频繁会爆, 改成一次性 hint, 跟 Bangumi/TMDB 一样)
+  ///   - worker URL 没配: 一次性 hint "视频代理开但 worker URL 未配, 走直连"
+  ///   - wrap 成功: 第一次 wrap 记 (source=video_proxy, worker=xxx, in=...,
+  ///     out=...); 后续 m3u8 segment 调不重复记, 但每次 wrap 的 URL 在
+  ///     [player_screen] 那层有日记, 这里只记关键路径
+  ///   - wrap 走不到 (m3u8 检测失败但 forceM3u8=false): 一次性 hint
+  ///
+  /// 用户原话: 「在添加播放加速的日记」 (跟之前「tmdb可用bangumi不行啊
+  ///   你把日记加速详细点」一脉相承)
   static String buildProxiedUrl(String targetUrl, {bool forceM3u8 = false}) {
     if (targetUrl.isEmpty) return targetUrl;
-    if (!_isCfWorkerUsableSync()) return targetUrl;
+    if (!_isCfWorkerUsableSync()) {
+      // v2.1.43.2: 视频代理关 / worker URL 没配 → 一次性 hint, 不每次都记
+      //   (m3u8 解析时一个播放会话调几十次, 每次都记会爆日记)
+      _logVideoProxyPassthroughOnce(targetUrl, forceM3u8: forceM3u8);
+      return targetUrl;
+    }
     final worker = _cfWorkerDomainCache!.trim();
-    if (worker.isEmpty) return targetUrl;
+    if (worker.isEmpty) {
+      // 跟上面 _isCfWorkerUsableSync 应该都过滤了, 但兜底再判一次
+      _logVideoProxyPassthroughOnce(targetUrl, forceM3u8: forceM3u8);
+      return targetUrl;
+    }
     final isM3u8 = forceM3u8 || _looksLikeM3u8(targetUrl);
     final endpoint = isM3u8 ? '/m3u8' : '/';
-    return 'https://$worker$endpoint?url=${Uri.encodeComponent(targetUrl)}';
+    final wrapped =
+        'https://$worker$endpoint?url=${Uri.encodeComponent(targetUrl)}';
+    // v2.1.43.2: wrap 成功. m3u8 segment 调一次, 一次播放会话可能调
+    //   几十次, 每次都记会爆. 改成:
+    //   - 第一次 wrap 记完整 in/out
+    //   - 后续 m3u8 segment wrap 只记一个计数 (累计 N 次) + 最后一次 in/out
+    //   - 非 m3u8 wrap 每次都记 (数量少, 不会爆)
+    if (isM3u8) {
+      _videoProxyWrapCount++;
+      if (_videoProxyWrapCount == 1 || _videoProxyWrapCount % 50 == 0) {
+        // 第一次 / 每 50 次 记一次, 给一个累计统计 + 当前 in/out
+        DiaryService.add(
+            '[Video] buildProxiedUrl wrap (m3u8 #$_videoProxyWrapCount): worker=$worker endpoint=$endpoint, in=$targetUrl out=$wrapped');
+      }
+    } else {
+      // 非 m3u8 (mp4 / 其他) 一次播放会话只调几次, 每次都记
+      DiaryService.add(
+          '[Video] buildProxiedUrl wrap: worker=$worker endpoint=$endpoint, in=$targetUrl out=$wrapped');
+    }
+    return wrapped;
+  }
+
+  // v2.1.43.2: 视频代理 wrap 累计计数 (m3u8 segment 调一次 +1,
+  //   日记第一次/每 50 次记一次, 避免爆)
+  static int _videoProxyWrapCount = 0;
+
+  // v2.1.43.2: 视频代理 passthrough 一次性 hint flag
+  //   - video_proxy_off: 视频代理关 (用户关了视频代理开关)
+  //   - worker_unset: 视频代理开但 worker URL 没配
+  //   - m3u8_detect_fail: 非 m3u8 / 没 forceM3u8 但实际是 m3u8 (罕见)
+  static bool _videoProxyOffHinted = false;
+  static bool _videoProxyWorkerUnsetHinted = false;
+  static bool _videoProxyM3u8FailHinted = false;
+
+  static void _logVideoProxyPassthroughOnce(String targetUrl,
+      {required bool forceM3u8}) {
+    final videoProxyOn = _videoProxyEnabledCache == true;
+    final worker = _cfWorkerDomainCache;
+    if (!videoProxyOn) {
+      // 视频代理关
+      if (!_videoProxyOffHinted) {
+        _videoProxyOffHinted = true;
+        DiaryService.add(
+            '[Video] buildProxiedUrl passthrough hint: 视频代理开关关, 走直连原源 (不会加速). 想加速: 设置 → 视频代理开 + CF Worker 域名填好');
+      }
+      return;
+    }
+    if (worker == null || worker.isEmpty) {
+      // 视频代理开但 worker URL 没配
+      if (!_videoProxyWorkerUnsetHinted) {
+        _videoProxyWorkerUnsetHinted = true;
+        DiaryService.add(
+            '[Video] buildProxiedUrl passthrough hint: 视频代理开但 CF Worker 域名未配, 走直连原源. 想加速: 设置 → CF Worker 域名填好');
+      }
+      return;
+    }
+    // 兜底: 上面 _isCfWorkerUsableSync 返 false 但不是因为开关 / URL,
+    //   极罕见 (理论上不会到这里, 除非 _cfWorkerDomainCache 在异步
+    //   过程中被清空). 走一次性通用 hint.
+    DiaryService.add(
+        '[Video] buildProxiedUrl passthrough: videoProxyOn=$videoProxyOn, worker="$worker", forceM3u8=$forceM3u8, in=$targetUrl');
   }
 
   /// 异步版本：内部用内存缓存避免每次 await prefs
+  ///
+  /// v2.1.43.2 改: 调 [buildProxiedUrl] 之前重置 [_videoProxyWrapCount],
+  ///   让一次播放会话的 wrap 计数从 #1 开始. 之前 m3u8 segment 调一次
+  ///   +1, 全局累计, 一次播放可能 #500 / #1000, 不好看. reset 后:
+  ///   - 第一次 wrap → #1 (记完整 in/out)
+  ///   - 后续 wrap → #2, #3, ... 每 50 个记一次 (避免爆)
+  ///   - 跨播放会话也 reset, 计数一直是新会话内的
   static Future<String> buildProxiedUrlAsync(String targetUrl,
       {bool forceM3u8 = false}) async {
     if (targetUrl.isEmpty) return targetUrl;
     await _ensureCfWorkerCache();
+    // v2.1.43.2: 新会话开始, wrap 计数 reset
+    _videoProxyWrapCount = 0;
     return buildProxiedUrl(targetUrl, forceM3u8: forceM3u8);
   }
 

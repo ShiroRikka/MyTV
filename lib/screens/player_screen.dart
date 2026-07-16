@@ -1551,7 +1551,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     // v1.0.74: 测速 URL 跟 CF 开关走 (跟 v1.0.69 一致), 但传 originalUrl 给
     // m3u8_service 让它解析 segment 时用 upstream base, 并传 urlWrapper 让
     // segment 测速也走 worker. 修 v1.0.69 引入的 segment 解析错位 bug.
+    // v2.1.43.2: 加 DiaryService 日记, 记录测速是走直连还是走 worker,
+    //   以及原始 URL vs wrap 后的 URL. 之前 v2.1.43 之前没日记, 反馈
+    //   「加速不行」时只能猜.
     final url = UserDataService.buildProxiedUrl(originalUrl);
+    final isProxied = url != originalUrl;
+    DiaryService.add(
+        '[Video] _testSourceSpeed begin: title=${s.title}, isProxied=$isProxied, originalUrl=$originalUrl');
+    DiaryService.add(
+        '[Video] _testSourceSpeed URL: in=$originalUrl out=$url (worker=${UserDataService.getCfWorkerDomainSync()}, videoProxyOn=${UserDataService.getVideoProxyEnabledSync()})');
     return _testOneUrl(m3u8, url, originalUrl: originalUrl);
   }
 
@@ -2193,13 +2201,25 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     // v2.0.65: 代理起成功时, 播放 URL 走本地 HTTP 代理 (不走 CONNECT 隧道).
     //   代理没起时, 走原来的 buildProxiedUrl (libmpv 直连 worker).
+    // v2.1.43.2: 加 DiaryService 日记, 记录最终 playUrl + 代理起没起 +
+    //   走的哪条路径 (本地代理 / worker 直连 / 原源直连). 之前 v2.1.43
+    //   之前没日记, 反馈「加速不行」时只能看 libmpv 错误码猜.
     final String playUrl;
     if (proxyOn && proxyPort > 0) {
       // 播放 URL = http://127.0.0.1:PORT/m3u8?url=原URL
       // 代理收到 GET /m3u8?url=原URL 后, fetch https://worker/m3u8?url=原URL 返回
       playUrl = 'http://127.0.0.1:$proxyPort/m3u8?url=${Uri.encodeComponent(url)}';
+      DiaryService.add(
+          '[Video] playUrl build: path=local_proxy, port=$proxyPort, originalUrl=$url');
     } else {
       playUrl = await UserDataService.buildProxiedUrlAsync(url, forceM3u8: true);
+      final isProxied = playUrl != url;
+      DiaryService.add(
+          '[Video] playUrl build: path=${isProxied ? 'cf_worker' : 'direct'}, originalUrl=$url');
+      if (isProxied) {
+        DiaryService.add(
+            '[Video] playUrl wrap: in=$url out=$playUrl');
+      }
     }
 
     // v2.0.34: 保存最终播放 URL 给「加速链路」弹层用
