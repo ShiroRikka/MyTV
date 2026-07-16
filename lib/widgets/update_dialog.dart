@@ -610,36 +610,78 @@ class _UpdateDialogState extends State<UpdateDialog> {
   Widget _buildBottomButton(ThemeService themeService) {
     switch (_phase) {
       case _DownloadPhase.idle:
-        // 初始态: 「下载并安装 vX.X.X」 或 「查看新版本」(没 APK 直链)
+        // v2.1.47: 初始态 — 「下载并安装 vX.X.X」(主) + 「浏览器下载」(并列备选)
+        //   - 有 APK: 内建下载是主路径, 浏览器下载是备选 (用户机器没装
+        //     系统安装器 / 想看 release notes 完再下 / 内建下载器失败想换方式)
+        //   - 没 APK (release 没传 .apk asset): 主按钮变成「查看新版本」
+        //     (内部调 _openReleasePage 跳浏览器), 「浏览器下载」按钮隐藏
+        //     避免冗余 (两个按钮都是跳浏览器)
         final hasApk = widget.versionInfo.apkDownloadUrl != null;
-        return SizedBox(
-          width: double.infinity,
-          height: 44,
-          child: ElevatedButton.icon(
-            onPressed: _startDownload,
-            icon: Icon(
-              hasApk ? Icons.download_rounded : Icons.open_in_new_rounded,
-              size: 18,
-            ),
-            label: Text(
-              hasApk
-                  ? '下载并安装 v${widget.versionInfo.latestVersion}'
-                  : '查看新版本',
-              style: FontUtils.poppins(
-                context,
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
+        return Row(
+          children: [
+            Expanded(
+              flex: hasApk ? 2 : 1,
+              child: SizedBox(
+                height: 44,
+                child: ElevatedButton.icon(
+                  onPressed: _startDownload,
+                  icon: Icon(
+                    hasApk
+                        ? Icons.download_rounded
+                        : Icons.open_in_new_rounded,
+                    size: 18,
+                  ),
+                  label: Text(
+                    hasApk
+                        ? '下载并安装 v${widget.versionInfo.latestVersion}'
+                        : '查看新版本',
+                    style: FontUtils.poppins(
+                      context,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF27AE60),
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
               ),
             ),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF27AE60),
-              foregroundColor: Colors.white,
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
+            if (hasApk) ...[
+              const SizedBox(width: 8),
+              Expanded(
+                flex: 1,
+                child: SizedBox(
+                  height: 44,
+                  child: OutlinedButton.icon(
+                    onPressed: _openReleasePage,
+                    icon: const Icon(Icons.public_rounded, size: 16),
+                    label: Text(
+                      '浏览器',
+                      style: FontUtils.poppins(
+                        context,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF3B82F6),
+                      side: const BorderSide(
+                          color: Color(0xFF3B82F6), width: 1.5),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
+                ),
               ),
-            ),
-          ),
+            ],
+          ],
         );
 
       case _DownloadPhase.downloading:
