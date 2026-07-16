@@ -161,6 +161,14 @@ GitHub Actions 在 `main` 分支 push + 打 tag `v*.*.*` 时自动构建。
 
 按版本倒序, 每条都列了用户能感知到的行为 + 内部修复。
 
+### v2.1.52 (2026-07-16) — 修 APK 安装器弹不出来
+
+- **加 `REQUEST_INSTALL_PACKAGES` 权限**: Android 8.0 (API 26+) 调起系统 APK 安装器必须声明 `android.permission.REQUEST_INSTALL_PACKAGES`, 否则 PackageInstaller 直接拒绝, 系统弹 toast "LunaTV 没有权限安装" 但安装器界面弹不出来. v2.1.46 加内建下载器时漏了这个权限, 一直潜在. user 反馈 v2.1.50 → v2.1.51 升级时才暴露 (之前 v2.1.46 ~ v2.1.49 升级也有同样问题, 估计是 user 之前用 v2.1.46 装的没遇到, 或者遇到但误以为是签名问题).
+  - 修: `AndroidManifest.xml` 加 `<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />`.
+  - Android 8+ 还会要求 user 在系统设置 → 应用 → LunaTV → 安装未知应用 里手动授权一次 (Play Store 装的 app 自动授, sideload APK 没 Play 凭证需手动). 注意不是 v2.1.52 APK 装上就能直接调起安装器, 第一次要先授权.
+  - 跟 `FileProvider` 配合: `FileProvider` 解决 `file://` → `content://` 转换避开 `FileUriExposedException`, `REQUEST_INSTALL_PACKAGES` 解决 `PackageInstaller` 拒绝. 两个权限都必要.
+- pubspec: `2.1.51+48 → 2.1.52+49`
+
 ### v2.1.51 (2026-07-16) — bump
 
 - 仅版本号 bump, 配合 v2.1.50 修复日记同步

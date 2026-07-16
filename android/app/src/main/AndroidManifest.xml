@@ -14,6 +14,18 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <!-- Android 13+ 媒体权限 -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- v2.1.52: 调起系统 APK 安装器必须 (Android 8.0/API 26+ 要求)
+         没这个权限 PackageInstaller 拒绝, 系统弹 toast "LunaTV
+         没有权限安装" 但安装器界面弹不出来. user 反馈 v2.1.50 →
+         v2.1.51 升级弹 toast "LunaTV 没有权限安装" 但不弹安装
+         界面就是这个原因 (v2.1.46 加内建下载器时漏了).
+         Android 8+ 还要求 user 在系统设置 → 应用 → LunaTV →
+         安装未知应用 里手动授权一次 (Play Store 装的 app 自动
+         授, sideload APK 没 Play 凭证需手动). 跟 FileProvider
+         配合: FileProvider 解决 file:// → content:// 转换避开
+         FileUriExposedException, REQUEST_INSTALL_PACKAGES 解
+         决 PackageInstaller 拒绝. 两个权限都必要. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     
     <application
         android:label="LunaTV"
