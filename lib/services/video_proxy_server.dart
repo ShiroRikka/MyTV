@@ -47,6 +47,9 @@ import 'package:luna_tv/services/user_data_service.dart';
 ///   存最近一次 tryStart 决策 + 最近一次 _handleLocalHttp 上游连接结果,
 ///   UI 轮询 getLastStatus() 拿到最新值. 避免加速链路页要自己跑一遍所有 gate.
 class VideoProxyStatus {
+  /// 私有构造 — 单例, UI 直接 [VideoProxyStatus.snapshot] 拿
+  VideoProxyStatus._();
+
   /// 静态共享, UI 直接 [VideoProxyStatus.snapshot] 拿
   static VideoProxyStatus _instance = VideoProxyStatus._();
   static VideoProxyStatus get snapshot => _instance;
@@ -65,7 +68,7 @@ class VideoProxyStatus {
   int? lastFetchMs;                   // 上游 fetch 耗时 (ms)
   String? lastFetchTarget;            // 上游 URL (worker /?url=...)
   String? lastFetchUsedIp;            // 实际连的 IP (优选 IP 或 system DNS)
-  bool lastFetchPreferIp;             // 是否走了优选 IP
+  bool lastFetchPreferIp = false;     // 是否走了优选 IP
   String? lastFetchError;             // 上游连接错误 (超时/拒连/TLS 失败)
 
   /// 累计
