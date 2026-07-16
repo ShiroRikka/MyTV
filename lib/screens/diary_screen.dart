@@ -78,17 +78,24 @@ class _DiaryScreenState extends State<DiaryScreen> {
   }
 
   Future<void> _copyAll() async {
+    // v2.1.22+: 复制时也要遵守当前分类筛选 — 之前 getAll() 直接全量复制,
+    //   选「视频」chip 仍把所有分类都拷了, 用户反馈。
     final all = DiaryService.getAll();
-    if (all.isEmpty) {
+    final entries = _filtered(all);
+    if (entries.isEmpty) {
+      final hint = _filter == null
+          ? '日记为空, 没什么可复制的'
+          : '「$_filter」分类下没有日记, 换个分类或先点「全部」';
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('日记为空, 没什么可复制的')),
+        SnackBar(content: Text(hint)),
       );
       return;
     }
-    await Clipboard.setData(ClipboardData(text: all.join('\n')));
+    await Clipboard.setData(ClipboardData(text: entries.join('\n')));
     if (!mounted) return;
+    final tag = _filter == null ? '' : '「$_filter」分类 ';
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已复制 ${all.length} 条日记到剪贴板')),
+      SnackBar(content: Text('已复制 $tag${entries.length} 条日记到剪贴板')),
     );
   }
 
