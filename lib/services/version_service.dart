@@ -24,12 +24,17 @@ class VersionService {
   ///   (国内 GFW 可达), 没配走直连 (跟 v2.1.45 之前行为一致).
   ///   拿到的 APK 直链用 [UserDataService.buildGithubReleaseAssetUrl]
   ///   改写成 worker 路径, app 内建下载器 (UpdateDialog) 直接拿来下.
+  ///
+  /// v2.1.47 改: 已被用户「忽略 / 关掉 / 稍后 / 按 back」dismiss 的版本
+  ///   直接返回 null, 不弹 dialog. 下次 latest 升到 > dismissed 时再弹.
+  ///   之前 [_dismissedVersionKey] 只在 user_menu.dart 主动调
+  ///   [dismissVersion] 时写, 关掉 dialog 不算, 导致每次开 app 都弹.
   static Future<VersionInfo?> checkForUpdate() async {
     try {
       // 获取当前版本
       final packageInfo = await PackageInfo.fromPlatform();
       final currentVersion = packageInfo.version;
-      
+
       // v2.1.46: GitHub API URL 走 worker 代理 (配了的话)
       final apiUrl = UserDataService.buildGithubApiUrl(githubApiUrl);
 
@@ -40,7 +45,7 @@ class VersionService {
           'Accept': 'application/vnd.github.v3+json',
         },
       ).timeout(const Duration(seconds: 10));
-      
+
       if (response.statusCode == 200) {
         final data = json.decode(response.body) as Map<String, dynamic>;
         final tagName = data['tag_name'] as String;
@@ -70,6 +75,19 @@ class VersionService {
         //    自己决定是否走 VPN). buildGithubApiUrl 不会改这个 URL.
         final releasePageUrl = data['html_url'] as String?;
 
+        // v2.1.47: dismissed == latest 时不弹 (用户已知的版本不再骚扰)
+        //   - 之前 dismissed 只在 [UpdateDialog] 的"忽略"按钮写, 但
+        //     用户关掉 dialog / 稍后 / 按 back 都不写, 导致重复弹.
+        //   - 修: 统一在 [UpdateDialog] 的所有关闭路径都调
+        //     [dismissVersion], 本函数拿 latest 后对比 dismissed,
+        //     一致就 return null.
+        //   - dismissed < latest (有新版本出) → 正常 return VersionInfo
+        final prefs = await SharedPreferences.getInstance();
+        final dismissedVersion = prefs.getString(_dismissedVersionKey);
+        if (dismissedVersion != null && dismissedVersion == latestVersion) {
+          return null;
+        }
+
         // 比较版本号
         if (_isNewerVersion(currentVersion, latestVersion)) {
           return VersionInfo(
@@ -81,7 +99,7 @@ class VersionService {
           );
         }
       }
-      
+
       return null;
     } catch (e) {
       print('检查版本更新失败: $e');

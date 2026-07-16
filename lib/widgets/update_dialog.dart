@@ -198,11 +198,14 @@ class _UpdateDialogState extends State<UpdateDialog> {
     }
   }
 
-  // v2.1.46: 兜底 — 没 APK 直链 / 下载失败, 跳 release 详情页
+  // v2.1.47: 兜底 — 没 APK 直链 / 下载失败, 跳 release 详情页
+  //   + dismiss (用户决定不下载, 下次不重复弹)
   Future<void> _openReleasePage() async {
     final url = widget.versionInfo.releasePageUrl ??
         VersionService.getReleaseUrl(widget.versionInfo.latestVersion);
     final uri = Uri.parse(url);
+    // v2.1.47: 兜底跳浏览器也算 dismiss, 避免用户重复被问
+    await VersionService.dismissVersion(widget.versionInfo.latestVersion);
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
@@ -220,6 +223,27 @@ class _UpdateDialogState extends State<UpdateDialog> {
   // v2.1.46: 重试
   void _retryDownload() {
     _startDownload();
+  }
+
+  // v2.1.47: 统一 dismiss + close — 所有用户主动关掉 dialog 的路径
+  //   (忽略 / 稍后 / 关闭按钮 / 去 GitHub 看 / 按 back) 都调这个方法,
+  //   写入 [_dismissedVersionKey] = latestVersion, 下次 [checkForUpdate]
+  //   时 dismissed == latest → return null, 不重复弹窗.
+  //   装机完成路径 (_phase == installed) **不**调这个 — 用户已升级,
+  //   currentVersion 已经是 latest, 下次 checkForUpdate 不会弹.
+  Future<void> _dismissAndClose() async {
+    if (_phase == _DownloadPhase.installed) {
+      // 装机成功, 直接关, 不写入 dismissed
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      return;
+    }
+    await VersionService.dismissVersion(widget.versionInfo.latestVersion);
+    if (!mounted) return;
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
   }
 
   // v2.1.46: 把 dio 错误转成人话
@@ -264,6 +288,15 @@ class _UpdateDialogState extends State<UpdateDialog> {
         return PopScope(
           // 下载中禁止 back 关闭 dialog (避免「下到一半 dialog 没了但 dio 还在跑」)
           canPop: _phase != _DownloadPhase.downloading,
+          // v2.1.47: 按 back 关闭 dialog 也算 dismiss — 写入最新版本号,
+          //   下次 [checkForUpdate] dismissed == latest → 不弹.
+          //   装机成功 (_phase == installed) 时 current == latest,
+          //   不写 dismissed 也无副作用, 但仍走统一逻辑.
+          onPopInvokedWithResult: (didPop, _) {
+            if (didPop) {
+              VersionService.dismissVersion(widget.versionInfo.latestVersion);
+            }
+          },
           child: Dialog(
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16),
@@ -706,15 +739,11 @@ class _UpdateDialogState extends State<UpdateDialog> {
   Widget _buildSecondaryRow(ThemeService themeService) {
     if (_phase == _DownloadPhase.installing ||
         _phase == _DownloadPhase.installed) {
-      // 调起安装器后次要按钮只显示「关闭」
+      // 调起安装器后次要按钮只显示「关闭」 — 装机成功直接关, 不 dismiss
       return SizedBox(
         width: double.infinity,
         child: TextButton(
-          onPressed: () {
-            if (Navigator.of(context).canPop()) {
-              Navigator.of(context).pop();
-            }
-          },
+          onPressed: _dismissAndClose,
           style: TextButton.styleFrom(
             foregroundColor: themeService.isDarkMode
                 ? const Color(0xFF999999)
@@ -728,12 +757,18 @@ class _UpdateDialogState extends State<UpdateDialog> {
       );
     }
     if (_phase == _DownloadPhase.error) {
-      // 失败: 左边「看 release 详情」右边「关闭」
+      // 失败: 左边「看 release 详情」右边「关闭」— 都 dismiss
       return Row(
         children: [
           Expanded(
             child: TextButton(
-              onPressed: _openReleasePage,
+              onPressed: () async {
+                // v2.1.47: 跳 GitHub 也算 dismiss, 避免重复弹
+                await VersionService.dismissVersion(
+                    widget.versionInfo.latestVersion);
+                if (!mounted) return;
+                await _openReleasePage();
+              },
               style: TextButton.styleFrom(
                 foregroundColor: const Color(0xFF27AE60),
               ),
@@ -745,11 +780,7 @@ class _UpdateDialogState extends State<UpdateDialog> {
           ),
           Expanded(
             child: TextButton(
-              onPressed: () {
-                if (Navigator.of(context).canPop()) {
-                  Navigator.of(context).pop();
-                }
-              },
+              onPressed: _dismissAndClose,
               style: TextButton.styleFrom(
                 foregroundColor: themeService.isDarkMode
                     ? const Color(0xFF999999)
@@ -764,21 +795,14 @@ class _UpdateDialogState extends State<UpdateDialog> {
         ],
       );
     }
-    // idle / downloading: 「忽略」 + 「稍后」
+    // idle / downloading: 「忽略」 + 「稍后」— v2.1.47 统一用 _dismissAndClose
     return Row(
       children: [
         Expanded(
           child: TextButton(
             onPressed: _phase == _DownloadPhase.downloading
                 ? null
-                : () async {
-                    await VersionService.dismissVersion(
-                        widget.versionInfo.latestVersion);
-                    if (!mounted) return;
-                    if (Navigator.of(context).canPop()) {
-                      Navigator.of(context).pop();
-                    }
-                  },
+                : _dismissAndClose,
             style: TextButton.styleFrom(
               foregroundColor: themeService.isDarkMode
                   ? const Color(0xFF999999)
@@ -794,11 +818,7 @@ class _UpdateDialogState extends State<UpdateDialog> {
           child: TextButton(
             onPressed: _phase == _DownloadPhase.downloading
                 ? null
-                : () {
-                    if (Navigator.of(context).canPop()) {
-                      Navigator.of(context).pop();
-                    }
-                  },
+                : _dismissAndClose,
             style: TextButton.styleFrom(
               foregroundColor: const Color(0xFF27AE60),
             ),
