@@ -1388,13 +1388,21 @@ class VideoProxyServer {
           tcpSocket.setOption(SocketOption.tcpNoDelay, true);
         } catch (_) {}
         usedActualIp = preferIp;
-        upstream = await SecureSocket.secure(tcpSocket, host: workerDomain);
+        // v2.2.4 修: 强制 h1 (理由同上)
+        upstream = await SecureSocket.secure(
+          tcpSocket,
+          host: workerDomain,
+          supportedProtocols: ['http/1.1'],
+        );
       } else {
         // 没配优选 IP: 走系统 DNS (SNI = workerDomain 自动)
+        // v2.2.4 修 (HTTP/2 死等 EOF bug): 强制 h1, 让 worker 响应带 Content-Length
+        //   不然 h2 复用连接 + 无 CL/TE → readBody(null, false) 死循环, 永远到不了 fetch OK
         upstream = await SecureSocket.connect(
           workerDomain,
           443,
           timeout: const Duration(seconds: 10),
+          supportedProtocols: ['http/1.1'],
         );
         try {
           upstream.setOption(SocketOption.tcpNoDelay, true);
