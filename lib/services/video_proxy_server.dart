@@ -1323,6 +1323,11 @@ class VideoProxyServer {
     void Function() closeAll,
   ) async {
     final target = state.target!; // e.g. /m3u8?url=XXX or /?url=XXX
+    // v2.2.2: 每个进来的 request 都先打一条, 排查 seg fetch 没日志时
+    //   区分「请求根本没来」vs「来了被错判成 m3u8」. 一次播放 m3u8 1 条 +
+    //   seg 几十条, UI filter "req IN" 能直接看请求是不是真到了代理.
+    DiaryService.add(
+        '[VideoProxy] req IN: method=${state.method}, target=$target');
     final workerDomain = await UserDataService.getCfWorkerDomain();
     if (workerDomain.isEmpty) {
       _sendHttpError(client, 502, 'worker domain not set', closeAll);
@@ -1522,13 +1527,19 @@ class VideoProxyServer {
         // v2.2.0+58: 修 v2.2.0+57 的占位符 bug — 之前 target 写死 "target=/?url=..." 完全没用,
         //   现在记完整 target, 日记里 grep "seg fetch" 能直接看到段请求的 URL 编码形式.
         //   一次播放刷几十条, UI 可以 filter.
+        // v2.2.2: 加 upstreamCT — 用户反馈「m3u8 wrap OK 580 段全解开, 但
+        //   seg fetch 一条都没有」, 需要看 seg 请求真来的时候 upstream 返什么
+        //   Content-Type. HLS 截图流 (.m3u8 段是 .jpeg) CT=image/jpeg,
+        //   ExoPlayer 默认 HLS source 没有 image module 会跳过 → 这是
+        //   ExoPlayer 替换 libmpv 之后的核心回归. 拿到 CT 就能直接判断走
+        //   哪条修法 (加 image module / 强制 video/mp2t / 退回 libmpv).
         final tsUrl = _extractOriginalUrlFromTarget(target);
         // target 可能很长 (嵌套 URL), 截到 200 字符防日记爆
         final targetForLog = target.length > 200
             ? '${target.substring(0, 200)}... [+${target.length - 200} chars]'
             : target;
         DiaryService.add(
-            '[VideoProxy] seg fetch BEGIN: target=$targetForLog, segUrl=$tsUrl');
+            '[VideoProxy] seg fetch BEGIN: target=$targetForLog, segUrl=$tsUrl, upstreamCT=$contentType');
         final respBuf = StringBuffer();
         respBuf.write('HTTP/1.1 $statusCode OK\r\n');
         if (contentLength != null) {
