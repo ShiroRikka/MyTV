@@ -1439,6 +1439,13 @@ class VideoProxyServer {
           baseUrl: m3u8BaseUrl,
           localBase: localBase,
         );
+        // v2.2.1: 把 wrap 后的 m3u8 头 500 字 dump 进日记, 方便诊断 ExoPlayer
+        //   是不是因为段 URL 没重写 / 重写错 / 格式坏而无法解析
+        final dumpSample = rewritten.length > 500
+            ? '${rewritten.substring(0, 500)}\n... [+${rewritten.length - 500} chars]'
+            : rewritten;
+        DiaryService.add(
+            '[VideoProxy] m3u8 wrap OK: baseUrl=$m3u8BaseUrl, size=${rewritten.length}B\n$dumpSample');
         final rewrittenBytes = utf8.encode(rewritten);
         rewrittenSize = rewrittenBytes.length; // v2.1.40: 记录到状态
 
@@ -1450,6 +1457,12 @@ class VideoProxyServer {
         final bodyMs = DateTime.now().difference(headerSentAt).inMilliseconds;
       } else {
         // 非 m3u8 (.ts / .mp4): 流式转发
+        // v2.2.1: 写一段日记, 方便看段 URL 拉没拉 (之前的诊断统计只显示 m3u8 数,
+        //   段拉成功与否静默, 视频播不了看不到原因). 一次播放会刷几十条, 后续
+        //   UI 可以 filter "seg fetch" 段行.
+        final tsUrl = _extractOriginalUrlFromTarget(target);
+        DiaryService.add(
+            '[VideoProxy] seg fetch BEGIN: target=/?url=..., segUrl=$tsUrl');
         final respBuf = StringBuffer();
         respBuf.write('HTTP/1.1 $statusCode OK\r\n');
         if (contentLength != null) {
