@@ -84,24 +84,38 @@ jobs:
       # 之前用 softprops/action-gh-release@v2, 同一个 runner (East US) 调
       # api.github.com/release 端点连续 502/503 — 软错误, 没 retry. v2.2.0+52
       # 三次重跑都卡在这步. 改用 gh CLI + 显式 retry, 命中率高得多.
+      # v2.2.4 修: release 已存在时 (之前手动 gh release create 过, 或上一轮 CI 跑了一半挂)
+      # 不能直接 gh release create (会报 "a release with the same tag name already exists"),
+      # 改为 gh release upload --clobber 把 APK 挂到现有 release 上, 让 Set release body 步
+      # 接着覆盖 body 即可. 这样手动创建空 release 也能被 CI 自动补 APK + changelog.
       - name: Create GitHub Release (APK)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TAG="${{ github.ref_name }}"
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          SHA="${{ github.sha }}"
           for i in 1 2 3 4 5; do
             echo "::group::attempt $i"
-            if gh release create "${{ github.ref_name }}" \
-              build/app/outputs/flutter-apk/app-release.apk \
-              --title "${{ github.ref_name }}" \
-              --generate-notes \
-              --target "${{ github.sha }}"; then
-              echo "release created on attempt $i"
-              break
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              # release 已存在, 只上传 APK
+              if gh release upload "$TAG" "$APK" --clobber; then
+                echo "asset uploaded on attempt $i"
+                break
+              fi
+            else
+              if gh release create "$TAG" "$APK" \
+                --title "$TAG" \
+                --generate-notes \
+                --target "$SHA"; then
+                echo "release created on attempt $i"
+                break
+              fi
             fi
             echo "::endgroup::"
             if [ "$i" -eq 5 ]; then
-              echo "::error::gh release create failed after 5 attempts"
+              echo "::error::gh release create/upload failed after 5 attempts"
               exit 1
             fi
             sleep 20
