@@ -593,9 +593,14 @@ class M3U8Service {
     List<String> segments, {
     String Function(String)? urlWrapper,
   }) async {
-    final testUrls = segments
-        .where((url) => !_looksLikePlaylistUrl(url))
-        .take(3)
+    final playableSegments =
+        segments.where((url) => !_looksLikePlaylistUrl(url)).toList();
+    // v2.3.4: 第 1 个分片经常是 init.mp4 / 极短片头 / 广告探针, 只有几 KB,
+    //   拿它算速度会显示 1KB/s / 4KB/s。优先跳过第 1 个, 后面不够再退回全量。
+    final candidates = playableSegments.length > 3
+        ? playableSegments.skip(1).take(3)
+        : playableSegments.take(3);
+    final testUrls = candidates
         .map((url) => urlWrapper != null ? urlWrapper(url) : url)
         .toList();
     if (testUrls.isEmpty) return 0.0;
@@ -611,21 +616,28 @@ class M3U8Service {
   Future<double> _measureDownloadSpeedFast(String url) async {
     try {
       final stopwatch = Stopwatch()..start();
-      // 不带 Range, 完整下载第 1 个 segment. 跟 web LunaTV 的 hls.js
-      //   FRAG_LOADED 等价 — 真实分片下载速度.
+      var bytes = 0;
+      // v2.3.4: 不再完整下载分片。完整 segment 在后台 6 源并发测速时太重,
+      //   6 秒外层 timeout 很容易触发, 最后掉到只有延迟的 fallback。
+      //   改成真实分片抽样: Range 取前 1MB, 流式读取到 512KB 或 2.8s
+      //   就停止。这样测的是视频分片链路, 不是 playlist 文本, 也不会拖垮并发。
       final response = await _dio.get(
         url,
         options: Options(
-          responseType: ResponseType.bytes,
-          // v2.1.26: 8s -> 12s. 完整 segment 在慢链上 10s 都有可能,
-          //   12s 给慢网留余量. web LunaTV 用 9000ms timeout, 跟这同量级.
-          receiveTimeout: const Duration(seconds: 12),
+          responseType: ResponseType.stream,
+          receiveTimeout: const Duration(seconds: 4),
+          headers: const {'Range': 'bytes=0-1048575'},
         ),
       );
+      final body = response.data as ResponseBody;
+      await for (final chunk in body.stream) {
+        bytes += chunk.length;
+        if (bytes >= 512 * 1024) break;
+        if (stopwatch.elapsedMilliseconds >= 2800) break;
+      }
       stopwatch.stop();
-      final bytes = (response.data as Uint8List).length;
-      if (bytes == 0) return 0.0;
-      // 兼容服务端不返回 206 而是直接 200 全量, 也兼容 206 部分内容
+      // 小于 64KB 的样本多数是 init/探针/异常小片段, 不拿来显示速度。
+      if (bytes < 64 * 1024) return 0.0;
       final elapsedSeconds = stopwatch.elapsedMilliseconds / 1000.0;
       if (elapsedSeconds <= 0) return 0.0;
       return (bytes / 1024) / elapsedSeconds; // KB/s
