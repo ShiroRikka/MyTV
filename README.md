@@ -158,7 +158,7 @@ GitHub Actions 在 `main` 分支 push + 打 tag `v*.*.*` 时自动构建。
 - [Selene](https://github.com/MoonTechLab/Selene) — Flutter 移动端/桌面端源起项目
 - [djsevenx1/tmdb-proxy](https://github.com/djsevenx1/tmdb-proxy) — 配套 CF Worker 后端,处理 TMDB API / 图片 + Bangumi 数据 / 图片 + GitHub 更新加速 (fork 自 [HuntzzZ/tmdb-proxy](https://github.com/HuntzzZ/tmdb-proxy))
 - [HuntzzZ/tmdb-proxy](https://github.com/HuntzzZ/tmdb-proxy) — tmdb-proxy 上游项目
-- [media_kit](https://github.com/media-kit/media-kit) — Flutter 媒体播放
+- [AndroidX Media3 ExoPlayer](https://developer.android.com/media/media3/exoplayer) — Android 媒体播放
 - [dlna_dart](https://github.com/dlna-dart/dlna_dart) — DLNA 投屏
 - [cached_network_image](https://github.com/Baseflow/flutter_cached_network_image) — 网络图片缓存
 - [Bangumi](https://bangumi.tv/) — 番剧数据源
