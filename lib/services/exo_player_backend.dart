@@ -22,6 +22,13 @@
 // 字段但内部推空 (PlayerBackend 抽象 API 保留, 上层可能 watch 测速).
 //
 // iOS 端走 AVPlayer (video_player 内部), 跟 libmpv 时代一样用, 保持兼容.
+//
+// v2.3.10: 加 CustomExoPlayer pre-buffer — video_player 的 DefaultLoadControl
+//   minBufferMs=15s / maxBufferMs=50s, 偏激进, 卡顿时频繁 rebuffer. 在打开
+//   URL 时先用 CustomExoPlayer (LoadControl min=30s/max=90s) prepare() 同样
+//   的 URL, 让 ExoPlayer 提前填 1-2s 的 buffer (走同一个 OkHttp connection
+//   pool), 然后 video_player 才打开. 提前下的 segment 走 connection pool
+//   命中, 起播 / 早期播放更顺. video_player 本身渲染 / 控件 API 都不动.
 
 import 'dart:async';
 
@@ -76,6 +83,13 @@ class ExoPlayerBackend implements PlayerBackend {
   }
 
   /// v2.2.0: 准备 controller, 给定最终 URL. 每次 open() 内部调用.
+  /// v2.3.10: CustomExoPlayer pre-buffer 暂时**不做** — 想用 hidden ExoPlayer
+  ///   提前下 segment 给 video_player 复用 cache, 但 ExoPlayer 实例间不
+  ///   共享内部 cache, OkHttp 默认也没启用 HTTP cache, 提前下的内容
+  ///   video_player 拿不到, 反而多下一遍 (双倍带宽). 真正能改 buffer 时间
+  ///   的只有替换 video_player (用 CustomExoPlayer 作为主播放器), v2.3.11
+  ///   计划做. v2.3.10 把 CustomExoPlayerChannel + Dart wrapper 编译过
+  ///   / APK 里有, 留作未来 use.
   Future<void> _ensureController(String url,
       {Map<String, String>? headers}) async {
     if (_disposed) {
