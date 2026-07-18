@@ -1400,8 +1400,16 @@ class _PlayerScreenState extends State<PlayerScreen>
 
       // (按 source key 去重已经在 ApiService.fetchSourcesData 里做了,
       // 这里不用再 dedupe)
+      
+      // 过滤不相关的源：标题相似度 + 年份匹配
+      final searchYear = widget.videoInfo.year;
+      final filteredResults = _filterRelevantSources(title, searchYear, results);
+      DiaryService.add(
+          '[SourceFilter] 原始源数: ${results.length}, 过滤后: ${filteredResults.length}, '
+          '标题: "$title", 年份: "$searchYear"');
+      
       setState(() {
-        _sourceResults = results;
+        _sourceResults = filteredResults;
         _sourcesLoading = false;
       });
 
@@ -1409,7 +1417,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       // 1. 云记忆里有这个 video 的源 (resume.source)
       // 2. 入口传过来的 preferredSource
       // 3. 第一个
-      SearchResult toSelect = results.first;
+      SearchResult toSelect = filteredResults.first;
       if (resumeSourceKey.isNotEmpty) {
         for (final r in results) {
           if (r.source == resumeSourceKey) {
@@ -1442,6 +1450,108 @@ class _PlayerScreenState extends State<PlayerScreen>
         _error = '搜索失败: $e';
       });
     }
+  }
+
+  /// 过滤相关源：根据标题相似度和年份匹配
+  /// 返回过滤后的源列表，至少保留 1 个源（避免全部过滤掉）
+  List<SearchResult> _filterRelevantSources(
+      String searchTitle, String searchYear, List<SearchResult> results) {
+    if (results.isEmpty) return results;
+
+    final scored = results.map((r) {
+      final titleScore = _calculateTitleSimilarity(searchTitle, r.title);
+      final yearMatch = _isYearMatch(searchYear, r.year);
+      return (result: r, titleScore: titleScore, yearMatch: yearMatch);
+    }).toList();
+
+    // 过滤策略：
+    // 1. 标题相似度 >= 0.6 且年份匹配（或年份未知）
+    // 2. 如果过滤后为空，则放宽到标题相似度 >= 0.4
+    // 3. 如果还为空，返回原始结果（至少保留 1 个）
+    
+    var filtered = scored.where((s) => 
+      s.titleScore >= 0.6 && (s.yearMatch || s.result.year.isEmpty || searchYear.isEmpty)
+    ).toList();
+
+    if (filtered.isEmpty) {
+      filtered = scored.where((s) => s.titleScore >= 0.4).toList();
+    }
+
+    if (filtered.isEmpty) {
+      // 兜底：按标题相似度排序，取最高的
+      scored.sort((a, b) => b.titleScore.compareTo(a.titleScore));
+      return [scored.first.result];
+    }
+
+    // 按标题相似度降序排序
+    filtered.sort((a, b) => b.titleScore.compareTo(a.titleScore));
+    return filtered.map((s) => s.result).toList();
+  }
+
+  /// 计算两个标题的相似度（0.0 - 1.0）
+  /// 使用字符级别的编辑距离算法，适合中文标题比较
+  double _calculateTitleSimilarity(String title1, String title2) {
+    if (title1.isEmpty || title2.isEmpty) return 0.0;
+    
+    // 完全匹配
+    if (title1 == title2) return 1.0;
+    
+    // 包含关系（如 "流浪地球" 包含在 "流浪地球2" 中）
+    if (title1.contains(title2) || title2.contains(title1)) {
+      final shorter = title1.length < title2.length ? title1 : title2;
+      final longer = title1.length >= title2.length ? title1 : title2;
+      return shorter.length / longer.length;
+    }
+    
+    // 计算编辑距离相似度
+    final distance = _editDistance(title1, title2);
+    final maxLen = title1.length > title2.length ? title1.length : title2.length;
+    if (maxLen == 0) return 1.0;
+    
+    return 1.0 - (distance / maxLen);
+  }
+
+  /// 计算两个字符串的编辑距离（Levenshtein distance）
+  int _editDistance(String s1, String s2) {
+    final m = s1.length;
+    final n = s2.length;
+    
+    // 创建 DP 表
+    final dp = List.generate(m + 1, (_) => List.filled(n + 1, 0));
+    
+    // 初始化边界
+    for (int i = 0; i <= m; i++) {
+      dp[i][0] = i;
+    }
+    for (int j = 0; j <= n; j++) {
+      dp[0][j] = j;
+    }
+    
+    // 填充 DP 表
+    for (int i = 1; i <= m; i++) {
+      for (int j = 1; j <= n; j++) {
+        if (s1[i - 1] == s2[j - 1]) {
+          dp[i][j] = dp[i - 1][j - 1];
+        } else {
+          dp[i][j] = 1 + [dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]].reduce((a, b) => a < b ? a : b);
+        }
+      }
+    }
+    
+    return dp[m][n];
+  }
+
+  /// 检查年份是否匹配
+  /// 允许 ±1 年的容差（处理不同平台年份记录差异）
+  bool _isYearMatch(String year1, String year2) {
+    if (year1.isEmpty || year2.isEmpty) return true; // 年份未知时不过滤
+    
+    final y1 = int.tryParse(year1);
+    final y2 = int.tryParse(year2);
+    
+    if (y1 == null || y2 == null) return true; // 无法解析时不过滤
+    
+    return (y1 - y2).abs() <= 1; // 允许 ±1 年容差
   }
 
   /// 从云端拉播放记录, 按 searchTitle 找最近一条
