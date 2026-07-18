@@ -43,26 +43,48 @@ class M3U8Service {
       //    (原 m3u8 manifest 里的相对路径用 upstream base / worker base
       //     解析都行, 段是 absolute URL 走 _parseSegmentsFromContent 二次
       //     检查, 没解析对会 fallback 到 upstream base 重新拼).
-      final m3u8Content = await _fetchM3U8Content(streamUrl);
+      var m3u8Content = await _fetchM3U8Content(streamUrl);
       if (m3u8Content == null) {
         // 不是 M3U8, 走直链测速
         return await _measureDirectStream(streamUrl, urlWrapper: urlWrapper);
       }
-      final baseForSegments = originalUrl ?? streamUrl;
-      final segments = _parseSegmentsFromContent(m3u8Content, baseForSegments);
-      final resolution = _parseResolutionFromContent(m3u8Content);
+      var baseForSegments = originalUrl ?? streamUrl;
+      var resolution = _parseResolutionFromContent(m3u8Content);
+
+      // v2.3.3: 修复“测速 1-5KB/s, 实际播放 1-2MB/s”。
+      //   很多源第一层是 master playlist:
+      //     #EXT-X-STREAM-INF:RESOLUTION=1920x1080
+      //     1080/index.m3u8
+      //   旧逻辑把下一行 1080/index.m3u8 当成 segment 去下载, 测到的只是
+      //   几 KB playlist 文本速度, 不是真实 .ts/.m4s 分片速度, UI 就会显示
+      //   1KB/s / 5KB/s。这里先进入选中的子 playlist, 再解析真实分片。
+      final variant = _pickBestVariantPlaylist(m3u8Content, baseForSegments);
+      if (variant != null) {
+        final variantContent = await _fetchM3U8Content(variant.url);
+        if (variantContent != null) {
+          m3u8Content = variantContent;
+          baseForSegments = variant.url;
+          if (variant.resolution['height'] != 0) {
+            resolution = variant.resolution;
+          }
+        }
+      }
+
+      final segments = _parseSegmentsFromContent(m3u8Content, baseForSegments)
+          .where((url) => !_looksLikePlaylistUrl(url))
+          .toList();
       if (segments.isEmpty) {
         // M3U8 但没解析到 segment (罕见, 比如只有 master playlist 没有 variant)
         return await _measureDirectStream(streamUrl, urlWrapper: urlWrapper);
       }
 
-      // 2) 并发: HEAD 测延迟 + Range 测速 (都用第 1 个 segment, 反正测的是同一条线路)
+      // 2) 并发: HEAD 测延迟 + 分片测速 (取前 3 个真实分片, 去掉 0 值后取中位数)
       //    v2.3.0: 视频加速删了, urlWrapper 不需要, 走 firstSegment 直连 CDN.
       final firstSegment = segments.first;
       final testUrl = urlWrapper != null ? urlWrapper(firstSegment) : firstSegment;
       final futures = await Future.wait([
         _measureLatency(testUrl),
-        _measureDownloadSpeedFast(testUrl),
+        _measureSegmentSpeeds(segments, urlWrapper: urlWrapper),
       ]);
       final latency = futures[0] as int;
       final downloadSpeedKBps = futures[1] as double;
@@ -125,6 +147,57 @@ class M3U8Service {
       }
     }
     return {'width': 0, 'height': 0};
+  }
+
+  _VariantPlaylist? _pickBestVariantPlaylist(String content, String baseUrl) {
+    final lines = content.split('\n').map((line) => line.trim()).toList();
+    _VariantPlaylist? best;
+
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (!line.startsWith('#EXT-X-STREAM-INF:')) continue;
+
+      final params = <String, String>{};
+      for (final part in line.substring('#EXT-X-STREAM-INF:'.length).split(',')) {
+        final kv = part.split('=');
+        if (kv.length == 2) params[kv[0].trim()] = kv[1].trim().replaceAll('"', '');
+      }
+
+      String? variantLine;
+      for (var j = i + 1; j < lines.length; j++) {
+        final candidate = lines[j];
+        if (candidate.isEmpty) continue;
+        if (candidate.startsWith('#')) continue;
+        variantLine = candidate;
+        break;
+      }
+      if (variantLine == null) continue;
+
+      final resolution = _parseResolutionFromParams(params);
+      final bandwidth = int.tryParse(params['BANDWIDTH'] ?? '') ?? 0;
+      final candidate = _VariantPlaylist(
+        url: _resolveUrl(variantLine, baseUrl),
+        resolution: resolution,
+        bandwidth: bandwidth,
+      );
+
+      if (best == null || candidate.score > best.score) {
+        best = candidate;
+      }
+    }
+
+    return best;
+  }
+
+  Map<String, int> _parseResolutionFromParams(Map<String, String> params) {
+    final value = params['RESOLUTION'];
+    if (value == null) return {'width': 0, 'height': 0};
+    final dims = value.split('x');
+    if (dims.length != 2) return {'width': 0, 'height': 0};
+    return {
+      'width': int.tryParse(dims[0]) ?? 0,
+      'height': int.tryParse(dims[1]) ?? 0,
+    };
   }
 
   /// 直链 (非 M3U8) 测速
@@ -397,6 +470,16 @@ class M3U8Service {
     return false;
   }
 
+  bool _looksLikePlaylistUrl(String url) {
+    try {
+      final path = Uri.parse(url).path.toLowerCase();
+      return path.endsWith('.m3u8') || path.endsWith('.m3u');
+    } catch (_) {
+      final lower = url.toLowerCase();
+      return lower.contains('.m3u8') || lower.contains('.m3u');
+    }
+  }
+
   /// 解析相对 URL 为绝对 URL
   String _resolveUrl(String url, String baseUrl) {
     if (url.startsWith('http://') || url.startsWith('https://')) {
@@ -506,6 +589,25 @@ class M3U8Service {
   ///
   /// 1 个 1080p 5s segment 约 2-5MB, 慢链 (500KB/s) 10s 内能下完.
   /// 12s timeout 兜底, 跟 web 版 9000ms 同量级, 防止卡死.
+  Future<double> _measureSegmentSpeeds(
+    List<String> segments, {
+    String Function(String)? urlWrapper,
+  }) async {
+    final testUrls = segments
+        .where((url) => !_looksLikePlaylistUrl(url))
+        .take(3)
+        .map((url) => urlWrapper != null ? urlWrapper(url) : url)
+        .toList();
+    if (testUrls.isEmpty) return 0.0;
+
+    final results = await Future.wait(
+      testUrls.map(_measureDownloadSpeedFast),
+    );
+    final valid = results.where((v) => v > 0).toList()..sort();
+    if (valid.isEmpty) return 0.0;
+    return valid[valid.length ~/ 2];
+  }
+
   Future<double> _measureDownloadSpeedFast(String url) async {
     try {
       final stopwatch = Stopwatch()..start();
@@ -966,3 +1068,20 @@ class M3U8Service {
   }
 }
 
+class _VariantPlaylist {
+  final String url;
+  final Map<String, int> resolution;
+  final int bandwidth;
+
+  const _VariantPlaylist({
+    required this.url,
+    required this.resolution,
+    required this.bandwidth,
+  });
+
+  int get score {
+    final height = resolution['height'] ?? 0;
+    if (height > 0) return height * 1000000 + bandwidth;
+    return bandwidth;
+  }
+}

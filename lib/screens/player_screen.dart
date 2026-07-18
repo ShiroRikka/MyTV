@@ -1583,15 +1583,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     String? originalUrl,
   }) async {
     try {
-      // v2.3.0: 视频加速删了, 测速只剩直连, 4s 应该够. 改回 4s, 避免 m3u8 源慢时 UI 卡 8s.
-      //   v1.0.69 之前的 4s, 跟 v1.0.69~v2.2.x 走 worker 时的 8s 不同 (worker 转发要时间).
+      // v2.3.3: master playlist 要先进入子 playlist 再测真实分片, 4s 太容易
+      //   掉到 fallback; 放宽到 6s, 仍比旧 worker 链路 8s 快。
       final result = await m3u8.getStreamInfo(
         url,
         // v2.3.0: 视频加速删了, 不用 originalUrl 二次 fallback (url==originalUrl)
         originalUrl: originalUrl,
         // v2.3.0: 视频加速删了, 不用 urlWrapper 包装段 URL
       ).timeout(
-        const Duration(seconds: 4),
+        const Duration(seconds: 6),
         onTimeout: () => <String, dynamic>{
           'resolution': {'width': 0, 'height': 0},
           'downloadSpeed': 0.0,
@@ -1716,6 +1716,11 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<double> _fallbackMeasureDownloadSpeed(http.Client client, String url) async {
     try {
+      // v2.3.3: fallback 不能直接对 m3u8 playlist 文本测速。
+      //   playlist 常常只有几 KB, Range 0-65535 会把这几 KB 文本下载完,
+      //   算出来就是 1KB/s / 5KB/s, 但实际播放下载的是后续 ts/m4s 分片,
+      //   速度能到 1-2MB/s。主测速失败时这里只保留延迟, 不再展示假速度。
+      if (_looksLikeM3u8Url(url)) return 0.0;
       final stopwatch = Stopwatch()..start();
       final req = http.Request('GET', Uri.parse(url))
         ..followRedirects = true
@@ -1737,6 +1742,16 @@ class _PlayerScreenState extends State<PlayerScreen>
       return (n / 1024) / sec; // KB/s
     } catch (_) {
       return 0.0;
+    }
+  }
+
+  bool _looksLikeM3u8Url(String url) {
+    try {
+      final path = Uri.parse(url).path.toLowerCase();
+      return path.endsWith('.m3u8') || path.endsWith('.m3u');
+    } catch (_) {
+      final lower = url.toLowerCase();
+      return lower.contains('.m3u8') || lower.contains('.m3u');
     }
   }
 
