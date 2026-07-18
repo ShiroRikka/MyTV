@@ -2,9 +2,18 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'package:dio/dio.dart';
 
+import 'exo_speed_test.dart';
+
 /// M3U8 解析和测速服务
 class M3U8Service {
   final Dio _dio = Dio();
+
+  // v2.3.6: ExoPlayer 测速 channel 是否可用. 第一次用之前 lazy probe,
+  //   后续直接用 cached 值. 走原生 ExoPlayer 测真实分片下载速度
+  //   (跟 web LunaTV hls.js FRAG_LOADED 思路 1:1 对齐), 解决
+  //   "测速 5KB/s 实际 2MB/s" 的根因 (Dio Range 请求 CDN 限速 / 路径
+  //   不一致). iOS / 桌面 / ExoPlayer 解析失败的设备降级到 Range 测速.
+  bool? _exoSpeedTestAvailable;
 
   M3U8Service() {
     // 配置 Dio
@@ -44,12 +53,14 @@ class M3U8Service {
       //     解析都行, 段是 absolute URL 走 _parseSegmentsFromContent 二次
       //     检查, 没解析对会 fallback 到 upstream base 重新拼).
       var m3u8Content = await _fetchM3U8Content(streamUrl);
+      Map<String, int> resolution = {'width': 0, 'height': 0};
+      List<String> segments = const [];
       if (m3u8Content == null) {
         // 不是 M3U8, 走直链测速
         return await _measureDirectStream(streamUrl, urlWrapper: urlWrapper);
       }
       var baseForSegments = originalUrl ?? streamUrl;
-      var resolution = _parseResolutionFromContent(m3u8Content);
+      resolution = _parseResolutionFromContent(m3u8Content);
 
       // v2.3.3: 修复“测速 1-5KB/s, 实际播放 1-2MB/s”。
       //   很多源第一层是 master playlist:
@@ -70,7 +81,7 @@ class M3U8Service {
         }
       }
 
-      final segments = _parseSegmentsFromContent(m3u8Content, baseForSegments)
+      segments = _parseSegmentsFromContent(m3u8Content, baseForSegments)
           .where((url) => !_looksLikePlaylistUrl(url))
           .toList();
       if (segments.isEmpty) {
@@ -78,16 +89,27 @@ class M3U8Service {
         return await _measureDirectStream(streamUrl, urlWrapper: urlWrapper);
       }
 
-      // 2) 并发: HEAD 测延迟 + 分片测速 (取前 3 个真实分片, 去掉 0 值后取中位数)
-      //    v2.3.0: 视频加速删了, urlWrapper 不需要, 走 firstSegment 直连 CDN.
-      final firstSegment = segments.first;
-      final testUrl = urlWrapper != null ? urlWrapper(firstSegment) : firstSegment;
-      final futures = await Future.wait([
-        _measureLatency(testUrl),
-        _measureSegmentSpeeds(segments, urlWrapper: urlWrapper),
-      ]);
-      final latency = futures[0] as int;
-      final downloadSpeedKBps = futures[1] as double;
+      // 2) 测速: v2.3.6 优先走 ExoPlayer 真实分片下载测速 (跟 web LunaTV
+      //    hls.js FRAG_LOADED 思路 1:1 对齐), 失败再降级到 Dio Range 抽样.
+      //    ExoPlayer 测的是跟播放 100% 一致的下载路径, 不再受 CDN 对
+      //    Range 请求限速 / 路径不一致的影响 (之前 5KB/s 假速度的根因).
+      final latency = await _measureLatency(streamUrl);
+      final exoResult = await _measureSpeedViaExoPlayer(
+        streamUrl,
+        timeoutMs: 6000,
+      );
+      double downloadSpeedKBps;
+      if (exoResult != null && exoResult.success && exoResult.downloadSpeedKBps > 0) {
+        downloadSpeedKBps = exoResult.downloadSpeedKBps;
+      } else {
+        // ExoPlayer 失败 / 超时 / channel 不可用 → 降级到 v2.3.4 的
+        //   Dio Range 抽样. 跟之前一样可能拿到 5KB/s 假数据, 但起码
+        //   比 "0KB/s" 强.
+        downloadSpeedKBps = await _measureSegmentSpeeds(
+          segments,
+          urlWrapper: urlWrapper,
+        );
+      }
 
       return {
         'resolution': resolution,
@@ -104,6 +126,41 @@ class M3U8Service {
         'success': false,
         'error': e.toString(),
       };
+    }
+  }
+
+  /// v2.3.6: 用 ExoPlayer 测真实 m3u8 分片下载速度.
+  ///
+  /// 走 [ExoSpeedTest.testSpeed] → 原生 ExoPlayer prepare() m3u8 URL,
+  ///   监听 `onLoadCompleted` 拿第一个非 manifest 分片 (> 32KB) 的
+  ///   bytes / time, 算 KB/s. 跟 web LunaTV 的 hls.js
+  ///   `Hls.Events.FRAG_LOADED` 测量方式 1:1 对齐.
+  ///
+  /// 返回值:
+  ///   - null: ExoPlayer 不可用 (channel 没注册 / iOS / 桌面),
+  ///           调用方降级到 Dio Range 测速.
+  ///   - success=false: ExoPlayer 跑了但失败 (URL 解析报错 / 超时 /
+  ///           第一个分片 load 没完成), 调用方也可以选择降级.
+  ///   - success=true: 拿到有效 speed, 直接用.
+  ///
+  /// 测的 URL 选 [streamUrl] (m3u8 顶层), 不是 variant URL —
+  ///   ExoPlayer 内部 HlsMediaSource 会自己 follow manifest 选 variant,
+  ///   测的是整条 HLS 链路, 跟实际播放完全一致.
+  Future<ExoSpeedTestResult?> _measureSpeedViaExoPlayer(
+    String streamUrl, {
+    int timeoutMs = 6000,
+  }) async {
+    try {
+      // Lazy probe channel 可用性. 第一次用之前查一次, 之后 cache.
+      // 失败 (iOS / 桌面) 直接走 Dio 测速, 不用每次都 probe.
+      _exoSpeedTestAvailable ??= await ExoSpeedTest.isAvailable();
+      if (!_exoSpeedTestAvailable!) return null;
+      return await ExoSpeedTest.testSpeed(
+        streamUrl,
+        timeoutMs: timeoutMs,
+      );
+    } catch (_) {
+      return null;
     }
   }
 

@@ -19,5 +19,9 @@ class MainActivity : FlutterActivity() {
         //   setKeepScreenOn(false) 还原. 走 Activity.window FLAG_KEEP_SCREEN_ON,
         //   Activity 不可见时 (切后台) OS 自动失效, 不用管 lifecycle.
         KeepScreenOnChannel(flutterEngine.dartExecutor.binaryMessenger, this)
+        // v2.3.6: ExoPlayer 测速 channel — 隐藏 ExoPlayer prepare() m3u8
+        //   URL 测真实分片下载速度. 跟 web 版 LunaTV (hls.js FRAG_LOADED)
+        //   思路 1:1 对齐, 解决 "测速 5KB/s 实际 2MB/s" 的根因.
+        ExoSpeedTestChannel(this, flutterEngine.dartExecutor.binaryMessenger)
     }
 }

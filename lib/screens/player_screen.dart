@@ -1503,10 +1503,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     if (mounted) setState(() {});
 
-    // 并发测速 (最多同时 6 个, 避免瞬时连接太多)
+    // 并发测速 (v2.3.6 改成最多 3 个, 因为 ExoPlayer 测速比 Dio 重很多:
+    //   每个 ExoPlayer ~30MB 内存 + 一条 HLS 连接. 6 个并发在低端机会 OOM.
+    //   3 个并发 + 每个 6s timeout, 6 个源大概 12s 测完. UI 上感受不到明显延迟)
     // 跟 Selene 不同: 我们不等所有源都完, 每个源完成立即更新 UI
     // (testSourcesWithCallback 自带 5s 超时, 单源最多 5s)
-    const maxConcurrent = 6;
+    const maxConcurrent = 3;
     final m3u8 = M3U8Service();
     for (var i = 0; i < pending.length; i += maxConcurrent) {
       final batch = pending.skip(i).take(maxConcurrent);
