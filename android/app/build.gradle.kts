@@ -70,16 +70,18 @@ flutter {
 //     CF edge zone (e.g., api.fn0.qzz.io) TLS 1.3 cipher 协商失败
 //     (SSLV3_ALERT_HANDSHAKE_FAILURE alert 40). OkHttp 可以强制 TLS 1.2,
 //     cipher 列表宽得多, 跟所有 CF zone 都有重叠.
-//   - 不影响视频 m3u8 播放 (libmpv C 库, 完全独立)
+//   - 不影响视频 m3u8 播放 (CustomExoPlayer 走原生 ExoPlayer, 完全独立)
+// v2.3.11: ExoPlayer 现在直接由 CustomExoPlayerChannel.kt 持有, 不再
+//   走 video_player Flutter package. Dart 端不依赖 video_player 抽象,
+//   全部通过自研 MethodChannel (org.moontechlab.lunatv/custom_exo_player)
+//   直接调原生 ExoPlayer + 自配 DefaultLoadControl (min=30s/max=90s).
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    // v2.2.0: ExoPlayer (AndroidX Media3) 原生依赖 — Dart 端走
-    //   video_player ^2.11.1, 内部依赖 androidx.media3 1.4.x. 显式
-    //   列在这里以确保 transitively resolve 到的版本跟代码里硬编码的
-    //   _LAST_KNOWN_GOOD 1.4.1 一致, 避免某个传递依赖拉了别的 media3
-    //   版本导致 ABI 不兼容.
+    // v2.2.0+: ExoPlayer (AndroidX Media3) 原生依赖. v2.3.11 之前是
+    //   Dart 端 video_player ^2.10.1 内部依赖 media3 1.4.x, 现在直接
+    //   走 CustomExoPlayerChannel.kt 调原生, 显式列出来确保版本一致.
     //   之前 libmpv 走的 .so, ~30MB; ExoPlayer 纯 Java, 减小包体积.
-    //   1.4.x 是稳定版, 跟 video_player 2.11.1 兼容.
+    //   1.4.x 是稳定版.
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.4.1")      // HLS
     implementation("androidx.media3:media3-exoplayer-dash:1.4.1")     // DASH

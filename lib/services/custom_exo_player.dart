@@ -1,6 +1,6 @@
 import 'package:flutter/services.dart';
 
-/// v2.3.10: 自定义 ExoPlayer Dart 端 wrapper.
+/// v2.3.11: 自定义 ExoPlayer Dart 端 wrapper.
 ///
 /// 跟原生 [CustomExoPlayerChannel.kt] (Kotlin) 对应. 这个 player 用
 ///   自定义 [DefaultLoadControl]:
@@ -13,17 +13,12 @@ import 'package:flutter/services.dart';
 ///   填 buffer, 减少 rebuffer 频率. 视频加速 (CF Worker 代理) 删了
 ///   之后, 源站 CDN 直连, 网络抖动比之前更明显, 大 buffer 有明显改善.
 ///
-/// v2.3.10 的使用方式: **不影响现有 video_player 渲染**, 只做 buffer
-///   prefetch. 在 [PlayerBackend.open] 时创建 hidden player, prepare()
-///   但不 play(), 让 ExoPlayer 内部下载 m3u8 + 选 variant + 填 buffer
-///   到 30s. 等 1-2s 后再调 video_player 的 controller.initialize().
-///   实际播放的 player 还是 video_player (走 Android 原生 Media3), 但
-///   由于下载链路 (同一 OkHttp client / connection pool) 共享, 提前
-///   下的 segment 走 OS 网络 cache / OkHttp connection pool 命中,
-///   起播和早期播放更顺.
-///
-/// 跟 [ExoSpeedTestChannel] (v2.3.6 加的, v2.3.9 废弃) 不一样: 那个
-///   只测速, 这个真的预下载 + 实际可播放.
+/// v2.3.10 单纯做 buffer prefetch 失败 (ExoPlayer 实例不共享 cache).
+/// v2.3.11 真正替换 video_player — Channel 走 [FlutterEngine.renderer]
+///   拿 [TextureRegistry.SurfaceTextureEntry], 把 ExoPlayer 的视频输出
+///   接到 Flutter 端 [Texture] widget 渲染. video_player 整个包从
+///   pubspec.yaml 移除, [VideoPlayerController] 不再被 [ExoPlayerBackend]
+///   使用.
 class CustomExoPlayer {
   CustomExoPlayer._();
 
@@ -41,18 +36,25 @@ class CustomExoPlayer {
   static const int defaultBufferForPlaybackMs = 5_000;
   static const int defaultBufferForPlaybackAfterRebufferMs = 8_000;
 
-  /// 创建一个自定义 ExoPlayer 实例, 返回 playerId.
-  /// 之后所有操作都通过 playerId 关联.
+  /// v2.3.11: 创建一个自定义 ExoPlayer 实例 + Flutter SurfaceTexture.
   ///
-  /// 默认 buffer 配置用 30s/90s/5s/8s. 如果想自定义可以传 bufferConfig
-  ///   参数覆盖.
-  static Future<int> create({
+  /// - [minBufferMs] / [maxBufferMs] / [bufferForPlaybackMs] /
+  ///   [bufferForPlaybackAfterRebufferMs]: DefaultLoadControl 参数, 跟
+  ///   video_player 的 [DefaultLoadControl] 行为一致.
+  /// - [withTexture]: 是否创建 Flutter SurfaceTexture 拿 video 输出.
+  ///   视频播放必须 true. 隐藏 pre-buffer 可以 false (但 v2.3.10 那个
+  ///   方案已经验证无效, 一般用不到 false 了).
+  ///
+  /// 返回 [CustomExoPlayerHandle] (playerId + textureId). 拿到 [textureId]
+  ///   之后用 Flutter `Texture(textureId: ...)` widget 渲染视频.
+  static Future<CustomExoPlayerHandle> create({
     int? minBufferMs,
     int? maxBufferMs,
     int? bufferForPlaybackMs,
     int? bufferForPlaybackAfterRebufferMs,
+    bool withTexture = true,
   }) async {
-    final result = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+    final result = await _methodChannel.invokeMapMethod<String, dynamic>(
       'create',
       <String, dynamic>{
         if (minBufferMs != null) 'minBufferMs': minBufferMs,
@@ -60,12 +62,13 @@ class CustomExoPlayer {
         if (bufferForPlaybackMs != null) 'bufferForPlaybackMs': bufferForPlaybackMs,
         if (bufferForPlaybackAfterRebufferMs != null)
           'bufferForPlaybackAfterRebufferMs': bufferForPlaybackAfterRebufferMs,
+        'withTexture': withTexture,
       },
     );
     if (result == null) {
       throw StateError('CustomExoPlayer.create returned null');
     }
-    return (result['playerId'] as num).toInt();
+    return CustomExoPlayerHandle._fromMap(result);
   }
 
   static Future<void> setMediaItem(int playerId, String url) async {
@@ -122,7 +125,7 @@ class CustomExoPlayer {
 
   static Future<CustomExoPlayerState?> getState(int playerId) async {
     try {
-      final result = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      final result = await _methodChannel.invokeMapMethod<String, dynamic>(
         'getState',
         <String, dynamic>{'playerId': playerId},
       );
@@ -153,7 +156,7 @@ class CustomExoPlayer {
 
   /// v2.3.10: 监听所有 player 的状态变化 (broadcast stream).
   /// 状态 map 包含 playerId, isPlaying, isBuffering, durationMs,
-  ///   positionMs, playbackState.
+  ///   positionMs, playbackState, videoWidth, videoHeight.
   static Stream<Map<String, dynamic>> get events {
     _eventsStream ??= _eventChannel
         .receiveBroadcastStream()
@@ -165,23 +168,41 @@ class CustomExoPlayer {
     });
     return _eventsStream!;
   }
+}
 
-  /// v2.3.10: 检查 channel 是否可用 (iOS / 桌面 fallback).
-  static Future<bool> isAvailable() async {
-    try {
-      await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
-        'create',
-        <String, dynamic>{},
-      );
-      // 成功 = channel 已注册. 但这样会泄露一个 player 实例.
-      // 实际场景: ExoPlayerBackend 在 init 调一次, 失败就 fallback.
-      return true;
-    } on MissingPluginException {
-      return false;
-    } catch (_) {
-      // 其他异常 (e.g. INVALID_ARG 等) 也算 channel 已注册
-      return true;
-    }
+/// v2.3.11: [CustomExoPlayer.create] 返回的句柄.
+///
+/// - [playerId] 用于后续操作 (setMediaItem/play/pause/seek/release).
+/// - [textureId] 用于 `Texture(textureId: ...)` widget 渲染视频输出.
+class CustomExoPlayerHandle {
+  final int playerId;
+  final int? textureId;
+  final int minBufferMs;
+  final int maxBufferMs;
+  final int bufferForPlaybackMs;
+  final int bufferForPlaybackAfterRebufferMs;
+
+  const CustomExoPlayerHandle({
+    required this.playerId,
+    required this.textureId,
+    required this.minBufferMs,
+    required this.maxBufferMs,
+    required this.bufferForPlaybackMs,
+    required this.bufferForPlaybackAfterRebufferMs,
+  });
+
+  factory CustomExoPlayerHandle._fromMap(Map m) {
+    return CustomExoPlayerHandle(
+      playerId: (m['playerId'] as num).toInt(),
+      textureId: (m['textureId'] as num?)?.toInt(),
+      minBufferMs: (m['minBufferMs'] as num?)?.toInt() ?? CustomExoPlayer.defaultMinBufferMs,
+      maxBufferMs: (m['maxBufferMs'] as num?)?.toInt() ?? CustomExoPlayer.defaultMaxBufferMs,
+      bufferForPlaybackMs: (m['bufferForPlaybackMs'] as num?)?.toInt() ??
+          CustomExoPlayer.defaultBufferForPlaybackMs,
+      bufferForPlaybackAfterRebufferMs:
+          (m['bufferForPlaybackAfterRebufferMs'] as num?)?.toInt() ??
+              CustomExoPlayer.defaultBufferForPlaybackAfterRebufferMs,
+    );
   }
 }
 
@@ -191,6 +212,8 @@ class CustomExoPlayerState {
   final int durationMs;
   final int positionMs;
   final int playbackState;
+  final int videoWidth;
+  final int videoHeight;
   final String error;
 
   const CustomExoPlayerState({
@@ -199,6 +222,8 @@ class CustomExoPlayerState {
     required this.durationMs,
     required this.positionMs,
     required this.playbackState,
+    required this.videoWidth,
+    required this.videoHeight,
     required this.error,
   });
 
@@ -209,6 +234,8 @@ class CustomExoPlayerState {
       durationMs: (m['durationMs'] as num?)?.toInt() ?? 0,
       positionMs: (m['positionMs'] as num?)?.toInt() ?? 0,
       playbackState: (m['playbackState'] as num?)?.toInt() ?? 0,
+      videoWidth: (m['videoWidth'] as num?)?.toInt() ?? 0,
+      videoHeight: (m['videoHeight'] as num?)?.toInt() ?? 0,
       error: (m['error'] as String?) ?? '',
     );
   }

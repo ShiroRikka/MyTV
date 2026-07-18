@@ -1,7 +1,7 @@
 name: luna_tv
 description: "LunaTV-inspired Flutter client"
 publish_to: 'none'
-version: 2.3.10
+version: 2.3.11
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -46,7 +46,7 @@ dependencies:
   #   编译 + dart API 兼容性都要重测). 降 video_player 风险最小:
   #   2.10.1 跟 2.11.x API 几乎一致, ExoPlayer 2.x 老一点但 build.gradle
   #   显式列 androidx.media3 1.4.1 会覆盖 transitive, 实际生效还是 1.4.1.
-  video_player: ^2.10.1
+  # video_player: ^2.10.1  # v2.3.11: 卸 video_player, 改用自研 CustomExoPlayer
   screen_brightness: 0.2.2+1
   volume_controller: 2.0.8
   # macos_window_utils: ^1.0.4

@@ -23,11 +23,12 @@ class MainActivity : FlutterActivity() {
         //   URL 测真实分片下载速度. 跟 web 版 LunaTV (hls.js FRAG_LOADED)
         //   思路 1:1 对齐, 解决 "测速 5KB/s 实际 2MB/s" 的根因.
         ExoSpeedTestChannel(this, flutterEngine.dartExecutor.binaryMessenger)
-        // v2.3.10: Custom ExoPlayer channel — 自定义 DefaultLoadControl,
+        // v2.3.10+: Custom ExoPlayer channel — 自定义 DefaultLoadControl,
         //   minBufferMs=30s / maxBufferMs=90s (video_player 默认 15/50),
         //   解决 "卡顿时 buffer 时间太短, 频繁 rebuffer" 的问题.
-        //   v2.3.9 ExoPlayer 测速被废弃 (来不及跑), 这个 channel 是新加
-        //   的, 独立工作, 不会影响 v2.3.9 测速.
-        CustomExoPlayerChannel(this, flutterEngine.dartExecutor.binaryMessenger)
+        // v2.3.11: 加 SurfaceTexture 输出 (替换 video_player), 视频帧
+        //   走 Flutter Texture widget 渲染. video_player 整个包不再
+        //   需要, 见 exo_player_backend.dart 注释.
+        CustomExoPlayerChannel(this, flutterEngine, flutterEngine.dartExecutor.binaryMessenger)
     }
 }

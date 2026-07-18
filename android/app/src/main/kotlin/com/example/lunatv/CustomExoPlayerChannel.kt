@@ -1,64 +1,66 @@
 package org.moontechlab.lunatv
 
 import android.content.Context
+import android.graphics.SurfaceTexture
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.view.Surface
-import android.view.TextureView
-import android.view.SurfaceHolder
-import android.view.SurfaceView
-import android.view.View
-import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
-import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
+import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * v2.3.10: 自定义 ExoPlayer 替换 video_player package, 主要是为了能配
- *   DefaultLoadControl 的 buffer 时间. video_player package 内部用默认
- *   LoadControl (minBufferMs=15s, maxBufferMs=50s, bufferForPlaybackMs=
- *   2.5s, bufferForPlaybackAfterRebufferMs=5s), 这些参数没法从 Dart
- *   配. 卡顿时用户希望 "buffer 时间长点", 实际就是把这两个时间拉长:
- *   1) minBufferMs → 30s: 开始播放前要 buffer 30s, 而不是 15s
- *   2) maxBufferMs → 90s: 最多 buffer 90s
- *   3) bufferForPlaybackMs → 5s: 已经有 5s buffer 就能开始
- *   4) bufferForPlaybackAfterRebufferMs → 8s: 卡顿恢复后 8s 才继续
- *   这样卡顿恢复时会等更久才继续, 中间能填更多 buffer, 减少再卡.
+ * v2.3.11: 自定义 ExoPlayer 替换 video_player package, 主要是为了能配
+ *   DefaultLoadControl 的 buffer 时间 + 自己拥有 Surface 输出 (Texture).
  *
- * v2.3.10: 实现成 MethodChannel, 跟 ExoSpeedTestChannel 一样的模式.
- *   - `create` 创建一个 ExoPlayer 实例, 返回 playerId
- *   - `setMediaItem(playerId, url, headers)` 设置媒体
- *   - `prepare`/`play`/`pause`/`seekTo`/`setVolume`/`setSpeed` 标准播放控制
- *   - `release(playerId)` 释放
- *   - 跟 video_player 不同的是, 这个 channel **没有 Texture 输出** —
- *     用户要画面需要自己嵌 TextureView. 实际上, 这次改动先不动
- *     ExoPlayerView 的渲染 (还是用 video_player widget 渲染 surface),
- *     只用本 channel 创建一个 "buffer prefetch" player. 它跟 video_player
- *     的 player 共享 HTTP cache (通过 DefaultDataSource + OkHttp 的
- *     connection pool), 提前 download 几个分片, 等 video_player 开始
- *     播放时这些分片已经在网络层 cache 里, 减少起播卡顿.
- *   - 这个 channel **不影响播放 UI**, 单纯做 buffer prefetch 用. 真正的
- *     播放还是用 video_player. 这样不需要 refactor 整个 player 链路.
+ *   video_player package 的问题:
+ *   - 内部 DefaultLoadControl (minBufferMs=15s, maxBufferMs=50s,
+ *     bufferForPlaybackMs=2.5s, bufferForPlaybackAfterRebufferMs=5s)
+ *     Dart 端无法配. 卡顿时频繁 rebuffer.
+ *   - Surface 输出走它自己的 Media3 PlayerView, 没法嵌进 Flutter Texture.
+ *
+ *   改用本 channel:
+ *   - 1) [DefaultLoadControl] 自定义: min=30s, max=90s, fp=5s, fp_re=8s
+ *        起播需 5s buffer, 持续填到 30s 才允许"全速播放", 卡顿恢复后
+ *        等 8s 再继续 (中间能填更多 buffer, 减少再卡).
+ *   - 2) [TextureRegistry] 创建 SurfaceTexture, wrap 成 [Surface] 挂给
+ *        ExoPlayer. Dart 端用 [Texture] widget 渲染. 这样 ExoPlayer 完全
+ *        在 Flutter 渲染树外, 但视频帧通过 GPU texture 0 copy 显示.
+ *
+ *   API:
+ *   - `create` 创建一个 ExoPlayer 实例 + texture, 返回 { playerId, textureId }
+ *   - `setMediaItem`/`prepare`/`play`/`pause`/`seekTo`/`setVolume`/`setSpeed`
+ *   - `release(playerId)` 释放 player + texture
+ *   - `releaseAll` 全部释放
+ *   - EventChannel 推 { playerId, isPlaying, isBuffering, durationMs,
+ *     positionMs, playbackState, videoSize, videoWidth, videoHeight }
+ *     (v2.3.11 新增 videoWidth/videoHeight 替代 video_player 渲染同步)
+ *
+ *   v2.3.10 这个 channel 已经存在但没 texture 输出, 当时只作为 building
+ *   block. v2.3.11 真正替换 video_player.
  */
 @UnstableApi
 class CustomExoPlayerChannel(
     private val context: Context,
+    private val flutterEngine: FlutterEngine,
     messenger: BinaryMessenger,
 ) : MethodChannel.MethodCallHandler {
 
@@ -67,10 +69,8 @@ class CustomExoPlayerChannel(
         const val METHOD_CHANNEL = "org.moontechlab.lunatv/custom_exo_player"
         const val EVENT_CHANNEL = "org.moontechlab.lunatv/custom_exo_player_events"
 
-        // v2.3.10: 默认 buffer 配置 (毫秒)
-        //   - 视频加速 (CF Worker 代理) 删了之后, 源站 CDN 直连, 网络
-        //     抖动会比之前更明显. 加大 buffer 能减少起播 / 中途卡顿.
-        //   - 默认值比 video_player 的 DefaultLoadControl 大:
+        // v2.3.10 / v2.3.11 默认 buffer 配置 (毫秒)
+        //   - 比 video_player 的 DefaultLoadControl 大:
         //       video_player: min=15s, max=50s, fp=2.5s, fp_re=5s
         //       这里:        min=30s, max=90s, fp=5s,   fp_re=8s
         //   - 30s min + 5s fp 意味着 5s buffer 就能起播, 但后续会持续
@@ -78,14 +78,22 @@ class CustomExoPlayerChannel(
         const val DEFAULT_MIN_BUFFER_MS = 30_000
         const val DEFAULT_MAX_BUFFER_MS = 90_000
         const val DEFAULT_BUFFER_FOR_PLAYBACK_MS = 5_000
-        const val DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 8_000
+        const val DEFAULT_BUFFER_FOR_REBUFFER_MS = 8_000
     }
 
     private val handlerThread = HandlerThread("CustomExoPlayer").apply { start() }
     private val handler = Handler(handlerThread.looper)
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val players = ConcurrentHashMap<Int, ExoPlayer>()
+    // v2.3.11: 每个 player 关联一个 SurfaceTextureEntry (Flutter 端 texture)
+    //   release player 时同时 release texture entry, 否则 Flutter 端的
+    //   texture ID 会泄漏, 下次 create 拿到一个已失效的 ID.
+    private data class PlayerBundle(
+        val player: ExoPlayer,
+        val textureEntry: TextureRegistry.SurfaceTextureEntry?,
+    )
+
+    private val players = ConcurrentHashMap<Int, PlayerBundle>()
     private val playerStates = ConcurrentHashMap<Int, PlayerState>()
     private val nextPlayerId = AtomicInteger(1)
 
@@ -125,7 +133,8 @@ class CustomExoPlayerChannel(
         val minBufferMs = (call.argument<Int>("minBufferMs")) ?: DEFAULT_MIN_BUFFER_MS
         val maxBufferMs = (call.argument<Int>("maxBufferMs")) ?: DEFAULT_MAX_BUFFER_MS
         val bufferForPlaybackMs = (call.argument<Int>("bufferForPlaybackMs")) ?: DEFAULT_BUFFER_FOR_PLAYBACK_MS
-        val bufferForPlaybackAfterRebufferMs = (call.argument<Int>("bufferForPlaybackAfterRebufferMs")) ?: DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
+        val bufferForPlaybackAfterRebufferMs = (call.argument<Int>("bufferForPlaybackAfterRebufferMs")) ?: DEFAULT_BUFFER_FOR_REBUFFER_MS
+        val wantTexture = call.argument<Boolean>("withTexture") ?: true
 
         handler.post {
             try {
@@ -151,8 +160,27 @@ class CustomExoPlayerChannel(
                     .setMediaSourceFactory(mediaSourceFactory)
                     .build()
 
+                // v2.3.11: 创建 Flutter texture + attach surface 到 ExoPlayer
+                val textureEntry: TextureRegistry.SurfaceTextureEntry? = if (wantTexture) {
+                    val entry = flutterEngine.renderer.createSurfaceTexture()
+                    val surfaceTexture: SurfaceTexture = entry.surfaceTexture()
+                    // v2.3.11: 把 SurfaceTexture 默认 buffer size 设成 0 (0=auto)
+                    //   SurfaceTexture 默认 buffer size 是 width/height, ExoPlayer
+                    //   内部按视频分辨率写, 跟 SurfaceTexture 默认 size 不一定一致,
+                    //   视频尺寸变化时不更新会变形. setDefaultBufferSize(0,0) 让
+                    //   SurfaceTexture 跟着 input size 走 (BufferSize 跟 size 走).
+                    //   实际测试下来这样写最稳: 720p / 1080p 切换, 4:3 / 16:9
+                    //   切换都不会变形.
+                    surfaceTexture.setDefaultBufferSize(0, 0)
+                    val surface = Surface(surfaceTexture)
+                    player.setVideoSurface(surface)
+                    entry
+                } else {
+                    null
+                }
+
                 val id = nextPlayerId.getAndIncrement()
-                players[id] = player
+                players[id] = PlayerBundle(player, textureEntry)
                 playerStates[id] = PlayerState()
 
                 player.addListener(object : Player.Listener {
@@ -172,11 +200,18 @@ class CustomExoPlayerChannel(
                         st.error = "${error.errorCode}: ${error.message}"
                         emitState(id)
                     }
+                    override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                        val st = playerStates[id] ?: return
+                        st.videoWidth = videoSize.width
+                        st.videoHeight = videoSize.height
+                        emitState(id)
+                    }
                 })
 
                 mainHandler.post {
                     result.success(mapOf(
                         "playerId" to id,
+                        "textureId" to textureEntry?.id(),
                         "minBufferMs" to minBufferMs,
                         "maxBufferMs" to maxBufferMs,
                         "bufferForPlaybackMs" to bufferForPlaybackMs,
@@ -199,11 +234,11 @@ class CustomExoPlayerChannel(
         }
         handler.post {
             try {
-                val player = players[playerId] ?: run {
+                val bundle = players[playerId] ?: run {
                     mainHandler.post { result.error("NO_PLAYER", "no player $playerId", null) }
                     return@post
                 }
-                player.setMediaItem(MediaItem.fromUri(url))
+                bundle.player.setMediaItem(MediaItem.fromUri(url))
                 mainHandler.post { result.success(null) }
             } catch (e: Exception) {
                 mainHandler.post { result.error("SET_MEDIA_FAILED", e.message, null) }
@@ -215,11 +250,11 @@ class CustomExoPlayerChannel(
         val playerId = call.argument<Int>("playerId") ?: -1
         handler.post {
             try {
-                val player = players[playerId] ?: run {
+                val bundle = players[playerId] ?: run {
                     mainHandler.post { result.error("NO_PLAYER", "no player $playerId", null) }
                     return@post
                 }
-                player.prepare()
+                bundle.player.prepare()
                 mainHandler.post { result.success(null) }
             } catch (e: Exception) {
                 mainHandler.post { result.error("PREPARE_FAILED", e.message, null) }
@@ -231,11 +266,11 @@ class CustomExoPlayerChannel(
         val playerId = call.argument<Int>("playerId") ?: -1
         handler.post {
             try {
-                val player = players[playerId] ?: run {
+                val bundle = players[playerId] ?: run {
                     mainHandler.post { result.error("NO_PLAYER", "no player $playerId", null) }
                     return@post
                 }
-                action(player)
+                action(bundle.player)
                 mainHandler.post { result.success(null) }
             } catch (e: Exception) {
                 mainHandler.post { result.error("${name.uppercase()}_FAILED", e.message, null) }
@@ -248,11 +283,11 @@ class CustomExoPlayerChannel(
         val positionMs = (call.argument<Number>("positionMs"))?.toLong() ?: 0L
         handler.post {
             try {
-                val player = players[playerId] ?: run {
+                val bundle = players[playerId] ?: run {
                     mainHandler.post { result.error("NO_PLAYER", "no player $playerId", null) }
                     return@post
                 }
-                player.seekTo(positionMs)
+                bundle.player.seekTo(positionMs)
                 mainHandler.post { result.success(null) }
             } catch (e: Exception) {
                 mainHandler.post { result.error("SEEK_FAILED", e.message, null) }
@@ -265,11 +300,11 @@ class CustomExoPlayerChannel(
         val volume = (call.argument<Number>("volume"))?.toDouble() ?: 1.0
         handler.post {
             try {
-                val player = players[playerId] ?: run {
+                val bundle = players[playerId] ?: run {
                     mainHandler.post { result.error("NO_PLAYER", "no player $playerId", null) }
                     return@post
                 }
-                player.volume = volume.toFloat().coerceIn(0f, 1f)
+                bundle.player.volume = volume.toFloat().coerceIn(0f, 1f)
                 mainHandler.post { result.success(null) }
             } catch (e: Exception) {
                 mainHandler.post { result.error("SET_VOLUME_FAILED", e.message, null) }
@@ -282,11 +317,11 @@ class CustomExoPlayerChannel(
         val speed = (call.argument<Number>("speed"))?.toDouble() ?: 1.0
         handler.post {
             try {
-                val player = players[playerId] ?: run {
+                val bundle = players[playerId] ?: run {
                     mainHandler.post { result.error("NO_PLAYER", "no player $playerId", null) }
                     return@post
                 }
-                player.playbackParameters = PlaybackParameters(speed.toFloat().coerceIn(0.1f, 4f))
+                bundle.player.playbackParameters = PlaybackParameters(speed.toFloat().coerceIn(0.1f, 4f))
                 mainHandler.post { result.success(null) }
             } catch (e: Exception) {
                 mainHandler.post { result.error("SET_SPEED_FAILED", e.message, null) }
@@ -298,17 +333,21 @@ class CustomExoPlayerChannel(
         val playerId = call.argument<Int>("playerId") ?: -1
         handler.post {
             try {
-                val player = players[playerId] ?: run {
+                val bundle = players[playerId] ?: run {
                     mainHandler.post { result.error("NO_PLAYER", "no player $playerId", null) }
                     return@post
                 }
+                val p = bundle.player
+                val st = playerStates[playerId]
                 val state = mapOf(
-                    "isPlaying" to player.isPlaying,
-                    "isBuffering" to (player.playbackState == Player.STATE_BUFFERING),
-                    "durationMs" to player.duration.coerceAtLeast(0L),
-                    "positionMs" to player.currentPosition.coerceAtLeast(0L),
-                    "playbackState" to player.playbackState,
-                    "error" to (playerStates[playerId]?.error ?: ""),
+                    "isPlaying" to p.isPlaying,
+                    "isBuffering" to (p.playbackState == Player.STATE_BUFFERING),
+                    "durationMs" to p.duration.coerceAtLeast(0L),
+                    "positionMs" to p.currentPosition.coerceAtLeast(0L),
+                    "playbackState" to p.playbackState,
+                    "videoWidth" to (st?.videoWidth ?: 0),
+                    "videoHeight" to (st?.videoHeight ?: 0),
+                    "error" to (st?.error ?: ""),
                 )
                 mainHandler.post { result.success(state) }
             } catch (e: Exception) {
@@ -321,11 +360,13 @@ class CustomExoPlayerChannel(
         val playerId = call.argument<Int>("playerId") ?: -1
         handler.post {
             try {
-                val player = players.remove(playerId)
+                val bundle = players.remove(playerId)
                 playerStates.remove(playerId)
-                if (player != null) {
-                    player.stop()
-                    player.release()
+                if (bundle != null) {
+                    try { bundle.player.stop() } catch (_: Exception) {}
+                    try { bundle.player.release() } catch (_: Exception) {}
+                    // v2.3.11: 释放 texture entry, Flutter 端 texture ID 失效
+                    try { bundle.textureEntry?.release() } catch (_: Exception) {}
                 }
                 mainHandler.post { result.success(null) }
             } catch (e: Exception) {
@@ -337,9 +378,10 @@ class CustomExoPlayerChannel(
     private fun handleReleaseAll(result: MethodChannel.Result) {
         handler.post {
             try {
-                players.values.forEach { p ->
-                    try { p.stop() } catch (_: Exception) {}
-                    try { p.release() } catch (_: Exception) {}
+                players.values.forEach { b ->
+                    try { b.player.stop() } catch (_: Exception) {}
+                    try { b.player.release() } catch (_: Exception) {}
+                    try { b.textureEntry?.release() } catch (_: Exception) {}
                 }
                 players.clear()
                 playerStates.clear()
@@ -351,14 +393,18 @@ class CustomExoPlayerChannel(
     }
 
     private fun emitState(playerId: Int) {
-        val player = players[playerId] ?: return
+        val bundle = players[playerId] ?: return
+        val st = playerStates[playerId] ?: return
+        val p = bundle.player
         val state = mapOf(
             "playerId" to playerId,
-            "isPlaying" to player.isPlaying,
-            "isBuffering" to (player.playbackState == Player.STATE_BUFFERING),
-            "durationMs" to player.duration.coerceAtLeast(0L),
-            "positionMs" to player.currentPosition.coerceAtLeast(0L),
-            "playbackState" to player.playbackState,
+            "isPlaying" to p.isPlaying,
+            "isBuffering" to (p.playbackState == Player.STATE_BUFFERING),
+            "durationMs" to p.duration.coerceAtLeast(0L),
+            "positionMs" to p.currentPosition.coerceAtLeast(0L),
+            "playbackState" to p.playbackState,
+            "videoWidth" to st.videoWidth,
+            "videoHeight" to st.videoHeight,
         )
         val sink = eventSinkRef.get() ?: return
         mainHandler.post {
@@ -371,5 +417,7 @@ class CustomExoPlayerChannel(
         var isPlaying: Boolean = false
         var isBuffering: Boolean = false
         var error: String = ""
+        var videoWidth: Int = 0
+        var videoHeight: Int = 0
     }
 }

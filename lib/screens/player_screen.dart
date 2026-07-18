@@ -5,12 +5,14 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:cached_network_image/cached_network_image.dart';
 // v2.2.0: 卸 libmpv (media_kit) 改 ExoPlayer (AndroidX Media3).
-//   走官方 video_player 包, Dart 端只暴露 VideoPlayerController 抽象 API.
-//   实际渲染用 video_player 的 VideoPlayer widget (基于 Media3 PlayerView).
+// v2.3.11: 卸 video_player Flutter package, 改用自研 [CustomExoPlayer]
+//   (CustomExoPlayerChannel.kt + custom_exo_player.dart). video_player
+//   import 整个删了. 视频输出走 Flutter SurfaceTexture + Texture widget.
+//   实际 ExoPlayer 1.4.x (跟 video_player 2.x 内部是同一份) + 自配
+//   DefaultLoadControl (min=30s/max=90s, 卡顿恢复后等 8s 再继续).
 
 import 'package:volume_controller/volume_controller.dart';
 import 'package:screen_brightness/screen_brightness.dart';
-import 'package:video_player/video_player.dart';
 import 'package:luna_tv/services/api_service.dart';
 import 'package:luna_tv/services/diary_service.dart';
 import 'package:luna_tv/services/douban_service.dart';
@@ -68,9 +70,9 @@ class _SourcePingItem {
 class _PlayerScreenState extends State<PlayerScreen>
     with WidgetsBindingObserver {
   // 播放器 — v2.2.0: 卸 libmpv 改 ExoPlayer (AndroidX Media3).
-  //   通过 PlayerBackend 抽象 (ExoPlayerBackend 实现) 操作, 不直接耦合
-  //   video_player. ExoPlayerBackend 内部持 VideoPlayerController, widget
-  //   层通过 rawController getter 拿到底层 controller 渲染 VideoPlayer.
+  //   v2.3.11: 卸 video_player, 改用自研 [CustomExoPlayer] (走
+  //   CustomExoPlayerChannel.kt). 视频输出走 Flutter SurfaceTexture,
+  //   [ExoPlayerView] 渲染 [Texture] widget, 不再依赖 video_player.
   ExoPlayerBackend? _player;
   // v2.3.0: 视频加速链路整个删了, 以下字段跟着删:
   //   - VideoProxyServer _videoProxy  (本地代理服务, 整个文件删了)
@@ -4563,7 +4565,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                   alignment: Alignment.center,
                   children: [
                     // v2.2.0: 卸 libmpv Video() 改 ExoPlayerView.
-                    //   内部用 video_player.VideoPlayer 渲染 (Media3 PlayerView).
+                    // v2.3.11: 内部不再用 video_player.VideoPlayer 渲染,
+                    //   改用 Flutter [Texture] widget 渲染 CustomExoPlayer
+                    //   拿到的 SurfaceTexture (ExoPlayer 后端纹理 ID).
                     //   UI 控件 (LunaTV 自定义底栏/顶栏/手势) 全部在外层
                     //   Stack 上, 这里只是个视频画面的薄壳.
                     ExoPlayerView(backend: _player!),
