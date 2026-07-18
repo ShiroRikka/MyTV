@@ -1569,10 +1569,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   ///   (因为 url == originalUrl, 测一次就够).
   Future<_SourceSpeedInfo> _testSourceSpeed(M3U8Service m3u8, SearchResult s) async {
     if (s.episodes.isEmpty) return _SourceSpeedInfo.unavailable();
-    // v2.3.0: 直连测速, 不走 worker. originalUrl = url, 测速链路退化成单 URL.
-    final url = s.episodes.first;
+    // v2.3.5: 测速必须跟播放使用同一个最终 URL。
+    //   播放会先跑 _resolveSharePageUrl() 把 /share/xxx HTML 分享页解析成
+    //   真实 m3u8; 旧测速直接拿 episodes.first, 等于拿 HTML / 跳转页测速,
+    //   UI 就会出现只有延迟、0KB/s、1KB/s 等假数据。
+    final rawUrl = s.episodes.first;
+    final url = await _resolveSharePageUrl(rawUrl);
     DiaryService.add(
-        '[Video] _testSourceSpeed begin: title=${s.title}, isProxied=false, originalUrl=$url (v2.3.0 direct CDN)');
+        '[Video] _testSourceSpeed begin: title=${s.title}, isProxied=false, rawUrl=$rawUrl, resolvedUrl=$url (v2.3.5 same as playback URL)');
     return _testOneUrl(m3u8, url, originalUrl: url);
   }
 
