@@ -166,7 +166,13 @@ class M3U8Service {
   /// 获取M3U8流的片段URL列表
   Future<List<String>> _getSegmentUrls(String m3u8Url) async {
     try {
-      final response = await _dio.get(m3u8Url);
+      // v2.3.21: 加 Referer 头. 之前 v2.3.20 测速时只有段下载带 Referer,
+      //   m3u8 playlist 拉取不带, 腾讯/优酷/部分爱奇艺海外节点等需要
+      //   Referer 的源 m3u8 拉取 403, _getSegmentUrls 返回 [].
+      final response = await _dio.get(
+        m3u8Url,
+        options: Options(headers: _refererHeaders(m3u8Url)),
+      );
       final content = response.data as String;
       return _parseSegmentsFromContent(content, m3u8Url);
     } catch (e) {
@@ -430,9 +436,15 @@ class M3U8Service {
 
 
   /// 从 M3U8 文件获取分辨率
+  /// v2.3.21: 加 Referer 头. 之前只有 _getSegmentUrls 失败 (m3u8 拉取
+  ///   403), _getResolutionFromM3U8 也没 Referer, 同样 403 → 0x0.
+  ///   2 个 playlist 拉取函数同时修, 不留半截.
   Future<Map<String, int>> _getResolutionFromM3U8(String m3u8Url) async {
     try {
-      final response = await _dio.get(m3u8Url);
+      final response = await _dio.get(
+        m3u8Url,
+        options: Options(headers: _refererHeaders(m3u8Url)),
+      );
       final content = response.data as String;
       final lines = content.split('\n').map((line) => line.trim()).toList();
 
@@ -511,20 +523,40 @@ class M3U8Service {
     return valid[valid.length ~/ 2];
   }
 
-  /// v2.3.4: 单分片 Range 1MB 抽样.
-  /// v2.3.17: receiveTimeout 4s → 6s (慢网下 4s 经常截断返 0);
-  ///   加 Referer 头 (从 URL host 自动取, 部分 CDN 不带 Referer 返 403);
-  ///   失败重试 1 次 (delay 800ms, 不抖服务器).
-  Future<double> _measureDownloadSpeedFast(String url) async {
-    // v2.3.17: 提取 host 当 Referer. 部分 CDN (iQiyi / 腾讯 / 爱奇艺
-    //   海外节点) 不带 Referer 直接返 403 Forbidden, 加完成功率 70%→95%
+  /// v2.3.21: 提取 host 当 Referer. 部分 CDN (iQiyi / 腾讯 / 爱奇艺
+  ///   海外节点) 不带 Referer 直接返 403 Forbidden, 加完成功率 70%→95%.
+  ///
+  /// v2.3.21 关键修复: 之前只有 `_measureDownloadSpeedFast` 段下载有
+  ///   Referer, `_getSegmentUrls` + `_getResolutionFromM3U8` 这两个
+  ///   **拉 m3u8 playlist 文本**的地方没有. 结果: 源 m3u8 自身需要
+  ///   Referer 时 (腾讯 / 优酷 / 部分爱奇艺海外节点), m3u8 拉取 403,
+  ///   _getSegmentUrls 返回 [], _measureM3u8Speed 返回 "m3u8 解析失败
+  ///   或没分片" → "不可用". iQiyi 因为 m3u8 不需 Referer, 反而能跑.
+  ///   用户反馈: "只有爱奇艺有测试速度其他全是不可用实际是可以播放的"
+  ///   修复: 把 Referer 提取逻辑抽成 helper, 3 个拉取函数都加.
+  Map<String, dynamic> _refererHeaders(String url) {
     Uri? parsed;
     try {
       parsed = Uri.parse(url);
     } catch (_) {}
-    final referer = (parsed != null && parsed.scheme.isNotEmpty && parsed.host.isNotEmpty)
+    final referer = (parsed != null &&
+            parsed.scheme.isNotEmpty &&
+            parsed.host.isNotEmpty)
         ? '${parsed.scheme}://${parsed.host}/'
         : null;
+    return <String, dynamic>{
+      if (referer != null) 'Referer': referer,
+    };
+  }
+
+  /// v2.3.4: 单分片 Range 1MB 抽样.
+  /// v2.3.17: receiveTimeout 4s → 6s (慢网下 4s 经常截断返 0);
+  ///   加 Referer 头 (从 URL host 自动取, 部分 CDN 不带 Referer 返 403);
+  ///   失败重试 1 次 (delay 800ms, 不抖服务器).
+  /// v2.3.21: 抽 `_refererHeaders` helper, 跟 _getSegmentUrls /
+  ///   _getResolutionFromM3U8 共用.
+  Future<double> _measureDownloadSpeedFast(String url) async {
+    final refHeaders = _refererHeaders(url);
 
     for (int attempt = 0; attempt < 2; attempt++) {
       try {
@@ -534,7 +566,7 @@ class M3U8Service {
         //   思路一致 — 拿代表性块算 KB/s, 不下完整分片.
         final headers = <String, dynamic>{
           'Range': 'bytes=0-1048575',
-          if (referer != null) 'Referer': referer,
+          ...refHeaders,
         };
         final response = await _dio.get(
           url,
