@@ -2312,43 +2312,35 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   只剩原源直连 playUrl. _currentPlayUrl 字段已删, 加速链路弹层也删了.
     try {
       await _player!.stop();
-      await _player!.open(playUrl);
-      // 云记忆恢复
+      // v2.3.12 hotfix: 云记忆恢复 (resume) 改用 open(startAt:) 而不是
+      //   open() + 之后 play() + seek(). 之前 v2.3.11 自研 CustomExoPlayer
+      //   时, seek 放在 play() 之后, ExoPlayer 在 buffer 没填满时经常
+      //   静默丢 seek, 用户从历史点进来还是从 0 开始.
       //
-      // v1.0.61 fix: v1.0.60 等了 position stream, 但根因是 player 在
-      // `open()` 后没进入 playing 状态 (某些 libmpv / 网络场景下不 auto-play),
-      // 停在 stopped. 在 stopped 状态下:
-      //   1. position stream 不会回 (因为没在播)
-      //   2. _player!.seek() 被 libmpv 静默丢, state.position 仍是 0
-      //   3. v1.0.60 的 "250ms 后检查 position, 不对就重试" 也救不回来,
-      //      因为 state.position 永远 0, 重试的 seek 同样被丢
-      // 表现: 用户装 v1.0.60 后还是从 0 开始播
-      // 修法:
-      //   1. 显式 _player!.play() 强制 player 进入 playing 状态
-      //   2. 监听 streams.buffering, 等 buffering 完成 (从 true→false)
-      //   3. 再 seek
-      //   4. 用 streams.position 验证 (而不是 state.position, state 是
-      //      快照可能没更新), 验证失败重试一次
+      //   v1.0.61 时 (走 media_kit / libmpv), video_player / libmpv 内部
+      //   已经处理了 "prepare + startAt 在 play 前" 这套逻辑, 所以 seek
+      //   总能生效. v2.3.11 自研 CustomExoPlayer 后, 这套时序得 Dart 端
+      //   自己做.
+      //
+      //   ExoPlayer 标准做法: setMediaItem → prepare → seekTo(startAt) →
+      //   play. seekTo 必须在 play 前, 否则 player 状态是 STATE_READY +
+      //   isPlaying=true, seek 调用走"异步缓冲队列", 在 buffer 没填满时
+      //   被 ExoPlayer 内部 messageQueue 排队, 实际不生效.
+      //
+      //   现在 [ExoPlayerBackend.open] 已经把 setMediaItem + prepare +
+      //   seekTo(startAt) + play 全部按这个顺序排好了 (见
+      //   exo_player_backend.dart open()), Dart 端只要传 startAt 就行.
+      //   保留 verify + 重试 seek 兜底, 万一 open() 内 seek 失败.
+      await _player!.open(playUrl, startAt: resumeAt);
       if (resumeAt != null) {
-        // 1. 显式 play 强制进入 playing 状态
-        try {
-          await _player!.play();
-        } catch (_) {}
-        // 2. 等 buffering 完成
-        await _waitForBufferingComplete(timeout: const Duration(seconds: 5));
-        // 3. seek
-        try {
-          await _player!.seek(resumeAt);
-        } catch (_) {}
-        // 4. 验证: 用 position stream 检查 position 是否到 resumeAt 附近,
-        // 250ms 内没到就重试一次
+        // v1.0.61 fix: 验证 seek 是否生效. open() 内 seek + play 都按
+        //   正确顺序排了, 但保险起见仍 verify. 不命中再重试一次.
         await Future.delayed(const Duration(milliseconds: 250));
         final ok = await _verifySeekByStream(resumeAt);
         if (!ok) {
           try {
             await _player!.seek(resumeAt);
           } catch (_) {}
-          // 再验证一次
           await Future.delayed(const Duration(milliseconds: 250));
           await _verifySeekByStream(resumeAt);
         }
