@@ -343,6 +343,19 @@ class M3U8Service {
     return false;
   }
 
+  /// v2.3.15: 判断 URL 是不是 m3u8 直播流/点播流, 用于 [getStreamInfo] 走
+  ///   m3u8 测速分支 (解析分片) 还是直链测速分支 (HEAD + Range 1MB).
+  ///   跟 [_looksLikePlaylistUrl] 区别: 这个是顶层 URL 判断, 那个是
+  ///   解析出来的分片是不是另一个 playlist (master → variant) 判断.
+  bool _looksLikeM3u8Url(String url) {
+    try {
+      final path = Uri.parse(url).path.toLowerCase();
+      if (path.endsWith('.m3u8') || path.endsWith('.m3u')) return true;
+    } catch (_) {}
+    final lower = url.toLowerCase();
+    return lower.contains('.m3u8') || lower.contains('.m3u');
+  }
+
   bool _looksLikePlaylistUrl(String url) {
     try {
       final path = Uri.parse(url).path.toLowerCase();

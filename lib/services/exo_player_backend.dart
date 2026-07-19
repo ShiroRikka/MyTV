@@ -23,6 +23,7 @@
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show VoidCallback;
 import 'package:video_player/video_player.dart';
 
 import 'package:luna_tv/services/diary_service.dart';
@@ -31,7 +32,12 @@ import 'package:luna_tv/services/player_backend.dart';
 class ExoPlayerBackend implements PlayerBackend {
   // ── 内部 state ──────────────────────────────────────
   VideoPlayerController? _controller;
-  StreamSubscription<VideoPlayerValue>? _valueSub;
+  // v2.3.15: video_player 2.10.1 的 addListener() 返回 void (没有
+  //   StreamSubscription), 这里改成存 VoidCallback 自身, dispose 时
+  //   调 removeListener. 之前 v2.3.0 用 StreamSubscription 包装是
+  //   误用 API, 编译会报 "This expression has type 'void' and can't be used".
+  VoidCallback? _valueListener;
+  // 保留旧字段以兼容 (v2.3.14 的代码, 现在置空, dispose 兜底)
 
   // ── 缓存的状态 ────────────────────────────────────────
   bool _isPlaying = false;
@@ -156,8 +162,11 @@ class ExoPlayerBackend implements PlayerBackend {
     final old = _controller;
     if (old != null) {
       try {
-        await _valueSub?.cancel();
-        _valueSub = null;
+        final listener = _valueListener;
+        if (listener != null) {
+          old.removeListener(listener);
+        }
+        _valueListener = null;
         await old.pause();
         await old.dispose();
       } catch (_) {}
@@ -166,7 +175,11 @@ class ExoPlayerBackend implements PlayerBackend {
 
     final c = VideoPlayerController.networkUrl(
       Uri.parse(url),
-      httpHeaders: headers,
+      // v2.3.15: video_player 2.10.1 的 httpHeaders 形参是
+      //   Map<String, String> (非 nullable), open() 入参是
+      //   Map<String, String>?. 用 ?? {} 兜底避免编译错
+      //   "Map<String, String>? can't be assigned to Map<String, String>".
+      httpHeaders: headers ?? const <String, String>{},
       videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
     );
     try {
@@ -193,7 +206,11 @@ class ExoPlayerBackend implements PlayerBackend {
     _safeAdd(_positionCtl, _position);
 
     // 订阅 listener, 同步 isPlaying / isBuffering / position / size
-    _valueSub = c.addListener(() => _onValue(c.value));
+    // v2.3.15: video_player 2.10.1 addListener 返回 void, 不能赋值给
+    //   StreamSubscription. 存 VoidCallback 自身, dispose 时
+    //   removeListener. 之前 v2.3.0/v2.3.14 写法编译就挂.
+    _valueListener = () => _onValue(c.value);
+    c.addListener(_valueListener!);
 
     if (startAt != null && startAt > Duration.zero) {
       try {
@@ -313,11 +330,17 @@ class ExoPlayerBackend implements PlayerBackend {
   @override
   Future<void> dispose() async {
     _disposed = true;
-    try {
-      await _valueSub?.cancel();
-    } catch (_) {}
-    _valueSub = null;
+    // v2.3.15: 用 removeListener 替代之前的 _valueSub?.cancel().
+    //   addListener 返回 void, 不存 StreamSubscription, 改存
+    //   VoidCallback 自身.
     final c = _controller;
+    final listener = _valueListener;
+    if (c != null && listener != null) {
+      try {
+        c.removeListener(listener);
+      } catch (_) {}
+    }
+    _valueListener = null;
     if (c != null) {
       try {
         await c.pause();
