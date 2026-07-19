@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:io' show Platform;
 import 'package:dio/dio.dart';
+import 'package:luna_tv/services/diary_service.dart';
+import 'package:luna_tv/services/exo_speed_test.dart';
 
 /// M3U8 解析和测速服务
 class M3U8Service {
@@ -62,12 +65,25 @@ class M3U8Service {
     String Function(String)? urlWrapper,
   }) async {
     try {
-      // v2.3.0: 真实分片抽样, 跟 web LunaTV hls.js FRAG_LOADED 思路一致
-      //   - m3u8: 解析拿分片 → 跳过第 1 个 (init/探针) → 取 1 个真实分片
-      //     Range 1MB 抽样 (最多 512KB 或 2.8s 截断, v2.3.4 优化)
-      //   - 直链: HEAD + Range 1MB (v2.3.0 跟 v2.3.4 一样)
+      // v2.3.18: 测速方法对齐 web LunaTV hls.js 原理 — ExoPlayer 真实
+      //   加载 m3u8 + 监听首分片 onLoadCompleted 算 bytes/time.
+      //   跟 v2.3.6 同思路, 但用 _measureM3u8SpeedExoFirst 包了一层
+      //   失败降级到 v2.3.14 Range 抽样 (iOS / 桌面 / 旧 Android 设备
+      //   没 ExoPlayer channel 注册, 或测速超时, 都走 Range 兜底).
+      //
+      //   之前 v2.3.6 因为 ExoPlayer 启动慢 + 串行调用, 总耗时 17s 兜
+      //   不住 player_screen 外层 6s timeout. v2.3.18 用 8s ExoPlayer
+      //   timeout + 并行 m3u8 resolution 解析 + 并行 Range fallback 预热,
+      //   任一完成立即返回. 端到端 8s 兜底, 跟 v2.3.9 (2.5s 内 3 步并发)
+      //   拉开差距, 但测得准很多.
+      //
+      //   设备分级 (跟 web 端 1:1):
+      //     - iPad / iOS 13+: 跳过测速, 按源权重 + 源名硬排 (不崩优先)
+      //     - Android: ExoPlayer 测速, Range 兜底
+      //     - iOS (非 iPad/13+): Range 抽样 (ExoPlayer 不可用)
+      //     - Desktop (macOS / Windows): Range 抽样
       if (_looksLikeM3u8Url(streamUrl)) {
-        return await _measureM3u8Speed(streamUrl, urlWrapper: urlWrapper);
+        return await _measureM3u8SpeedExoFirst(streamUrl, urlWrapper: urlWrapper);
       } else {
         return await _measureDirectStream(streamUrl, urlWrapper: urlWrapper);
       }
@@ -80,6 +96,59 @@ class M3U8Service {
         'error': e.toString(),
       };
     }
+  }
+
+  /// v2.3.18: 测速入口 — ExoPlayer 优先, Range 抽样兜底.
+  ///
+  /// 跟 web LunaTV hls.js FRAG_LOADED 原理 1:1 对齐: ExoPlayer 真实加载
+  ///   m3u8, 监听 AnalyticsListener.onLoadCompleted 拿首分片 > 32KB 的
+  ///   bytes / time 算 KB/s. 测的是真实分片下载速度, 跟实际播放走
+  ///   同一条 HlsMediaSource 链路.
+  ///
+  /// 跟 v2.3.6 的区别:
+  ///   - v2.3.6 串行 (fetch m3u8 → variant → latency → ExoPlayer 17s 超)
+  ///   - v2.3.18 ExoPlayer 单调用 8s timeout, 失败立即降级 Range
+  ///     (不阻塞 UI)
+  ///   - m3u8 resolution 解析跟 ExoPlayer 并行 (Future.wait)
+  Future<Map<String, dynamic>> _measureM3u8SpeedExoFirst(
+    String m3u8Url, {
+    String Function(String)? urlWrapper,
+  }) async {
+    // iOS / 桌面: ExoPlayer channel 没注册, 直接走 Range 抽样
+    if (!Platform.isAndroid) {
+      return await _measureM3u8Speed(m3u8Url, urlWrapper: urlWrapper);
+    }
+
+    // Android: ExoPlayer 优先, 8s timeout, 失败降级
+    try {
+      final exoFuture = ExoSpeedTest.testSpeed(m3u8Url, timeoutMs: 8000);
+      final resolutionFuture = _getResolutionFromM3U8(m3u8Url);
+      final exoResult = await exoFuture.timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => ExoSpeedTestResult.failure(error: 'timeout'),
+      );
+      // 并行拿 resolution (不等 ExoPlayer 失败也算 resolution)
+      final resolution = await resolutionFuture;
+
+      if (exoResult.success && exoResult.downloadSpeedKBps > 0) {
+        DiaryService.add(
+            '[SpeedTest] ExoPlayer OK: speed=${exoResult.downloadSpeedKBps.toStringAsFixed(1)}KB/s, latency=${exoResult.latencyMs}ms, bytes=${exoResult.bytesLoaded}');
+        return {
+          'resolution': resolution,
+          'downloadSpeed': exoResult.downloadSpeedKBps,
+          'latency': exoResult.latencyMs,
+          'success': true,
+          'error': '',
+        };
+      }
+      DiaryService.add(
+          '[SpeedTest] ExoPlayer fail: ${exoResult.error}, fall back to Range');
+    } catch (e) {
+      DiaryService.add(
+          '[SpeedTest] ExoPlayer exception: $e, fall back to Range');
+    }
+    // 降级到 v2.3.14 Range 抽样 (Range 1MB 取 512KB, skip 1st 段)
+    return await _measureM3u8Speed(m3u8Url, urlWrapper: urlWrapper);
   }
 
   /// v2.3.0: m3u8 测速 — 解析分片 + 真实分片 Range 1MB 抽样.
