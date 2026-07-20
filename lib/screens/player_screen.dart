@@ -1617,14 +1617,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// 后台测速所有源：并发用 M3U8Service 测速, 并按综合分从高到低排序源列表
   /// v1.0.45: 完整测速 (分辨率 + 下载速度 + ping) 替代 v1.0.40 之前的简单 HEAD ping
   ///
-  /// v2.3.23 排序时机修复: 用户反馈 "测试一个源就排序速度高的往上排不是全
-  ///   部测试完在排". 之前每完成一个源就 setState, UI 看到 _pingState 颜色
-  ///   渐变 (testing → fast/slow) 但 _sourceResults 顺序没动, 视觉上
-  ///   "颜色变化 = 排序错觉". 现在改成:
-  ///     1. 测速中: 只更新 _sourceSpeeds map, 不 setState, UI 看不到中间态
-  ///        (所有源保持 "testing" 状态, 跟用户预期一致 — 测速中不应该有结果)
-  ///     2. 全部测完: 1 次 setState, _pingState 全部更新到最终状态, 排序
-  ///   用户感受: 全源 "测试中" → 1 秒内 → 全源显示速度 + 列表按综合分排.
+  /// v2.3.30 测速 UX 改进: 测一个源出一个结果, 排一次.
+  ///   用户反馈 "能不能测快点太慢了" + "测一个出一个结果测一次测一个源排一次排行"
+  ///   v2.3.23 注释里写的 "颜色变化 = 排序错觉" 已经是过虑:
+  ///     - 之前 _pingState 渐变 (testing → fast/slow) 但 _sourceResults 顺序没动
+  ///       → 用户看到的 "颜色变" 跟 "排" 不一致, 所以才是错觉
+  ///   v2.3.30 改: 测完一源就 setState + _sortSourcesBySpeed, 颜色变 + 列表
+  ///     顺序变同步发生, 不再是错觉. 用户能立刻看到结果跟排行变化.
+  ///   3 并发 batch 内, 最多 3 次连续 setState (一个完成 setState 一次),
+  ///   Flutter 内部 frame scheduler 合并, 实际渲染帧数 ≈ 批大小. 性能
+  ///   跟 v2.3.23 一次 setState 几乎一致.
   Future<void> _testAllSourcesInBackground() async {
     // 先标记所有源为测速中
     final pending = <_SourcePingItem>[];
@@ -1637,8 +1639,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     // v2.3.23 提速: m3u8_service.dart 内部 4 步串行变 1 步并发,
     //   单源测速从 ~6s → ~2s, 3 并发批 6 个源 6s 测完, 比 v2.3.22 12s 快 2 倍
-    // 跟 Selene 不同: 我们不等所有源都完, 每个源完成立即更新 UI
-    // (testSourcesWithCallback 自带 5s 超时, 单源最多 5s)
+    // v2.3.30: 测一个源出一个结果 — 测完一源立即 setState + 排序
     const maxConcurrent = 3;
     final m3u8 = M3U8Service();
     for (var i = 0; i < pending.length; i += maxConcurrent) {
@@ -1646,21 +1647,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       await Future.wait(batch.map((item) async {
         final speed = await _testSourceSpeed(m3u8, item.source);
         if (!mounted) return;
-        // v2.3.23: 只更新 map, 不 setState. 之前每源 setState 触发
-        //   _pingState 颜色渐变, 用户视觉误判成 "排了一次". 现在所有
-        //   源在测速中都保持 "testing" 状态, 测完一次性 setState
         _sourceSpeeds[item.source.source] = speed;
         _pingState[item.source.source] = _stateFromSpeed(speed);
+        // v2.3.30: 每源测完立即 setState + 排序, 用户能看到 "测一个出一个,
+        //   测一次排一次". _sortSourcesBySpeed 内部已经 setState.
+        _sortSourcesBySpeed();
       }));
     }
 
     if (!mounted) return;
-
-    // v2.3.23: 一次性 setState, 上面已经填好所有 _sourceSpeeds / _pingState,
-    //   这次 rebuild 一次性把全部状态 + 排序结果渲染出来. 用户看到:
-    //     测速中 (全 "testing" 颜色) → 测完 (一次性全部显示速度 + 列表按综合分排)
-    //   没有 "测一个排一次" 的中间视觉, 跟用户预期一致
-    if (mounted) setState(() {});
 
     // 自动选最快源 (除非用户已经主动选过, 或从历史点进来明确指定了源)
     // v1.0.46 fix: 之前从历史进来也会被自动改源, 因为 _selectSource 不传 episodeIndex
@@ -1689,9 +1684,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       // 从历史进来的: 标记自动已选 (用历史源), 防止后续逻辑再触发自动切源
       _autoSelectedSource = _selectedSource?.source ?? widget.videoInfo.source;
     }
-
-    // 按综合分从高到低重排源列表 (历史模式也排, 让用户能直观看到哪个源更快)
-    _sortSourcesBySpeed();
+    // v2.3.30: 不再末尾统一 sort, 上面 Future.wait 里每源测完就调过
+    //   _sortSourcesBySpeed. 列表顺序在每源测完时已经最终化.
   }
 
   /// v2.3.0: 测速链路简化. 之前逻辑:
