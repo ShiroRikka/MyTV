@@ -21,9 +21,17 @@ class SourceCategory {
   const SourceCategory({required this.typeId, required this.typeName});
 
   factory SourceCategory.fromJson(Map<String, dynamic> json) {
+    // v2.4.1: 跟 web categories route 1:1, 兼容 3 种字段名
+    //   web: c.type_id ?? c.typeid ?? c.id
+    //   某些源返 typeid / id 而不是 type_id, 不读备用字段会拿到 0
+    //   导致后续 ?ac=videolist&t=0 返回错的内容 (分类内容不匹配)
+    final rawTypeId = json['type_id'] ?? json['typeid'] ?? json['id'];
+    final rawTypeName = json['type_name'] ?? json['typename'] ?? json['name'];
     return SourceCategory(
-      typeId: (json['type_id'] as num?)?.toInt() ?? 0,
-      typeName: (json['type_name'] as String? ?? '').trim(),
+      typeId: rawTypeId is int
+          ? rawTypeId
+          : int.tryParse(rawTypeId?.toString() ?? '') ?? 0,
+      typeName: (rawTypeName?.toString() ?? '').trim(),
     );
   }
 

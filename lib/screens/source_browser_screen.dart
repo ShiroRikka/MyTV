@@ -229,6 +229,20 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
     final typeId = _selectedCategoryId;
     final page = isLoadMore ? ((_meta?.page ?? 1) + 1) : 1;
 
+    // v2.4.1: 跟 web page.tsx useEffect 1:1 — 分类模式下没选 category 不调 list
+    //   web: if (activeSourceKey && activeCategory && mode === 'category') fetchItems(...)
+    //   之前 mobile 用 typeId ?? 0 走 ?ac=videolist&t=0 → 上游返回不固定分类内容
+    //   (这就是用户反馈「分类内容不匹配」的根因)
+    if (_searchQuery.isEmpty && typeId == null) {
+      setState(() {
+        _isLoadingPage = false;
+        _isLoadingMore = false;
+        _items.clear();
+        _meta = null;
+      });
+      return;
+    }
+
     if (!isLoadMore) {
       setState(() {
         _isLoadingPage = true;
@@ -243,7 +257,7 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
     }
 
     final SourceBrowserPage? result = _searchQuery.isEmpty
-        ? await SourceBrowserService.getList(r, typeId: typeId ?? 0, page: page)
+        ? await SourceBrowserService.getList(r, typeId: typeId!, page: page)
         // v2.3.32.1: search 模式不传 typeId, 跟 web source-browser search route
         //   ?ac=videolist&wd=Q&pg=N 1:1 (web search route 不带 t 参数)
         : await SourceBrowserService.search(r,
