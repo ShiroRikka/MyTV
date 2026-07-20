@@ -572,15 +572,15 @@ class _DetailSheet extends StatelessWidget {
                               ?.copyWith(fontWeight: FontWeight.bold)),
                       const SizedBox(height: 6),
                       if (detail.year.isNotEmpty)
-                        _kv('年份', detail.year),
+                        _kv(context, '年份', detail.year),
                       if (detail.typeName.isNotEmpty)
-                        _kv('类型', detail.typeName),
-                      if (detail.area.isNotEmpty) _kv('地区', detail.area),
-                      if (detail.lang.isNotEmpty) _kv('语言', detail.lang),
+                        _kv(context, '类型', detail.typeName),
+                      if (detail.area.isNotEmpty) _kv(context, '地区', detail.area),
+                      if (detail.lang.isNotEmpty) _kv(context, '语言', detail.lang),
                       if (detail.actor.isNotEmpty)
-                        _kv('演员', detail.actor),
+                        _kv(context, '演员', detail.actor),
                       if (detail.director.isNotEmpty)
-                        _kv('导演', detail.director),
+                        _kv(context, '导演', detail.director),
                     ],
                   ),
                 ),
@@ -631,7 +631,7 @@ class _DetailSheet extends StatelessWidget {
     );
   }
 
-  Widget _kv(String k, String v) => Padding(
+  Widget _kv(BuildContext context, String k, String v) => Padding(
         padding: const EdgeInsets.only(bottom: 2),
         child: RichText(
           maxLines: 2,
