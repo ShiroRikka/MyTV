@@ -1733,6 +1733,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   ///   7s 留余量. 截图反馈 "完全没速度显示了" 的根因是 m3u8 master
   ///   playlist < 32KB 被旧版 _measureDownloadSpeedFast256K 拒掉,
   ///   v2.3.11 m3u8_service.dart 内部已修, 走 variant/segment 真实分片.
+  /// v2.3.24: 外层 timeout 5s → 12s, 跟 m3u8 master→variant 8s 链 + 2.8s
+  ///   seg 测速 + 5s latency 链路对齐. 之前 v2.3.23 5s outer 是基于
+  ///   「4 步并发, 4s 跑完」 算的, 但实际 m3u8 拉 master→variant 是
+  ///   串行 4+4=8s, outer 5s 在 chain 阶段就砍, 猫眼/非凡这种 master
+  ///   playlist 源 100% "不可用". v2.3.24 latency 跟 m3u8 fetch 并发
+  ///   (在 m3u8_service.dart 里), 整链路 max(8s 链, 5s latency) + 2.8s
+  ///   seg = 10.8s 最坏, 12s outer 留 1.2s buffer.
   Future<_SourceSpeedInfo> _testOneUrl(
     M3U8Service m3u8,
     String url, {
@@ -1745,7 +1752,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         originalUrl: originalUrl,
         // v2.3.0: 视频加速删了, 不用 urlWrapper 包装段 URL
       ).timeout(
-        const Duration(seconds: 5),
+        const Duration(seconds: 12),
         onTimeout: () => <String, dynamic>{
           'resolution': {'width': 0, 'height': 0},
           'downloadSpeed': 0.0,

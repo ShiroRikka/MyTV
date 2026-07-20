@@ -101,27 +101,43 @@ class M3U8Service {
   ///   下载速度, 跟 libmpv / ExoPlayer 实际播放走的链路完全一样, 不会
   ///   出现 "测速 5KB/s 实际 1-2MB/s" 的假数据.
   ///
+  /// v2.3.24: latency 跟 m3u8 fetch 并发
+  ///   v2.3.23 latency 放在 Future.wait 里 (跟 seg speeds 并发), 但 m3u8
+  ///   fetch 在 await 那一步是串行 — master 4s + variant 4s = 8s 串行
+  ///   必须先跑完才能进 Future.wait. 8s 链 + 5s latency = 最坏 13s,
+  ///   玩家外层 5s 永远砍. 猫眼/非凡这两个 master 链源 100% "不可用".
+  ///   修法: latency 跟 _fetchMediaPlaylist 完全独立 (HEAD 测 ms, 不需要
+  ///   m3u8 内容), 提前 fire 起来跟 fetch 并发. 整链路 max(8s 链, 5s
+  ///   latency) + seg 测速, 玩家外层 12s 覆盖最坏情况.
+  ///
   /// v2.3.23 提速 + 缓存:
   ///   之前 4 步串行 (m3u8 拉 → segment 测 → latency 测 → 再拉一次
   ///   m3u8 拿 resolution). 最坏 8s + 2.8s + 5s + 1s = 16.8s, 玩家
   ///   外层 7s 砍掉后面 3 步, 分辨率经常拿不到, 速度也没.
   ///   现在:
-  ///     1. 拉 m3u8 一次, 拿 content (缓存). 内部 master→variant 链
+  ///     1. fire latency 起来 (跟 m3u8 拉并发, 0 串行)
+  ///     2. 拉 m3u8 一次, 拿 content (缓存). 内部 master→variant 链
   ///        共享 4s 总预算, 不再 master 4s + variant 4s 串行
-  ///     2. segment 测速 + latency + resolution 3 件事并发 Future.wait
-  ///   端到端 4s (m3u8 拉 4s + Future.wait 3 件事 0s 串行)
-  ///   比 v2.3.22 串行 16.8s 快 4 倍, 玩家 5s 外层再也不会砍.
+  ///     3. segment 测速 + 等 latency + resolution 3 件事并发 Future.wait
+  ///   端到端 max(8s 链, 5s latency) + 2.8s seg test = 10.8s 最坏
+  ///   玩家外层 12s 覆盖, 典型 (CDN 快) 4-5s
   Future<Map<String, dynamic>> _measureM3u8Speed(
     String m3u8Url, {
     String Function(String)? urlWrapper,
   }) async {
     try {
+      // v2.3.24: latency 跟 m3u8 fetch 并发 (HEAD 跟 m3u8 拉取完全独立,
+      //   提前 fire 省 5s 串行)
+      final latencyFuture = _measureLatency(m3u8Url);
+
       // 1. 拉 m3u8 拿 content (内部处理 master→variant, 共享 4s 预算)
       //    v2.3.23: 之前 v2.3.22 拉 master 4s + variant 4s 串行 = 8s,
       //    现在 4s 拿最终 media playlist, 跟外层 5s timeout 留 1s 给下游
       final playlist = await _fetchMediaPlaylist(m3u8Url);
       if (playlist == null) {
         _log('measureM3u8Speed: m3u8 拉取失败 (master/variant) url=$m3u8Url');
+        // v2.3.24: 还要 drain latency 防止 unhandled future warning
+        latencyFuture.then((_) {}, onError: (_) {});
         return {
           'resolution': {'width': 0, 'height': 0},
           'downloadSpeed': 0.0,
@@ -140,6 +156,7 @@ class M3U8Service {
           segments.where((url) => !_looksLikePlaylistUrl(url)).toList();
       if (playableSegments.isEmpty) {
         _log('measureM3u8Speed: 没有可测速的分片 url=$m3u8Url');
+        latencyFuture.then((_) {}, onError: (_) {});
         return {
           'resolution': {'width': 0, 'height': 0},
           'downloadSpeed': 0.0,
@@ -154,16 +171,16 @@ class M3U8Service {
           ? playableSegments.skip(1).take(3)
           : playableSegments.take(3);
 
-      // 3. 3 件事并发 (segment 测速 + latency + resolution)
-      //    v2.3.23: 之前 3 件串行 = 5s+2.8s+1s, 现在并发 max=5s
-      //    segments 测速通常 0.5-1.5s (CDN 快), latency 1-2s,
-      //    resolution 0s (复用 content). 整个 3-5s 跑完
+      // 3. 2 件事并发 (segment 测速 + 等 latency + resolution 复用)
+      //    v2.3.24: latency 已经在 step 0 fire 了, 现在 Future.wait 只
+      //    剩 seg 测速 + 等 latency, 加上同步 resolution
+      //    端到端 max(seg_speeds 2.8s, latency 剩余时间) ≤ 2.8s
       final results = await Future.wait([
         _measureSegmentSpeeds(
           candidates.toList(),
           urlWrapper: urlWrapper,
         ),
-        _measureLatency(m3u8Url),
+        latencyFuture,
         Future.value(_parseResolutionFromContent(content)),
       ]);
       final speed = results[0] as double;
