@@ -290,9 +290,14 @@ class M3U8Service {
   String? _resolveSharePage(String html, String pageUrl) {
     try {
       // 1. var main / var url / var playurl / var src
+      //   v2.3.29 修: 之前 v2.3.27 写的 `r"""\s*=\s*["'](/[^"']+\.m3u8[^"']*)["']"""`
+      //   是 raw triple-quote string 拼接, Dart 编译报 "Can't find ']' to
+      //   match '['" — raw string 里 `["']` 字符会让 parser 误判. 改成
+      //   三引号 string + $varName 插值. build #29723581728 / #29724331832
+      //   都因为这个 failed, v2.3.27 / v2.3.28 实际都没编译过, 不是测速 bug.
       for (final varName in const ['main', 'url', 'playurl', 'hlsUrl', 'playUrl', 'src', 'm3u8']) {
         final m = RegExp(
-          r'\bvar\s+' + varName + r"""\s*=\s*["'](/[^"']+\.m3u8[^"']*)["']""",
+          """\\bvar\\s+$varName\\s*=\\s*['"](/[^'"]+\\.m3u8[^'"]*)['"]""",
           caseSensitive: false,
         ).firstMatch(html);
         if (m != null) {
@@ -301,14 +306,16 @@ class M3U8Service {
       }
       // 2. v2.3.28 DPlayer 模板: url: 'https://...m3u8' (光速/玉兔/部分镜像)
       //   短 HTML (~1KB), 用 hls.js + DPlayer, JS 写在 inline script 里
+      //   v2.3.29 修: 同上 raw triple-quote 编译错误, 改三引号 string
       final dpM = RegExp(
-        r"""\burl\s*:\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""",
+        """\\burl\\s*:\\s*['"](https?://[^'"]+\\.m3u8[^'"]*)['"]""",
         caseSensitive: false,
       ).firstMatch(html);
       if (dpM != null) return dpM.group(1);
       // 3. v2.3.28 meta refresh: <meta http-equiv="refresh" content="0;url=https://...m3u8">
+      //   v2.3.29 修: 同上 raw triple-quote 编译错误, 改三引号 string
       final metaM = RegExp(
-        r"""<meta[^>]+http-equiv=["']?refresh["']?[^>]+url=([^"'\s>]+)""",
+        """<meta[^>]+http-equiv=["']?refresh["']?[^>]+url=([^'">\\s]+)""",
         caseSensitive: false,
       ).firstMatch(html);
       if (metaM != null) {
@@ -317,16 +324,24 @@ class M3U8Service {
           return Uri.parse(pageUrl).resolve(refreshUrl).toString();
         }
       }
-      // 4. config 字符串 "https://...m3u8"
-      final m2 = RegExp(r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']').firstMatch(html);
+      // 4. config 字符串 "https://...m3u8" 或 'https://...m3u8'
+      //   v2.3.29 修: 之前 v2.3.27 raw string 写法 `r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']'`
+      //   raw string 里 `\'` 是字面 2 字符 `\'` 不是 `'`, parser 误判.
+      //   改三引号 string, 字符类 `['"]` (单或双引号) 直写.
+      final m2 = RegExp(
+        """['"](https?://[^'"]+\\.m3u8[^'"]*)['"]""",
+      ).firstMatch(html);
       if (m2 != null) return m2.group(1);
-      // 5. 相对路径 "/path/index.m3u8"
-      final m3 = RegExp(r'["\'](/[^"\']+\.m3u8[^"\']*)["\']').firstMatch(html);
+      // 5. 相对路径 "/path/index.m3u8" 或 '/path/index.m3u8'
+      //   v2.3.29 修: 同 m2
+      final m3 = RegExp(
+        """['"](/[^'"]+\\.m3u8[^'"]*)['"]""",
+      ).firstMatch(html);
       if (m3 != null) return Uri.parse(pageUrl).resolve(m3.group(1)!).toString();
       // 6. v2.3.28 修兜底: 直接 pageUrl + '/index.m3u8' (不再丢末段)
       //   v2.3.27 拼 base 路径会丢末段 (/play/dJ680A9d → /play/index.m3u8)
       if (!pageUrl.endsWith('.m3u8')) {
-        return pageUrl.endsWith('/') ? '${pageUrl}index.m3u8' : '$pageUrl/index.m3u8';
+        return pageUrl.endsWith('/') ? '$pageUrl/index.m3u8' : '$pageUrl/index.m3u8';
       }
     } catch (e) {
       _log('resolveSharePage failed url=$pageUrl err=$e');
