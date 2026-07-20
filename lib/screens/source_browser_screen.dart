@@ -1,42 +1,45 @@
 // lib/screens/source_browser_screen.dart
 //
-// v2.3.32 重大改: 1:1 复刻 web LunaTV /source-browser (Next.js 14)
+// v2.3.32.1 hotfix: 修源调用 + UI 1:1 web LunaTV /source-browser
 //
-//   跟 v2.3.31 比, v2.3.32 加的关键点:
-//   1. 排序下拉 (5 选: 默认 / 标题 A→Z / 标题 Z→A / 年份↑ / 年份↓)
-//      - web: <select value={sortBy}>; mobile: PopupMenuButton + ListTile
-//      - 跟 web 一样影响当前页 items (sort client-side, 不重新打源 API)
-//   2. 年份筛选下拉
-//      - 候选年份从当前页 items 自动取 (跟 web availableYears 同款)
-//      - 没选 = "全部年份" (跟 web 同款)
-//   3. 关键词筛选 (filterKeyword)
-//      - 在当前已加载 items 里按 title+remarks 过滤 (client-side)
-//      - 跟 web filteredAndSorted 同源
-//   4. 视口自动填满 (autoFill on empty viewport)
-//      - 跟 web 一样: 滚到底仍不够一屏时, 连翻 5 页 (400ms 节流)
-//      - 解决分类只有 1-2 页时空白视口体验差
-//   5. 节流翻页 (700ms)
-//      - 跟 web 一样: 700ms 内不重复打 fetch
-//   6. 详情预览**全屏 dialog** (替换 v2.3.31 bottom sheet)
-//      - 跟 web preview modal 同款: 顶 header + 滚动内容 + 底「立即播放」
-//      - 集成豆瓣 (DoubanService.getDoubanDetails): 评分/导演/编剧/演员/
-//        类型/国家/语言/首播/集数/剧情简介
-//      - 集成 Bangumi (BangumiService.getBangumiDetails): 自动判 6 位
-//        douban_id 走 Bangumi, 显示评分/标签/infobox/简介
-//      - 失败/没 douban_id: 静默 fallback 到源 detail.content
-//   7. 不再 auto-select 第一个源
-//      - v2.3.31: 进页面就 _selectedResourceIdx = 0 (默选第一个源)
-//      - v2.3.32: 改成纯用户主动选, 空源时显示「请先在源管理添加源」
-//      - 跟 web /source-browser useEffect 自动选第一个有区别 (web
-//        自动选, mobile 改成不自动选, 体现"第一源不固定"原则)
+// v2.3.32 上一版的错 (这版修):
+//   1. detail 走 SourceBrowserService.getDetail 是错的 — web detail 走
+//      /api/detail (downstream.getDetailFromApi), 返 GlobalSearchResult 含
+//      douban_id / desc / class 字段. mobile 等价是 SearchService.getDetailSync
+//      (返 SearchResult 含 doubanId / desc / class_). 这版改回 getDetailSync
+//   2. doubanId 应该从 SearchResult.doubanId 拿, 不是 SourceBrowserDetail.vodDoubanId
+//      (上一版我自己加的字段, web 没这个, 已回滚)
+//   3. detail 没 doubanId 时 web 走 /api/search/one fallback 拿, 这版加
+//      DownstreamService.searchFromApi 同源精确搜 fallback
+//   4. UI 不是 1:1: 上一版用 M3 ChoiceChip 灰底 + 8px 圆角, web 是
+//      border-2 + 渐变选中 + 2xl 圆角 + shadow-xl + blur 光晕 + fadeInUp
+//      动画. 这版重写 UI 玻璃质感 1:1
+//   5. auto-select: 上一版改成"不自动选", 跟 web useEffect auto-select
+//      first source + 跟 TV/movie 自动用所有源 都不一致. 这版改回 auto-select
 //
-// 不变的东西:
-//   - 源 API 协议 (ac=list / ac=videolist&t=X&pg=N / ac=videolist&wd=Q
-//     &pg=N / ac=videolist&ids=ID) 跟 v2.3.31 一致, 跟 web 1:1
-//   - SourceBrowserService 4 个方法签名不变 (getCategories / getList /
-//     search / getDetail), 内部 GBK/UTF-8 解码 + 5 分钟内存 cache 不变
-//   - UserDataService 配的代理 / 加速 链路不变, detail 端
-//     `ac=videolist&ids=ID` 跟 web /api/source-browser/* 拼 URL 1:1
+// web 1:1 源调用对照表:
+//   源列表:   web /api/source-browser/sites
+//             mobile SearchService.getActiveResources()
+//   分类:     web /api/source-browser/categories?source=K (上游 ?ac=list)
+//             mobile SourceBrowserService.getCategories(resource)
+//   列表:     web /api/source-browser/list?source=K&type_id=T&page=N
+//             mobile SourceBrowserService.getList(resource, typeId, page)
+//   搜索:     web /api/source-browser/search?source=K&q=Q&page=N
+//             mobile SourceBrowserService.search(resource, query, page)
+//   详情:     web /api/detail?source=K&id=ID (downstream.getDetailFromApi)
+//             mobile SearchService.getDetailSync(source, id)
+//   豆瓣:     web /api/douban/details?id=D
+//             mobile DoubanService.getDoubanDetails(context, doubanId)
+//   Bangumi:  web /api/proxy/bangumi?path=v0/subjects/B
+//             mobile BangumiService.getBangumiDetails(context, bangumiId)
+//   search_one fallback: web /api/search/one?resourceId=K&q=Q
+//             mobile DownstreamService.searchFromApi(resource, query)
+//
+// 「第一源不固定」原则:
+//   - app 不内置任何源 (grep 全代码无 DEFAULT_SITES / DEFAULT_API / hardcoded)
+//   - 源列表从 UserDataService 配的源拿 (用户配什么源就显示什么源)
+//   - auto-select 第一个用户源是 UX (跟 web useEffect 同款, 跟 TV/movie
+//     自动用所有源同款), 不是 hardcoded — 用户清空源列表后没源可 auto-select
 
 import 'dart:async';
 
@@ -47,15 +50,17 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:luna_tv/models/bangumi.dart';
 import 'package:luna_tv/models/douban_movie.dart';
 import 'package:luna_tv/models/search_resource.dart';
+import 'package:luna_tv/models/search_result.dart';
 import 'package:luna_tv/models/source_browser.dart';
 import 'package:luna_tv/models/video_info.dart';
 import 'package:luna_tv/screens/player_screen.dart';
 import 'package:luna_tv/services/bangumi_service.dart';
+import 'package:luna_tv/services/downstream_service.dart';
 import 'package:luna_tv/services/douban_service.dart';
 import 'package:luna_tv/services/search_service.dart';
 import 'package:luna_tv/services/source_browser_service.dart';
 
-/// v2.3.32: 排序选项, 跟 web /source-browser <select> 5 个 option 1:1
+/// v2.3.32.1: 排序选项, 跟 web <select> 5 个 option 1:1
 enum _SortBy {
   defaultSort('default', '默认'),
   titleAsc('title-asc', '标题 A→Z'),
@@ -68,7 +73,7 @@ enum _SortBy {
   const _SortBy(this.value, this.label);
 }
 
-/// v2.3.32: mode 跟 web source-browser 同款 (URL ?mode=)
+/// v2.3.32.1: mode 跟 web source-browser 同款 (URL ?mode=)
 enum _Mode { category, search }
 
 class SourceBrowserScreen extends StatefulWidget {
@@ -81,7 +86,7 @@ class SourceBrowserScreen extends StatefulWidget {
 class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
   // -------- source / category / items state --------
   List<SearchResource> _resources = const [];
-  String? _selectedSourceKey; // v2.3.32 改: null = 用户没选 (不再是 0)
+  String? _selectedSourceKey; // null = 没源 / 还没 auto-select
   List<SourceCategory> _categories = const [];
   int? _selectedCategoryId;
   final List<SourceBrowserItem> _items = [];
@@ -97,7 +102,7 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
   _Mode _mode = _Mode.category;
   String _searchQuery = '';
   _SortBy _sortBy = _SortBy.defaultSort;
-  String? _filterYear; // null = 全部年份
+  String? _filterYear;
   String _filterKeyword = '';
   Timer? _searchDebounce;
 
@@ -105,7 +110,7 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
   DateTime _lastFetchAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _autoFillInProgress = false;
 
-  // -------- scroll controller --------
+  // -------- controllers --------
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _searchController = TextEditingController();
   final TextEditingController _filterKeywordController =
@@ -141,19 +146,28 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
       setState(() {
         _resources = list;
         _isLoadingSources = false;
-        // v2.3.32 改: **不默选第一个源**, 让用户主动选
-        // - 跟 web 不同 (web useEffect 自动选第一个, mobile 改成不自动)
-        // - 体现"第一源不固定" — app 不预设任何源
-        // - 用户没选时显示 "请先在源管理添加源" 引导
-        _selectedSourceKey = null;
+        // v2.3.32.1 改: auto-select 第一个源, 跟 web useEffect 1:1
+        //   if (sources.length > 0 && !activeSourceKey) {
+        //     setActiveSourceKey(sources[0].key);
+        //   }
+        // 跟 TV/movie 自动用所有源同款 (TV/movie 不卡用户选源).
+        // "第一源不固定" 指 app 不内置 hardcoded 源 (grep 验证过),
+        //   不是禁止 auto-select 用户配的第一个源
+        if (list.isNotEmpty) {
+          _selectedSourceKey = list.first.key;
+        } else {
+          _selectedSourceKey = null;
+          _error = '暂无可用源\n请先在「源管理」中添加订阅';
+        }
         _categories = const [];
         _selectedCategoryId = null;
         _items.clear();
         _meta = null;
-        if (list.isEmpty) {
-          _error = '暂无可用源\n请先在「源管理」中添加订阅';
-        }
       });
+      // auto-select 后立即拉分类 (跟 web useEffect 同款)
+      if (list.isNotEmpty) {
+        _loadCategories(list.first.key);
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -180,12 +194,19 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
       _searchQuery = '';
       _searchController.clear();
       _filterYear = null;
+      _filterKeywordController.clear();
+      _filterKeyword = '';
+      _mode = _Mode.category;
     });
     final cats = await SourceBrowserService.getCategories(r);
     if (!mounted) return;
     setState(() {
       _isLoadingCategories = false;
       _categories = cats ?? const [];
+      // v2.3.32.1 改: auto-select 第一个分类, 跟 web useEffect 1:1
+      //   if (categories.length > 0 && !activeCategory) {
+      //     setActiveCategory(categories[0].type_id);
+      //   }
       if (_categories.isNotEmpty) {
         _selectedCategoryId = _categories.first.typeId;
         _loadPage(reset: true);
@@ -223,8 +244,10 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
 
     final SourceBrowserPage? result = _searchQuery.isEmpty
         ? await SourceBrowserService.getList(r, typeId: typeId ?? 0, page: page)
+        // v2.3.32.1: search 模式不传 typeId, 跟 web source-browser search route
+        //   ?ac=videolist&wd=Q&pg=N 1:1 (web search route 不带 t 参数)
         : await SourceBrowserService.search(r,
-            query: _searchQuery, typeId: typeId, page: page);
+            query: _searchQuery, page: page);
 
     if (!mounted) return;
     setState(() {
@@ -259,12 +282,10 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
     _lastFetchAt = now;
     await _loadPage(isLoadMore: true);
     if (!mounted) return;
-    // 翻页后自动试填视口
     _tryAutoFill();
   }
 
-  /// v2.3.32 改: 视口自动填满, 跟 web tryAutoFill 1:1
-  /// 内容高度 < 视口高度 + 100px 时, 连翻 5 页 (400ms 节流), 直到能滚
+  /// 视口自动填满, 跟 web tryAutoFill 1:1
   Future<void> _tryAutoFill() async {
     if (_autoFillInProgress) return;
     if (_isLoadingPage || _isLoadingMore) return;
@@ -272,7 +293,6 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
     if (!_scrollController.hasClients) return;
     final maxScroll = _scrollController.position.maxScrollExtent;
     final viewport = _scrollController.position.viewportDimension;
-    // 当前内容 + viewport < 视口 + 100px, 说明没滚动
     if (maxScroll > viewport + 100) return;
 
     _autoFillInProgress = true;
@@ -363,7 +383,6 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
     return arr;
   }
 
-  // 候选年份 (当前页所有 item 的 year 字段去重, 倒序)
   List<String> get _availableYears {
     final set = <String>{};
     for (final it in _items) {
@@ -383,50 +402,48 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
     final idx = _resources.indexWhere((r) => r.key == key);
     if (idx < 0) return;
     final r = _resources[idx];
-    final detail = await SourceBrowserService.getDetail(r, id: item.id);
-    if (!mounted) return;
-    if (detail == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('详情加载失败')),
-      );
-      return;
-    }
-    // v2.3.32: 跟 v2.3.31 _playDetail 模式同款 — dialog 弹出来
-    //   后, 播放按钮 onPlay 调 Navigator.of(dialogCtx).pop() 关掉
-    //   dialog, 然后 _playDetail(d, r) 拿 screen 的 context push
-    //   PlayerScreen. 这样 dialog 的 context 失效不影响 push.
+
+    // v2.3.32.1 改: 跟 web /api/detail 1:1, 走 SearchService.getDetailSync
+    //   拿 SearchResult (含 doubanId / desc / class_ / episodes 全套字段)
+    //   而不是 SourceBrowserService.getDetail (字段不全)
     showDialog(
       context: context,
       barrierColor: Colors.black.withOpacity(0.6),
       builder: (dialogCtx) => _PreviewDialog(
-        detail: detail,
+        item: item,
         resource: r,
-        onPlay: () {
+        loadDetail: () => SearchService.getDetailSync(r.key, item.id),
+        loadSearchOne: (query) => DownstreamService.searchFromApi(r, query),
+        onPlay: (searchResult) {
           Navigator.of(dialogCtx).pop();
-          _playDetail(detail, r);
+          _playDetail(searchResult, r, item);
         },
       ),
     );
   }
 
-  /// 跟 v2.3.31 _playDetail 一致, 用 screen 的 context push
-  void _playDetail(SourceBrowserDetail d, SearchResource r) {
+  /// 跟 web goPlay 1:1, 用 SearchResult 构造 VideoInfo push PlayerScreen
+  void _playDetail(
+      SearchResult detail, SearchResource r, SourceBrowserItem item) {
     final videoInfo = VideoInfo(
-      id: d.id,
+      id: detail.id,
       source: r.key,
-      title: d.title,
+      title: detail.title.isEmpty ? item.title : detail.title,
       sourceName: r.name,
-      year: d.year,
-      cover: d.poster,
+      year: detail.year.isEmpty || detail.year == 'unknown'
+          ? item.year
+          : detail.year,
+      cover: detail.poster.isEmpty ? item.poster : detail.poster,
       index: 0,
-      totalEpisodes: d.episodes.length,
+      totalEpisodes: detail.episodes.length,
       playTime: 0,
       totalTime: 0,
       saveTime: 0,
-      searchTitle: d.title,
-      // v2.3.32: 把 douban_id 透传给 player, 跟 _loadDoubanSummary
-      //   / _loadTmdbBackdrop 联动 (VideoInfo.doubanId 是 String?)
-      doubanId: d.vodDoubanId > 0 ? d.vodDoubanId.toString() : null,
+      searchTitle: detail.title.isEmpty ? item.title : detail.title,
+      // v2.3.32.1: doubanId 从 SearchResult.doubanId 拿 (web 同款)
+      doubanId: detail.doubanId != null && detail.doubanId! > 0
+          ? detail.doubanId.toString()
+          : null,
     );
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => PlayerScreen(videoInfo: videoInfo)),
@@ -437,550 +454,1138 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
     return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('源浏览器'),
-            if (_resources.isNotEmpty) ...[
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Colors.teal.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  '${_resources.length} 个源',
-                  style: const TextStyle(fontSize: 12),
-                ),
+      body: Container(
+        // v2.3.32.1: 1:1 web 渐变背景 (emerald/green/teal 模糊光晕)
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: isDark
+                ? [Colors.grey.shade900, Colors.grey.shade800, Colors.grey.shade900]
+                : [Colors.grey.shade50, Colors.white, Colors.grey.shade50],
+          ),
+        ),
+        child: CustomScrollView(
+          controller: _scrollController,
+          slivers: [
+            // Hero header
+            SliverToBoxAdapter(child: _buildHeroHeader(theme, isDark)),
+            // Source card
+            SliverToBoxAdapter(child: _buildSourceCard(theme, isDark)),
+            // Query & Sort card (源选了才显示)
+            if (_selectedSourceKey != null)
+              SliverToBoxAdapter(child: _buildQuerySortCard(theme, isDark)),
+            // Categories & Items card (源选了才显示)
+            if (_selectedSourceKey != null)
+              SliverToBoxAdapter(
+                child: _buildCategoriesItemsCard(theme, isDark),
               ),
-            ],
+            // 留底 padding
+            const SliverToBoxAdapter(
+              child: SizedBox(height: 40),
+            ),
           ],
         ),
-        centerTitle: true,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: '刷新',
-            onPressed: () {
-              SourceBrowserService.clearCache();
-              if (_selectedSourceKey != null) {
-                _loadCategories(_selectedSourceKey!);
-              } else {
-                _loadSources();
-              }
-            },
-          ),
-        ],
       ),
-      body: Column(
+    );
+  }
+
+  // -------- Hero header (1:1 web 顶部渐变 icon + 标题) --------
+
+  Widget _buildHeroHeader(ThemeData theme, bool isDark) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      child: Stack(
         children: [
-          _buildSourcePills(),
-          if (_selectedSourceKey != null) ...[
-            _buildSearchBar(),
-            _buildFilterRow(),
-            if (_mode == _Mode.category) _buildCategoryPills(),
-          ],
-          Expanded(child: _buildBody()),
+          // 模糊光晕
+          Positioned.fill(
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    Colors.emerald.withOpacity(0.1),
+                    Colors.green.withOpacity(0.1),
+                    Colors.teal.withOpacity(0.1),
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: BackdropFilter(
+                filter: ColorFilter.mode(
+                  Colors.white.withOpacity(isDark ? 0.05 : 0.7),
+                  BlendMode.srcOver,
+                ),
+                child: Container(color: Colors.transparent),
+              ),
+            ),
+          ),
+          // 实际内容
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: isDark ? Colors.grey.shade800.withOpacity(0.8) : Colors.white.withOpacity(0.8),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: isDark
+                    ? Colors.grey.shade700.withOpacity(0.5)
+                    : Colors.grey.shade300.withOpacity(0.5),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(isDark ? 0.3 : 0.08),
+                  blurRadius: 20,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                // 渐变 icon (emerald → green → teal)
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Colors.emerald, Colors.green, Colors.teal],
+                    ),
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.emerald.withOpacity(0.4),
+                        blurRadius: 15,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(Icons.layers, color: Colors.white, size: 28),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 渐变标题
+                      ShaderMask(
+                        shaderCallback: (bounds) => const LinearGradient(
+                          colors: [Colors.emerald, Colors.green, Colors.teal],
+                        ).createShader(bounds),
+                        child: const Text(
+                          '源浏览器',
+                          style: TextStyle(
+                            fontSize: 26,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '按来源站与分类浏览内容，探索海量影视资源',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (_resources.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.emerald.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: Colors.emerald.withOpacity(0.3),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.storage, size: 16, color: Colors.emerald.shade700),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${_resources.length} 个源可用',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.emerald.shade700,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
         ],
       ),
     );
   }
 
-  // -------- source pills --------
+  // -------- Source card (1:1 web source section) --------
 
-  Widget _buildSourcePills() {
-    if (_isLoadingSources) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 16),
-        child: Center(
-          child: SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(strokeWidth: 2),
+  Widget _buildSourceCard(ThemeData theme, bool isDark) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: isDark
+              ? [Colors.grey.shade800, Colors.teal.withOpacity(0.05), Colors.grey.shade800]
+              : [Colors.white, Colors.emerald.withOpacity(0.05), Colors.white],
+        ),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(isDark ? 0.2 : 0.05),
+            blurRadius: 15,
+            offset: const Offset(0, 2),
           ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header row
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+                ),
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: Colors.emerald.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(Icons.storage, size: 16, color: Colors.emerald.shade600),
+                ),
+                const SizedBox(width: 10),
+                const Text(
+                  '选择来源站',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                const Spacer(),
+                if (!_isLoadingSources && _resources.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.emerald.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '${_resources.length} 个',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.emerald.shade700,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          // Body: source pills
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: _buildSourcePills(isDark),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSourcePills(bool isDark) {
+    if (_isLoadingSources) {
+      return Row(
+        children: [
+          SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: Colors.emerald.shade600,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text('加载中...', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+        ],
+      );
+    }
+    if (_loadSourcesError) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.red.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.red.withOpacity(0.3)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.error_outline, size: 16, color: Colors.red.shade600),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _error ?? '获取源失败',
+                style: TextStyle(fontSize: 13, color: Colors.red.shade600),
+              ),
+            ),
+          ],
         ),
       );
     }
     if (_resources.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    return SizedBox(
-      height: 56,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        itemCount: _resources.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (_, idx) {
-          final r = _resources[idx];
-          final selected = _selectedSourceKey == r.key;
-          return ChoiceChip(
-            label: Text(_stripEmoji(r.name), overflow: TextOverflow.ellipsis),
-            selected: selected,
-            onSelected: (_) => _onSourceTap(r.key),
-            selectedColor: Colors.teal,
-            backgroundColor:
-                Theme.of(context).colorScheme.surfaceContainerHighest,
-            labelStyle: TextStyle(
-              color: selected
-                  ? Colors.white
-                  : Theme.of(context).colorScheme.onSurface,
-              fontSize: 13,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  // -------- search bar --------
-
-  Widget _buildSearchBar() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _searchController,
-              onChanged: _onSearchChanged,
-              decoration: InputDecoration(
-                hintText: '输入关键词并回车进行搜索; 清空回车恢复分类',
-                prefixIcon: const Icon(Icons.search, size: 20),
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 8),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(20),
-                  borderSide: BorderSide.none,
-                ),
-                filled: true,
-                fillColor:
-                    Theme.of(context).colorScheme.surfaceContainerHighest,
-              ),
-            ),
-          ),
-          if (_searchQuery.isNotEmpty) ...[
-            const SizedBox(width: 8),
-            TextButton(
-              onPressed: () {
-                _searchController.clear();
-                _onSearchChanged('');
-              },
-              child: const Text('清除'),
-            ),
-          ],
-          const SizedBox(width: 4),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: _mode == _Mode.search
-                  ? Colors.indigo.withOpacity(0.2)
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Text(
-              _mode == _Mode.search ? '搜索' : '分类',
-              style: TextStyle(
-                fontSize: 11,
-                color: _mode == _Mode.search
-                    ? Colors.indigo
-                    : Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // -------- filter row (sort + year + keyword) --------
-  // 跟 web 第二行 <select> 1:1: 排序 / 年份 / 地区·关键词
-
-  Widget _buildFilterRow() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
-      child: Row(
-        children: [
-          // 排序下拉
-          Expanded(
-            child: PopupMenuButton<_SortBy>(
-              initialValue: _sortBy,
-              onSelected: (v) => setState(() => _sortBy = v),
-              itemBuilder: (_) => _SortBy.values
-                  .map((s) => PopupMenuItem(
-                        value: s,
-                        child: Text(s.label),
-                      ))
-                  .toList(),
-              child: Container(
-                height: 36,
-                padding: const EdgeInsets.symmetric(horizontal: 10),
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 24),
+          child: Column(
+            children: [
+              Container(
+                width: 64,
+                height: 64,
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(8),
+                  color: Colors.grey.withOpacity(0.1),
+                  shape: BoxShape.circle,
                 ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.sort, size: 16),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        _sortBy.label,
-                        style: const TextStyle(fontSize: 12),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const Icon(Icons.arrow_drop_down, size: 18),
-                  ],
-                ),
+                child: Icon(Icons.storage, size: 32, color: Colors.grey.shade400),
               ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          // 年份下拉
-          Expanded(
-            child: PopupMenuButton<String?>(
-              initialValue: _filterYear,
-              onSelected: (v) => setState(() => _filterYear = v),
-              itemBuilder: (_) {
-                final list = <PopupMenuEntry<String?>>[
-                  const PopupMenuItem<String?>(
-                    value: null,
-                    child: Text('全部年份'),
-                  ),
-                  if (_availableYears.isNotEmpty) const PopupMenuDivider(),
-                ];
-                for (final y in _availableYears) {
-                  list.add(PopupMenuItem<String?>(value: y, child: Text(y)));
-                }
-                return list;
-              },
-              child: Container(
-                height: 36,
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.calendar_today, size: 14),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        _filterYear ?? '全部年份',
-                        style: const TextStyle(fontSize: 12),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const Icon(Icons.arrow_drop_down, size: 18),
-                  ],
-                ),
+              const SizedBox(height: 12),
+              Text('暂无可用来源', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+              const SizedBox(height: 4),
+              Text(
+                '请先在「源管理」中添加订阅\napp 不会内置任何源',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
               ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          // 关键词筛选
-          Expanded(
-            child: SizedBox(
-              height: 36,
-              child: TextField(
-                controller: _filterKeywordController,
-                onChanged: (v) => setState(() => _filterKeyword = v),
-                decoration: InputDecoration(
-                  hintText: '地区/关键词',
-                  prefixIcon: const Icon(Icons.filter_list, size: 16),
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 0),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: BorderSide.none,
-                  ),
-                  filled: true,
-                  fillColor:
-                      Theme.of(context).colorScheme.surfaceContainerHighest,
-                ),
-                style: const TextStyle(fontSize: 12),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // -------- category pills --------
-
-  Widget _buildCategoryPills() {
-    if (_isLoadingCategories) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 12),
-        child: Center(
-          child: SizedBox(
-            width: 18,
-            height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
+            ],
           ),
         ),
       );
     }
-    if (_categories.isEmpty) return const SizedBox.shrink();
-    return SizedBox(
-      height: 44,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        itemCount: _categories.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 6),
-        itemBuilder: (_, idx) {
-          final c = _categories[idx];
-          final selected = _selectedCategoryId == c.typeId;
-          return ChoiceChip(
-            label: Text(c.typeName),
-            selected: selected,
-            onSelected: (_) => _onCategoryTap(c.typeId),
-            selectedColor: Colors.indigo,
-            backgroundColor:
-                Theme.of(context).colorScheme.surfaceContainerHighest,
-            labelStyle: TextStyle(
-              color: selected
-                  ? Colors.white
-                  : Theme.of(context).colorScheme.onSurface,
-              fontSize: 12,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  // -------- body --------
-
-  Widget _buildBody() {
-    // 状态优先级: 空源错误 > loading > 错误 > 空结果 > grid
-    if (_selectedSourceKey == null) {
-      // v2.3.32 改: 没选源时显示引导 (空源 / 用户没主动选)
-      if (_loadSourcesError) {
-        return _buildCentered(
-            icon: Icons.error_outline,
-            color: Colors.red,
-            title: '加载源失败',
-            subtitle: _error);
-      }
-      if (_isLoadingSources) {
-        return const Center(child: CircularProgressIndicator());
-      }
-      if (_resources.isEmpty) {
-        return _buildCentered(
-            icon: Icons.source_outlined,
-            color: Colors.grey,
-            title: '暂无可用源',
-            subtitle: '请先在「源管理」中添加订阅\napp 不会内置任何源');
-      }
-      return _buildCentered(
-          icon: Icons.touch_app_outlined,
-          color: Colors.teal,
-          title: '请选择来源站',
-          subtitle: '上方源列表选择一个开始浏览\napp 不预设任何源, 由你自选');
-    }
-    if (_error != null && _items.isEmpty) {
-      return _buildCentered(
-          icon: Icons.error_outline, color: Colors.red, title: '加载失败', subtitle: _error);
-    }
-    if (_isLoadingPage && _items.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (_items.isEmpty) {
-      return _buildCentered(
-          icon: Icons.movie_filter_outlined,
-          color: Colors.grey,
-          title: '暂无内容',
-          subtitle: '试试切其他分类 / 源 / 或清空筛选');
-    }
-    final visible = _visibleItems;
-    if (visible.isEmpty) {
-      return _buildCentered(
-          icon: Icons.search_off,
-          color: Colors.grey,
-          title: '无匹配结果',
-          subtitle: '清空筛选条件试试');
-    }
-    return GridView.builder(
-      controller: _scrollController,
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        childAspectRatio: 0.55,
-        crossAxisSpacing: 8,
-        mainAxisSpacing: 12,
-      ),
-      itemCount: visible.length + (_isLoadingMore ? 1 : 0),
-      itemBuilder: (_, idx) {
-        if (idx >= visible.length) {
-          return const Center(
-            child: Padding(
-              padding: EdgeInsets.all(16),
-              child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2)),
-            ),
-          );
-        }
-        return _ItemCard(
-          item: visible[idx],
-          onTap: () => _onItemTap(visible[idx]),
-        );
-      },
-    );
-  }
-
-  Widget _buildCentered({
-    required IconData icon,
-    required Color color,
-    required String title,
-    String? subtitle,
-  }) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 48, color: color.withOpacity(0.5)),
-            const SizedBox(height: 12),
-            Text(title,
-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
-            if (subtitle != null) ...[
-              const SizedBox(height: 6),
-              Text(
-                subtitle,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+    // v2.3.32.1: 1:1 web source button: border-2 + 渐变选中 + 2xl 圆角 + shadow + blur 光晕
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: _resources.map((r) {
+        final selected = _selectedSourceKey == r.key;
+        return GestureDetector(
+          onTap: () => _onSourceTap(r.key),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 300),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              // 选中态: emerald → green 渐变
+              gradient: selected
+                  ? const LinearGradient(
+                      colors: [Colors.emerald, Colors.green],
+                    )
+                  : null,
+              color: selected ? null : (isDark ? Colors.grey.shade800 : Colors.white),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: selected
+                    ? Colors.transparent
+                    : (isDark ? Colors.grey.shade600 : Colors.grey.shade400),
+                width: 2,
               ),
-            ],
+              boxShadow: selected
+                  ? [
+                      BoxShadow(
+                        color: Colors.emerald.withOpacity(0.4),
+                        blurRadius: 12,
+                        offset: const Offset(0, 4),
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Text(
+              r.name, // v2.3.32.1: 不 strip emoji, 跟 web 1:1
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: selected ? Colors.white : (isDark ? Colors.grey.shade300 : Colors.grey.shade700),
+              ),
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  // -------- Query & Sort card (1:1 web 第二段) --------
+
+  Widget _buildQuerySortCard(ThemeData theme, bool isDark) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      decoration: BoxDecoration(
+        color: isDark ? Colors.grey.shade800 : Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(isDark ? 0.2 : 0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            // 第一行: 搜索框 + 清除 + 模式
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _searchController,
+                    onChanged: _onSearchChanged,
+                    decoration: InputDecoration(
+                      hintText: '输入关键词并回车进行搜索；清空回车恢复分类',
+                      hintStyle: const TextStyle(fontSize: 12),
+                      prefixIcon: const Icon(Icons.search, size: 18),
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(
+                          color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+                        ),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(
+                          color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+                        ),
+                      ),
+                      filled: true,
+                      fillColor: isDark ? Colors.grey.shade700 : Colors.white,
+                    ),
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+                if (_searchQuery.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: () {
+                      _searchController.clear();
+                      _onSearchChanged('');
+                    },
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      minimumSize: Size.zero,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      side: BorderSide(
+                        color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+                      ),
+                    ),
+                    child: const Text('清除', style: TextStyle(fontSize: 11)),
+                  ),
+                ],
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: _mode == _Mode.search
+                        ? Colors.indigo.withOpacity(0.15)
+                        : (isDark ? Colors.grey.shade700 : Colors.grey.shade100),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    _mode == _Mode.search ? '搜索' : '分类',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: _mode == _Mode.search
+                          ? Colors.indigo
+                          : (isDark ? Colors.grey.shade400 : Colors.grey.shade600),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // 第二行: 排序 / 年份 / 关键词 (grid-cols-2 同款)
+            Row(
+              children: [
+                Expanded(child: _buildSortDropdown(isDark)),
+                const SizedBox(width: 8),
+                Expanded(child: _buildYearDropdown(isDark)),
+                const SizedBox(width: 8),
+                Expanded(
+                  flex: 2,
+                  child: SizedBox(
+                    height: 40,
+                    child: TextField(
+                      controller: _filterKeywordController,
+                      onChanged: (v) => setState(() => _filterKeyword = v),
+                      decoration: InputDecoration(
+                        hintText: '地区/关键词',
+                        hintStyle: const TextStyle(fontSize: 12),
+                        prefixIcon: const Icon(Icons.filter_list, size: 16),
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(
+                            color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+                          ),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(
+                            color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+                          ),
+                        ),
+                        filled: true,
+                        fillColor: isDark ? Colors.grey.shade700 : Colors.white,
+                      ),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
     );
   }
 
-  String _stripEmoji(String s) {
-    return s.replaceAll(RegExp(r'^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]+\s*'),
-        '');
+  Widget _buildSortDropdown(bool isDark) {
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: isDark ? Colors.grey.shade700 : Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+        ),
+      ),
+      child: PopupMenuButton<_SortBy>(
+        initialValue: _sortBy,
+        onSelected: (v) => setState(() => _sortBy = v),
+        padding: EdgeInsets.zero,
+        child: Row(
+          children: [
+            Icon(Icons.sort, size: 16, color: Colors.grey.shade600),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                _sortBy.label,
+                style: const TextStyle(fontSize: 12),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            Icon(Icons.arrow_drop_down, size: 18, color: Colors.grey.shade600),
+          ],
+        ),
+        itemBuilder: (_) => _SortBy.values
+            .map((s) => PopupMenuItem(
+                  value: s,
+                  child: Text(s.label, style: const TextStyle(fontSize: 13)),
+                ))
+            .toList(),
+      ),
+    );
+  }
+
+  Widget _buildYearDropdown(bool isDark) {
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: isDark ? Colors.grey.shade700 : Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+        ),
+      ),
+      child: PopupMenuButton<String?>(
+        initialValue: _filterYear,
+        onSelected: (v) => setState(() => _filterYear = v),
+        padding: EdgeInsets.zero,
+        child: Row(
+          children: [
+            Icon(Icons.calendar_today, size: 14, color: Colors.grey.shade600),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                _filterYear ?? '全部年份',
+                style: const TextStyle(fontSize: 12),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            Icon(Icons.arrow_drop_down, size: 18, color: Colors.grey.shade600),
+          ],
+        ),
+        itemBuilder: (_) {
+          final list = <PopupMenuEntry<String?>>[
+            const PopupMenuItem<String?>(
+              value: null,
+              child: Text('全部年份', style: TextStyle(fontSize: 13)),
+            ),
+            if (_availableYears.isNotEmpty) const PopupMenuDivider(),
+          ];
+          for (final y in _availableYears) {
+            list.add(PopupMenuItem<String?>(
+                value: y, child: Text(y, style: const TextStyle(fontSize: 13))));
+          }
+          return list;
+        },
+      ),
+    );
+  }
+
+  // -------- Categories & Items card (1:1 web 第三段) --------
+
+  Widget _buildCategoriesItemsCard(ThemeData theme, bool isDark) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: isDark
+              ? [Colors.grey.shade800, Colors.blue.withOpacity(0.05), Colors.grey.shade800]
+              : [Colors.white, Colors.blue.withOpacity(0.03), Colors.white],
+        ),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(isDark ? 0.2 : 0.05),
+            blurRadius: 15,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+                ),
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(Icons.tv, size: 16, color: Colors.blue.shade600),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    '${(_resources.isEmpty ? '' : _resources.firstWhere((r) => r.key == _selectedSourceKey, orElse: () => _resources.first).name)} 分类',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (_categories.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '${_categories.length} 个分类',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.blue.shade700,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          // Body
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (_mode == _Mode.category) ...[
+                  _buildCategoryPills(isDark),
+                  const SizedBox(height: 20),
+                ],
+                _buildItemsGrid(isDark),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCategoryPills(bool isDark) {
+    if (_isLoadingCategories) {
+      return Row(
+        children: [
+          SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: Colors.blue.shade600,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text('加载分类...', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+        ],
+      );
+    }
+    if (_categories.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Column(
+            children: [
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: Colors.grey.withOpacity(0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.tv, size: 28, color: Colors.grey.shade400),
+              ),
+              const SizedBox(height: 8),
+              Text('暂无分类', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+            ],
+          ),
+        ),
+      );
+    }
+    // v2.3.32.1: 1:1 web category button: border-2 + blue→indigo 渐变选中 + 2xl 圆角
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: _categories.map((c) {
+        final selected = _selectedCategoryId == c.typeId;
+        return GestureDetector(
+          onTap: () => _onCategoryTap(c.typeId),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 300),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              gradient: selected
+                  ? const LinearGradient(colors: [Colors.blue, Colors.indigo])
+                  : null,
+              color: selected ? null : (isDark ? Colors.grey.shade800 : Colors.white),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: selected
+                    ? Colors.transparent
+                    : (isDark ? Colors.grey.shade600 : Colors.grey.shade400),
+                width: 2,
+              ),
+              boxShadow: selected
+                  ? [
+                      BoxShadow(
+                        color: Colors.blue.withOpacity(0.4),
+                        blurRadius: 12,
+                        offset: const Offset(0, 4),
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Text(
+              c.typeName,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: selected ? Colors.white : (isDark ? Colors.grey.shade300 : Colors.grey.shade700),
+              ),
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildItemsGrid(bool isDark) {
+    if (_isLoadingPage && _items.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 24),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.blue.shade600,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text('加载内容...', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+            ],
+          ),
+        ),
+      );
+    }
+    if (_error != null && _items.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.red.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.red.withOpacity(0.3)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.error_outline, size: 16, color: Colors.red.shade600),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(_error!, style: TextStyle(fontSize: 13, color: Colors.red.shade600)),
+            ),
+          ],
+        ),
+      );
+    }
+    if (_items.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 32),
+          child: Column(
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Colors.grey.shade100, Colors.grey.shade200],
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Icon(Icons.tv, size: 36, color: Colors.grey.shade400),
+              ),
+              const SizedBox(height: 12),
+              Text('暂无内容', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+            ],
+          ),
+        ),
+      );
+    }
+    final visible = _visibleItems;
+    if (visible.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 24),
+          child: Column(
+            children: [
+              Icon(Icons.search_off, size: 48, color: Colors.grey.shade400),
+              const SizedBox(height: 8),
+              Text('无匹配结果', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+              const SizedBox(height: 4),
+              Text('清空筛选条件试试', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
+            ],
+          ),
+        ),
+      );
+    }
+    // v2.3.32.1: 1:1 web grid: 3 列 / 2xl 圆角 / border-2 / hover scale 1.1
+    //   / 渐变遮罩 / 年份 top-right / 分类 bottom-left
+    return Column(
+      children: [
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          padding: EdgeInsets.zero,
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            childAspectRatio: 0.52,
+            crossAxisSpacing: 10,
+            mainAxisSpacing: 14,
+          ),
+          itemCount: visible.length,
+          itemBuilder: (_, idx) => _ItemCard(
+            item: visible[idx],
+            isDark: isDark,
+            onTap: () => _onItemTap(visible[idx]),
+          ),
+        ),
+        const SizedBox(height: 16),
+        // infinite loader sentinel (跟 web loadMoreRef 同款)
+        if (_isLoadingMore)
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.blue.shade600,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text('加载更多...', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+            ],
+          )
+        else if (_meta?.hasMore ?? false)
+          Text('下拉加载更多', style: TextStyle(fontSize: 11, color: Colors.grey.shade400))
+        else
+          Text('没有更多了', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
+      ],
+    );
   }
 }
 
 // =====================================================================
-// Item card (跟 v2.3.31 一致, 保留 2:3 海报 + 标题 + 年份 + 备注)
+// Item card (1:1 web item card: 2xl 圆角 + border-2 + 渐变遮罩 +
+//   年份 top-right + 分类 bottom-left + hover scale 1.1 + 阴影)
 // =====================================================================
 
-class _ItemCard extends StatelessWidget {
+class _ItemCard extends StatefulWidget {
   final SourceBrowserItem item;
+  final bool isDark;
   final VoidCallback onTap;
-  const _ItemCard({required this.item, required this.onTap});
+  const _ItemCard({required this.item, required this.isDark, required this.onTap});
+
+  @override
+  State<_ItemCard> createState() => _ItemCardState();
+}
+
+class _ItemCardState extends State<_ItemCard> {
+  bool _hovering = false;
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          AspectRatio(
-            aspectRatio: 2 / 3,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  CachedNetworkImage(
-                    imageUrl: item.poster,
-                    fit: BoxFit.cover,
-                    placeholder: (_, __) => Container(
-                      color: Theme.of(context)
-                          .colorScheme
-                          .surfaceContainerHighest,
-                      child: const Center(
-                          child: Icon(Icons.movie, color: Colors.white24, size: 32)),
+    final item = widget.item;
+    final isDark = widget.isDark;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          transform: Matrix4.translationValues(0, _hovering ? -4 : 0, 0),
+          decoration: BoxDecoration(
+            color: isDark ? Colors.grey.shade800 : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: _hovering
+                  ? Colors.blue.withOpacity(0.6)
+                  : (isDark ? Colors.grey.shade700 : Colors.grey.shade300),
+              width: 2,
+            ),
+            boxShadow: _hovering
+                ? [
+                    BoxShadow(
+                      color: Colors.blue.withOpacity(0.2),
+                      blurRadius: 20,
+                      offset: const Offset(0, 8),
                     ),
-                    errorWidget: (_, __, ___) => Container(
-                      color: Theme.of(context)
-                          .colorScheme
-                          .surfaceContainerHighest,
-                      child: const Center(
-                          child: Icon(Icons.broken_image, color: Colors.white24, size: 32)),
+                  ]
+                : [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(isDark ? 0.15 : 0.03),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
                     ),
-                  ),
-                  if (item.remarks.isNotEmpty)
-                    Positioned(
-                      right: 4,
-                      bottom: 4,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 4, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.6),
-                          borderRadius: BorderRadius.circular(4),
+                  ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 海报 (aspect 2:3, 跟 web 同款)
+                AspectRatio(
+                  aspectRatio: 2 / 3,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      // 海报
+                      item.poster.isNotEmpty
+                          ? CachedNetworkImage(
+                              imageUrl: item.poster,
+                              fit: BoxFit.cover,
+                              placeholder: (_, __) => Container(
+                                color: isDark ? Colors.grey.shade700 : Colors.grey.shade100,
+                                child: Icon(Icons.movie, size: 28, color: Colors.grey.shade400),
+                              ),
+                              errorWidget: (_, __, ___) => Container(
+                                color: isDark ? Colors.grey.shade700 : Colors.grey.shade100,
+                                child: Icon(Icons.broken_image, size: 28, color: Colors.grey.shade400),
+                              ),
+                            )
+                          : Container(
+                              color: isDark ? Colors.grey.shade700 : Colors.grey.shade100,
+                              child: Icon(Icons.tv, size: 28, color: Colors.grey.shade400),
+                            ),
+                      // hover 渐变遮罩 (跟 web group-hover:from-blue-500/10 同款)
+                      if (_hovering)
+                        Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.bottomCenter,
+                              end: Alignment.topCenter,
+                              colors: [
+                                Colors.blue.withOpacity(0.1),
+                                Colors.transparent,
+                              ],
+                            ),
+                          ),
                         ),
-                        child: Text(item.remarks,
-                            style: const TextStyle(
+                      // 年份标签 (top-right, 跟 web 同款)
+                      if (item.year.isNotEmpty)
+                        Positioned(
+                          top: 6,
+                          right: 6,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(0.7),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              item.year,
+                              style: const TextStyle(
                                 color: Colors.white,
-                                fontSize: 9,
-                                fontWeight: FontWeight.w500)),
+                                fontSize: 10,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ),
+                      // 分类标签 (bottom-left, 跟 web bg-blue-500/90 同款)
+                      if (item.typeName.isNotEmpty)
+                        Positioned(
+                          bottom: 6,
+                          left: 6,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.blue.withOpacity(0.9),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              item.typeName,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                // 标题 + 备注
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 8, 6, 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: _hovering
+                              ? Colors.blue
+                              : (isDark ? Colors.white : Colors.grey.shade900),
+                          height: 1.3,
+                        ),
                       ),
-                    ),
-                ],
-              ),
+                      if (item.remarks.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          item.remarks,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: isDark ? Colors.grey.shade400 : Colors.grey.shade500,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 6),
-          Text(
-            item.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-          ),
-          if (item.year.isNotEmpty)
-            Text(item.year,
-                style: TextStyle(
-                    fontSize: 10,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
-        ],
+        ),
       ),
     );
   }
 }
 
 // =====================================================================
-// v2.3.32: 全屏 preview dialog (替换 v2.3.31 bottom sheet)
+// v2.3.32.1: 全屏 preview dialog (1:1 web preview modal)
 //
-// 跟 web source-browser preview modal 1:1:
-//   - 顶 header: icon + 标题 + 关闭按钮
-//   - 滚动内容: 海报(左) + 元数据 + 描述 + 豆瓣/Bangumi section
-//   - 底: 「立即播放」 按钮 (跟 web 一样 fill teal gradient)
-//   - 集数列表不展示 (跟 web 一样, 用户原话要求)
+// 关键改造:
+//   1. detail 走 SearchService.getDetailSync → SearchResult (含 doubanId)
+//      不是 SourceBrowserService.getDetail → SourceBrowserDetail
+//   2. doubanId 从 SearchResult.doubanId 拿, 跟 web data.douban_id 同字段
+//   3. detail 没 doubanId 时走 DownstreamService.searchFromApi fallback
+//      跟 web /api/search/one?resourceId=K&q=Q 1:1, 同源精确搜拿 doubanId
+//   4. 简介三段式 fallback (跟 web 1:1):
+//      previewData.desc → previewSearchPick.desc → item.remarks
+//   5. 豆瓣 section 加 plot_summary (剧情简介, 跟 web d.plot_summary 同款)
+//   6. Bangumi section 加 name_cn 标题 (跟 web name_cn || name 同款)
 // =====================================================================
 
 class _PreviewDialog extends StatefulWidget {
-  final SourceBrowserDetail detail;
+  final SourceBrowserItem item;
   final SearchResource resource;
-  /// v2.3.32: 跟 v2.3.31 _DetailSheet.onPlay 同款 — dialog 内部不
-  ///   直接 navigate, 而是把 navigation 委托给 screen (用 screen
-  ///   的 context push, 避免 dialog context 失效)
-  final VoidCallback onPlay;
+  // v2.3.32.1: detail 调用注入 (跟 web /api/detail 1:1, 返 SearchResult)
+  final Future<List<SearchResult>> Function() loadDetail;
+  // search_one fallback (跟 web /api/search/one 1:1)
+  final Future<List<SearchResult>> Function(String query) loadSearchOne;
+  // 播放回调 (用 screen context push, 避免 dialog context 失效)
+  final void Function(SearchResult detail) onPlay;
+
   const _PreviewDialog({
-    required this.detail,
+    required this.item,
     required this.resource,
+    required this.loadDetail,
+    required this.loadSearchOne,
     required this.onPlay,
   });
 
@@ -989,67 +1594,152 @@ class _PreviewDialog extends StatefulWidget {
 }
 
 class _PreviewDialogState extends State<_PreviewDialog> {
-  // 豆瓣 / Bangumi 加载状态
+  bool _isLoading = true;
+  String? _error;
+  SearchResult? _detail;
+  SearchResult? _searchPick; // search_one fallback 找到的同源匹配
+  int? _doubanId; // 跟 web previewDoubanId 同款
+
   bool _isDoubanLoading = false;
   bool _isBangumiLoading = false;
   DoubanMovieDetails? _douban;
   BangumiDetails? _bangumi;
-  String? _loadError;
 
   @override
   void initState() {
     super.initState();
-    _loadExtras();
+    _loadAll();
   }
 
-  /// v2.3.32: 自动判 Bangumi (6 位 ID) / 豆瓣
-  /// 跟 web `isBangumiId = (id) => id > 0 && id.toString().length === 6` 1:1
+  /// v2.3.32.1: 1:1 web openPreview
+  ///   1. 调 /api/detail 拿 detail (SearchResult)
+  ///   2. 从 detail.douban_id 拿 doubanId
+  ///   3. 没 doubanId 走 /api/search/one fallback 拿 (跟 web 同款)
+  ///   4. 有 doubanId + 6 位 → Bangumi, 否则 → 豆瓣
+  Future<void> _loadAll() async {
+    try {
+      final results = await widget.loadDetail();
+      if (!mounted) return;
+      if (results.isEmpty) {
+        setState(() {
+          _isLoading = false;
+          _error = '未找到匹配的视频源';
+        });
+        return;
+      }
+      final detail = results.first;
+      // v2.3.32.1: 跟 web data?.douban_id ? Number(data.douban_id) : null 同款
+      int? dId = (detail.doubanId != null && detail.doubanId! > 0)
+          ? detail.doubanId
+          : null;
+
+      setState(() {
+        _detail = detail;
+        _doubanId = dId;
+        _isLoading = false;
+      });
+
+      // v2.3.32.1: search_one fallback (跟 web 1:1)
+      //   detail 没 doubanId 时, 在当前源内精确搜标题拿 doubanId
+      if (dId == null) {
+        final normalize = (String s) => s.replaceAll(RegExp(r'\s+'), '').toLowerCase();
+        final variants = <String>{
+          widget.item.title,
+          widget.item.title.replaceAll(RegExp(r'\s+'), ''),
+        }.where((s) => s.isNotEmpty).toList();
+        final targetNorm = normalize(widget.item.title);
+        for (final v in variants) {
+          try {
+            final list = await widget.loadSearchOne(v);
+            if (!mounted) return;
+            // 优先标题+年份匹配
+            SearchResult? pick;
+            for (final r in list) {
+              if (normalize(r.title) != targetNorm) continue;
+              if (widget.item.year.isNotEmpty &&
+                  r.year.isNotEmpty &&
+                  r.year.toLowerCase() != widget.item.year.toLowerCase()) {
+                continue;
+              }
+              if (r.doubanId != null && r.doubanId! > 0) {
+                pick = r;
+                break;
+              }
+            }
+            // fallback 只匹配标题
+            pick ??= list.cast<SearchResult?>().firstWhere(
+                  (r) =>
+                      r != null &&
+                      normalize(r.title) == targetNorm &&
+                      r.doubanId != null &&
+                      r.doubanId! > 0,
+                  orElse: () => null,
+                );
+            if (pick != null && pick.doubanId != null && pick.doubanId! > 0) {
+              setState(() {
+                _doubanId = pick!.doubanId;
+                _searchPick = pick;
+              });
+              break;
+            }
+          } catch (_) {
+            // ignore
+          }
+        }
+      }
+
+      // v2.3.32.1: 6 位 ID 走 Bangumi, 其它走豆瓣 (跟 web isBangumiId 1:1)
+      final finalDId = _doubanId;
+      if (finalDId != null && finalDId > 0) {
+        if (_isBangumiId(finalDId)) {
+          await _loadBangumi(finalDId);
+        } else {
+          await _loadDouban(finalDId);
+        }
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  /// 跟 web isBangumiId = (id) => id > 0 && id.toString().length === 6 1:1
   bool _isBangumiId(int id) => id > 0 && id.toString().length == 6;
 
-  Future<void> _loadExtras() async {
-    final dId = widget.detail.vodDoubanId;
-    if (dId <= 0) {
-      // 没 douban_id 就不强行拉, 跟 player_screen 行为一致
-      return;
+  Future<void> _loadDouban(int dId) async {
+    setState(() => _isDoubanLoading = true);
+    try {
+      final resp = await DoubanService.getDoubanDetails(
+        context,
+        doubanId: dId.toString(),
+      );
+      if (!mounted) return;
+      if (resp.success && resp.data != null) {
+        setState(() => _douban = resp.data);
+      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _isDoubanLoading = false);
     }
-    if (_isBangumiId(dId)) {
-      setState(() => _isBangumiLoading = true);
-      try {
-        final resp = await BangumiService.getBangumiDetails(
-          context,
-          bangumiId: dId.toString(),
-        );
-        if (!mounted) return;
-        if (resp.success && resp.data != null) {
-          setState(() => _bangumi = resp.data);
-        } else {
-          setState(() => _loadError = resp.message);
-        }
-      } catch (e) {
-        if (!mounted) return;
-        setState(() => _loadError = 'Bangumi 加载失败: $e');
-      } finally {
-        if (mounted) setState(() => _isBangumiLoading = false);
+  }
+
+  Future<void> _loadBangumi(int bId) async {
+    setState(() => _isBangumiLoading = true);
+    try {
+      final resp = await BangumiService.getBangumiDetails(
+        context,
+        bangumiId: bId.toString(),
+      );
+      if (!mounted) return;
+      if (resp.success && resp.data != null) {
+        setState(() => _bangumi = resp.data);
       }
-    } else {
-      setState(() => _isDoubanLoading = true);
-      try {
-        final resp = await DoubanService.getDoubanDetails(
-          context,
-          doubanId: dId.toString(),
-        );
-        if (!mounted) return;
-        if (resp.success && resp.data != null) {
-          setState(() => _douban = resp.data);
-        } else {
-          setState(() => _loadError = resp.message);
-        }
-      } catch (e) {
-        if (!mounted) return;
-        setState(() => _loadError = '豆瓣加载失败: $e');
-      } finally {
-        if (mounted) setState(() => _isDoubanLoading = false);
-      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _isBangumiLoading = false);
     }
   }
 
@@ -1063,365 +1753,396 @@ class _PreviewDialogState extends State<_PreviewDialog> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final d = widget.detail;
+    final isDark = theme.brightness == Brightness.dark;
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 24),
       child: Container(
         constraints: const BoxConstraints(maxWidth: 800, maxHeight: 700),
         decoration: BoxDecoration(
-          color: theme.colorScheme.surface,
+          // v2.3.32.1: 1:1 web 模糊背景 + 渐变
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: isDark
+                ? [Colors.grey.shade800, Colors.blue.withOpacity(0.05), Colors.grey.shade800]
+                : [Colors.white, Colors.blue.withOpacity(0.03), Colors.white],
+          ),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
-              color: theme.colorScheme.outlineVariant.withOpacity(0.5)),
+            color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.3),
+              blurRadius: 30,
+              offset: const Offset(0, 10),
+            ),
+          ],
         ),
         clipBehavior: Clip.antiAlias,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _buildHeader(theme),
-            Flexible(child: _buildBody(theme)),
-            _buildFooter(theme),
+            _buildHeader(theme, isDark),
+            Flexible(child: _buildBody(theme, isDark)),
+            _buildFooter(theme, isDark),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildHeader(ThemeData theme) {
+  Widget _buildHeader(ThemeData theme, bool isDark) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+      padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
       decoration: BoxDecoration(
+        color: (isDark ? Colors.grey.shade800 : Colors.white).withOpacity(0.8),
         border: Border(
-            bottom: BorderSide(
-                color: theme.colorScheme.outlineVariant.withOpacity(0.3))),
+          bottom: BorderSide(
+            color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+          ),
+        ),
       ),
       child: Row(
         children: [
           Container(
-            width: 32,
-            height: 32,
+            width: 40,
+            height: 40,
             decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Colors.indigo, Colors.blue],
-              ),
-              borderRadius: BorderRadius.circular(8),
+              gradient: const LinearGradient(colors: [Colors.blue, Colors.indigo]),
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.blue.withOpacity(0.3),
+                  blurRadius: 10,
+                  offset: const Offset(0, 2),
+                ),
+              ],
             ),
-            child: const Icon(Icons.tv, color: Colors.white, size: 18),
+            child: const Icon(Icons.tv, color: Colors.white, size: 20),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 12),
           Expanded(
             child: Text(
-              widget.detail.title.isEmpty ? '详情预览' : widget.detail.title,
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              widget.item.title.isEmpty ? '详情预览' : widget.item.title,
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+              maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
           ),
           IconButton(
             icon: const Icon(Icons.close),
             onPressed: () => Navigator.of(context).pop(),
-            tooltip: '关闭',
           ),
         ],
       ),
     );
   }
 
-  Widget _buildBody(ThemeData theme) {
-    final d = widget.detail;
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // 顶: 海报 + 元数据
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: SizedBox(
-                  width: 110,
-                  height: 160,
-                  child: d.poster.isNotEmpty
-                      ? CachedNetworkImage(
-                          imageUrl: d.poster,
-                          fit: BoxFit.cover,
-                          errorWidget: (_, __, ___) => Container(
-                            color: theme.colorScheme.surfaceContainerHighest,
-                            child: const Icon(Icons.broken_image),
-                          ),
-                        )
-                      : Container(
-                          color: theme.colorScheme.surfaceContainerHighest,
-                          child: const Icon(Icons.movie, size: 32),
-                        ),
-                ),
+  Widget _buildBody(ThemeData theme, bool isDark) {
+    if (_isLoading) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 40,
+              height: 40,
+              child: CircularProgressIndicator(
+                strokeWidth: 3,
+                color: Colors.blue.shade600,
               ),
-              const SizedBox(width: 12),
-              Expanded(child: _buildMeta(theme)),
+            ),
+            const SizedBox(height: 12),
+            Text('加载详情...', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+          ],
+        ),
+      );
+    }
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline, size: 40, color: Colors.red.shade400),
+              const SizedBox(height: 8),
+              Text(_error!, style: TextStyle(fontSize: 13, color: Colors.red.shade600)),
             ],
           ),
-          const SizedBox(height: 12),
-          // 评分徽章 + 外链按钮
-          _buildRatingRow(theme),
-          const SizedBox(height: 12),
-          // 类型 / 地区 / 年份 标签
-          _buildTagRow(theme),
-          const SizedBox(height: 12),
-          // 简介 (优先豆瓣/Bangumi, fallback 源 content)
-          _buildDescription(theme),
-          // 豆瓣 section
-          if (_isDoubanLoading)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 12),
-              child: Row(children: [
-                SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2)),
-                SizedBox(width: 8),
-                Text('加载豆瓣信息...', style: TextStyle(fontSize: 12)),
-              ]),
-            )
-          else if (_douban != null)
-            _buildDoubanSection(theme, _douban!),
-          // Bangumi section
-          if (_isBangumiLoading)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 12),
-              child: Row(children: [
-                SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2)),
-                SizedBox(width: 8),
-                Text('加载 Bangumi 信息...', style: TextStyle(fontSize: 12)),
-              ]),
-            )
-          else if (_bangumi != null)
-            _buildBangumiSection(theme, _bangumi!),
-          if (_loadError != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(_loadError!,
-                  style: TextStyle(
-                      fontSize: 11,
-                      color: theme.colorScheme.error.withOpacity(0.7))),
+        ),
+      );
+    }
+    final d = _detail;
+    final item = widget.item;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 左: 海报 (1:1 web md:sticky md:top-0)
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: SizedBox(
+              width: 120,
+              height: 170,
+              child: (d?.poster.isNotEmpty ?? false)
+                  ? CachedNetworkImage(
+                      imageUrl: d!.poster,
+                      fit: BoxFit.cover,
+                      errorWidget: (_, __, ___) => _placeholderPoster(isDark),
+                    )
+                  : (item.poster.isNotEmpty
+                      ? CachedNetworkImage(
+                          imageUrl: item.poster,
+                          fit: BoxFit.cover,
+                          errorWidget: (_, __, ___) => _placeholderPoster(isDark),
+                        )
+                      : _placeholderPoster(isDark)),
             ),
+          ),
+          const SizedBox(width: 16),
+          // 右: 元数据 + 简介 + 豆瓣/Bangumi
+          Expanded(child: _buildRightColumn(theme, isDark, d, item)),
         ],
       ),
     );
   }
 
-  Widget _buildMeta(ThemeData theme) {
-    final d = widget.detail;
+  Widget _placeholderPoster(bool isDark) {
+    return Container(
+      color: isDark ? Colors.grey.shade700 : Colors.grey.shade100,
+      child: Center(
+        child: Icon(Icons.tv, size: 36, color: Colors.grey.shade400),
+      ),
+    );
+  }
+
+  Widget _buildRightColumn(
+      ThemeData theme, bool isDark, SearchResult? d, SourceBrowserItem item) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (d.title.isNotEmpty)
-          Text(d.title,
-              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis),
-        const SizedBox(height: 4),
-        if (d.year.isNotEmpty)
-          Text('年份: ${d.year}',
-              style: TextStyle(
-                  fontSize: 12, color: theme.colorScheme.onSurfaceVariant)),
-        Text('来源: ${widget.resource.name}',
-            style: TextStyle(
-                fontSize: 12, color: theme.colorScheme.onSurfaceVariant)),
-        if (d.director.isNotEmpty)
-          Text('导演: ${d.director}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                  fontSize: 12, color: theme.colorScheme.onSurfaceVariant)),
-        if (d.actor.isNotEmpty)
-          Text('主演: ${d.actor}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                  fontSize: 12, color: theme.colorScheme.onSurfaceVariant)),
+        // 标题 + 评分徽章 + 外链
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 8,
+          runSpacing: 6,
+          children: [
+            Text(
+              (d?.title.isNotEmpty ?? false) ? d!.title : item.title,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            // 评分徽章
+            if (_douban?.rate != null && _douban!.rate!.isNotEmpty)
+              _badge('豆瓣 ${_douban!.rate}', Colors.green),
+            if (_bangumi != null && _bangumi!.rating.score > 0)
+              _badge('Bangumi ${_bangumi!.rating.score.toStringAsFixed(1)}', Colors.purple),
+            // 外链
+            if (_douban?.id != null)
+              _linkChip('豆瓣', Colors.blue,
+                  () => _openExternal('https://movie.douban.com/subject/${_douban!.id}/')),
+            if (_bangumi != null && _doubanId != null)
+              _linkChip('Bangumi', Colors.purple,
+                  () => _openExternal('https://bgm.tv/subject/$_doubanId')),
+          ],
+        ),
+        const SizedBox(height: 8),
+        // 年份 + 来源
+        Text(
+          '年份: ${(d?.year.isNotEmpty ?? false) && d!.year != 'unknown' ? d.year : item.year}',
+          style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+        ),
+        Text(
+          '来源: ${widget.resource.name}',
+          style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+        ),
+        const SizedBox(height: 8),
+        // 类型标签
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            if (item.typeName.isNotEmpty) _tag(item.typeName, isDark),
+            if (d?.class_ != null && d!.class_!.isNotEmpty) _tag(d.class_!, isDark),
+            if (_douban != null) ...[
+              ..._douban!.genres.map((g) => _tag(g, isDark)),
+              ..._douban!.countries.map((c) => _tag(c, isDark)),
+              ..._douban!.languages.map((l) => _tag(l, isDark)),
+            ],
+            if (_bangumi != null)
+              ..._bangumi!.tags.take(5).map((t) => _tag(t, isDark)),
+          ],
+        ),
+        const SizedBox(height: 12),
+        // 简介 (三段式 fallback, 跟 web 1:1)
+        //   previewData.desc → previewSearchPick.desc → item.remarks
+        _buildDescription(isDark, d, item),
+        // 豆瓣 section
+        if (_isDoubanLoading)
+          _loadingRow('加载豆瓣信息...')
+        else if (_douban != null)
+          _buildDoubanSection(isDark, _douban!),
+        // Bangumi section
+        if (_isBangumiLoading)
+          _loadingRow('加载 Bangumi 信息...')
+        else if (_bangumi != null)
+          _buildBangumiSection(isDark, _bangumi!),
       ],
     );
   }
 
-  Widget _buildRatingRow(ThemeData theme) {
-    final dId = widget.detail.vodDoubanId;
-    final hasDouban = _douban != null;
-    final hasBangumi = _bangumi != null;
-    if (dId <= 0 && !hasDouban && !hasBangumi) {
-      return const SizedBox.shrink();
-    }
-    return Wrap(
-      spacing: 8,
-      runSpacing: 6,
-      children: [
-        if (hasDouban && _douban!.rate != null)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: Colors.green.withOpacity(0.15),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Text('豆瓣 ${_douban!.rate}',
-                style: const TextStyle(
-                    fontSize: 11,
-                    color: Colors.green,
-                    fontWeight: FontWeight.w600)),
-          ),
-        if (hasBangumi && _bangumi!.rating.score > 0)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: Colors.purple.withOpacity(0.15),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Text(
-                'Bangumi ${_bangumi!.rating.score.toStringAsFixed(1)}',
-                style: const TextStyle(
-                    fontSize: 11,
-                    color: Colors.purple,
-                    fontWeight: FontWeight.w600)),
-          ),
-        if (hasDouban && dId > 0)
-          InkWell(
-            onTap: () => _openExternal(
-                'https://movie.douban.com/subject/$dId/'),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                Icon(Icons.open_in_new, size: 12, color: Colors.blue),
-                SizedBox(width: 2),
-                Text(' 豆瓣',
-                    style: TextStyle(fontSize: 11, color: Colors.blue)),
-              ],
-            ),
-          ),
-        if (hasBangumi && dId > 0)
-          InkWell(
-            onTap: () => _openExternal('https://bgm.tv/subject/$dId'),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                Icon(Icons.open_in_new, size: 12, color: Colors.purple),
-                SizedBox(width: 2),
-                Text(' Bangumi',
-                    style: TextStyle(fontSize: 11, color: Colors.purple)),
-              ],
-            ),
-          ),
-      ],
+  Widget _badge(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 11,
+          color: color,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     );
   }
 
-  Widget _buildTagRow(ThemeData theme) {
-    final d = widget.detail;
-    final tags = <String>[];
-    if (d.typeName.isNotEmpty) tags.add(d.typeName);
-    if (d.area.isNotEmpty) tags.add(d.area);
-    if (d.lang.isNotEmpty) tags.add(d.lang);
-    if (_douban != null) {
-      tags.addAll(_douban!.genres);
-      tags.addAll(_douban!.countries);
-      tags.addAll(_douban!.languages);
-    }
-    if (_bangumi != null) tags.addAll(_bangumi!.tags.take(5));
-    final unique = <String>{};
-    final list = tags.where((t) {
-      final clean = t.trim();
-      if (clean.isEmpty) return false;
-      return unique.add(clean);
-    }).toList();
-    if (list.isEmpty) return const SizedBox.shrink();
-    return Wrap(
-      spacing: 6,
-      runSpacing: 6,
-      children: list
-          .map((t) => Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(t, style: const TextStyle(fontSize: 10)),
-              ))
-          .toList(),
+  Widget _linkChip(String text, Color color, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.open_in_new, size: 12, color: color),
+          const SizedBox(width: 2),
+          Text(' $text', style: TextStyle(fontSize: 11, color: color)),
+        ],
+      ),
     );
   }
 
-  Widget _buildDescription(ThemeData theme) {
+  Widget _tag(String text, bool isDark) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: isDark ? Colors.grey.shade700 : Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(text, style: const TextStyle(fontSize: 10)),
+    );
+  }
+
+  Widget _loadingRow(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 14,
+            height: 14,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(width: 8),
+          Text(text, style: const TextStyle(fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  /// v2.3.32.1: 1:1 web 简介三段式 fallback
+  ///   previewData.desc → previewSearchPick.desc → item.remarks
+  Widget _buildDescription(bool isDark, SearchResult? d, SourceBrowserItem item) {
     String? desc;
-    if (_douban?.summary != null && _douban!.summary!.trim().isNotEmpty) {
-      desc = _douban!.summary!.trim();
-    } else if (_bangumi?.summary.isNotEmpty == true) {
-      desc = _bangumi!.summary.trim();
-    } else if (widget.detail.remarks.isNotEmpty) {
-      desc = widget.detail.remarks;
-    } else if (widget.detail.content.isNotEmpty) {
-      desc = _stripHtml(widget.detail.content);
+    if (d?.desc != null && d!.desc!.trim().isNotEmpty) {
+      desc = d.desc!.trim();
+    } else if (_searchPick?.desc != null && _searchPick!.desc!.trim().isNotEmpty) {
+      desc = _searchPick!.desc!.trim();
+    } else if (item.remarks.isNotEmpty) {
+      desc = item.remarks;
     }
     if (desc == null || desc.isEmpty) return const SizedBox.shrink();
     return Container(
       width: double.infinity,
+      constraints: const BoxConstraints(maxHeight: 140),
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.5),
+        color: isDark ? Colors.grey.shade900.withOpacity(0.5) : Colors.grey.shade50,
         borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: isDark ? Colors.grey.shade700 : Colors.grey.shade200),
       ),
-      child: Text(
-        desc,
-        style: const TextStyle(fontSize: 12, height: 1.5),
-        maxLines: 8,
-        overflow: TextOverflow.ellipsis,
+      child: SingleChildScrollView(
+        child: Text(
+          desc,
+          style: TextStyle(fontSize: 12, height: 1.5, color: Colors.grey.shade700),
+        ),
       ),
     );
   }
 
-  Widget _buildDoubanSection(ThemeData theme, DoubanMovieDetails d) {
+  Widget _buildDoubanSection(bool isDark, DoubanMovieDetails d) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: 12),
-        const Text('豆瓣信息',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+        const Text('豆瓣信息', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
         const SizedBox(height: 6),
+        if (d.title.isNotEmpty)
+          Text('标题: ${d.title}${(d.rate != null && d.rate!.isNotEmpty) ? "（评分 ${d.rate}）" : ""}',
+              style: const TextStyle(fontSize: 12)),
         if (d.directors.isNotEmpty)
-          Text('导演: ${d.directors.join('、')}',
-              style: const TextStyle(fontSize: 12)),
+          Text('导演: ${d.directors.join('、')}', style: const TextStyle(fontSize: 12)),
         if (d.screenwriters.isNotEmpty)
-          Text('编剧: ${d.screenwriters.join('、')}',
-              style: const TextStyle(fontSize: 12)),
+          Text('编剧: ${d.screenwriters.join('、')}', style: const TextStyle(fontSize: 12)),
         if (d.actors.isNotEmpty)
-          Text('主演: ${d.actors.take(8).join('、')}${d.actors.length > 8 ? '…' : ''}',
+          Text('主演: ${d.actors.take(8).join('、')}${d.actors.length > 8 ? "…" : ""}',
               style: const TextStyle(fontSize: 12)),
         if (d.releaseDate != null && d.releaseDate!.isNotEmpty)
-          Text('首播/上映: ${d.releaseDate}',
-              style: const TextStyle(fontSize: 12)),
-        if (d.totalEpisodes != null ||
-            d.duration != null)
+          Text('首播/上映: ${d.releaseDate}', style: const TextStyle(fontSize: 12)),
+        if (d.totalEpisodes != null || d.duration != null)
           Text(
             [
               if (d.totalEpisodes != null) '集数: ${d.totalEpisodes}',
-              if (d.duration != null) '片长: ${d.duration}',
+              if (d.duration != null) '片长: ${d.duration} 分钟',
             ].join(' '),
-            style: TextStyle(
-                fontSize: 11, color: theme.colorScheme.onSurfaceVariant),
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+          ),
+        // v2.3.32.1: plot_summary 剧情简介 (跟 web d.plot_summary 1:1)
+        if (d.summary != null && d.summary!.trim().isNotEmpty)
+          Container(
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: isDark ? Colors.grey.shade900.withOpacity(0.3) : Colors.grey.shade50,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              d.summary!.trim(),
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600, height: 1.5),
+            ),
           ),
       ],
     );
   }
 
-  Widget _buildBangumiSection(ThemeData theme, BangumiDetails b) {
+  Widget _buildBangumiSection(bool isDark, BangumiDetails b) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: 12),
-        const Text('Bangumi 信息',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+        const Text('Bangumi 信息', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
         const SizedBox(height: 6),
+        // v2.3.32.1: name_cn || name 标题 (跟 web 1:1)
+        // BangumiDetails.nameCn 是 String?, 需要 null-safe 访问
+        Text(
+          '标题: ${(b.nameCn != null && b.nameCn!.isNotEmpty) ? b.nameCn : b.name}'
+          '${b.rating.score > 0 ? "（评分 ${b.rating.score.toStringAsFixed(1)}）" : ""}',
+          style: const TextStyle(fontSize: 12),
+        ),
         if (b.date != null && b.date!.isNotEmpty)
           Text('首播: ${b.date}', style: const TextStyle(fontSize: 12)),
         if (b.eps > 0) Text('集数: ${b.eps}', style: const TextStyle(fontSize: 12)),
@@ -1429,45 +2150,110 @@ class _PreviewDialogState extends State<_PreviewDialog> {
           const SizedBox(height: 4),
           ...b.infobox.take(8).map((s) => Text(s, style: const TextStyle(fontSize: 11))),
         ],
+        if (b.summary.trim().isNotEmpty)
+          Container(
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: isDark ? Colors.grey.shade900.withOpacity(0.3) : Colors.grey.shade50,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              b.summary.trim(),
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600, height: 1.5),
+            ),
+          ),
       ],
     );
   }
 
-  Widget _buildFooter(ThemeData theme) {
+  Widget _buildFooter(ThemeData theme, bool isDark) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
       decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: isDark
+              ? [Colors.grey.shade800.withOpacity(0.9), Colors.blue.withOpacity(0.05), Colors.grey.shade800.withOpacity(0.9)]
+              : [Colors.white.withOpacity(0.9), Colors.blue.withOpacity(0.03), Colors.white.withOpacity(0.9)],
+        ),
         border: Border(
-            top: BorderSide(
-                color: theme.colorScheme.outlineVariant.withOpacity(0.3))),
+          top: BorderSide(
+            color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+          ),
+        ),
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
         children: [
-          TextButton(
+          // 来源 class 圆点 (跟 web previewData.class 1:1)
+          if (_detail?.class_ != null && _detail!.class_!.isNotEmpty) ...[
+            Container(
+              width: 6,
+              height: 6,
+              decoration: const BoxDecoration(
+                color: Colors.blue,
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              _detail!.class_!,
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+            ),
+          ],
+          const Spacer(),
+          OutlinedButton(
             onPressed: () => Navigator.of(context).pop(),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              side: BorderSide(
+                color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+                width: 2,
+              ),
+            ),
             child: const Text('取消'),
           ),
-          const SizedBox(width: 8),
-          FilledButton.icon(
+          const SizedBox(width: 10),
+          // 1:1 web 立即播放: blue→indigo 渐变 + shadow + scale
+          ElevatedButton.icon(
             icon: const Icon(Icons.play_arrow, size: 18),
             label: const Text('立即播放'),
-            onPressed: widget.onPlay,
-            style: FilledButton.styleFrom(
-              backgroundColor: Colors.teal,
+            onPressed: _detail == null ? null : () => widget.onPlay(_detail!),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              backgroundColor: Colors.transparent,
               foregroundColor: Colors.white,
+              elevation: 0,
+              shadowColor: Colors.transparent,
+            ).copyWith(
+              backgroundColor: MaterialStateProperty.all(Colors.transparent),
+              foregroundColor: MaterialStateProperty.all(Colors.white),
             ),
-          ),
+            // 渐变背景用 container 包
+          ).wrapGradient(),
         ],
       ),
     );
   }
+}
 
-  static String _stripHtml(String html) {
-    return html
-        .replaceAll(RegExp(r'<[^>]*>'), '')
-        .replaceAll('&nbsp;', ' ')
-        .replaceAll('&amp;', '&')
-        .trim();
+// Extension: 给 ElevatedButton 包渐变背景
+extension _GradientButton on Widget {
+  Widget wrapGradient() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(colors: [Colors.blue, Colors.indigo]),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.blue.withOpacity(0.3),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: this,
+    );
   }
 }

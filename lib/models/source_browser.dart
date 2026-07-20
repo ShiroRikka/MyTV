@@ -81,12 +81,6 @@ class SourceBrowserEpisode {
 /// 源浏览器详情 (来自 `?ac=videolist&ids=ID` list[0])
 /// 比 SourceBrowserItem 多 vod_content (简介) + vod_play_url (选集 URL 串) +
 ///   vod_actor (演员) + vod_director (导演) + vod_area (地区) + vod_lang (语言).
-/// v2.3.32 改: 加 vodDoubanId 字段 (AppleCMS 源 `vod_douban_id`), 给详情
-///   preview 直接拿 douban_id 调 DoubanService / BangumiService, 跟 web
-///   /source-browser openPreview 拿 douban_id 同源. 字段可能为 0 (源没填)
-///   → preview 端 fallback 走 search/one 重新搜 (web 走得到, mobile
-///   v2.3.32 暂不实现 search/one, 直接 0 时不集成豆瓣/Bangumi — 跟
-///   player_screen 行为一致: 没 doubanId 就别强行拉).
 @immutable
 class SourceBrowserDetail {
   final String id;
@@ -100,7 +94,6 @@ class SourceBrowserDetail {
   final String director; // 导演
   final String area; // 地区
   final String lang; // 语言
-  final int vodDoubanId; // v2.3.32: 源 API 的 douban_id (0 = 没填)
   final List<SourceBrowserEpisode> episodes; // 解析后的选集
 
   const SourceBrowserDetail({
@@ -115,7 +108,6 @@ class SourceBrowserDetail {
     required this.director,
     required this.area,
     required this.lang,
-    required this.vodDoubanId,
     required this.episodes,
   });
 
@@ -139,12 +131,6 @@ class SourceBrowserDetail {
           (json['vod_director'] ?? json['director'] ?? '').toString().trim(),
       area: (json['vod_area'] ?? json['area'] ?? '').toString().trim(),
       lang: (json['vod_lang'] ?? json['lang'] ?? '').toString().trim(),
-      // v2.3.32: douban_id 解析. AppleCMS 源字段名 `vod_douban_id` (有
-      //   的源返字符串有的源返数字, 用 num.toInt() 容错). 0 = 没填,
-      //   preview 端就不调 DoubanService / BangumiService.
-      vodDoubanId: (json['vod_douban_id'] as num?)?.toInt() ??
-          (json['douban_id'] as num?)?.toInt() ??
-          0,
       episodes: episodes,
     );
   }
