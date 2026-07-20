@@ -18,14 +18,14 @@ class SearchResource {
 
   factory SearchResource.fromJson(Map<String, dynamic> json) {
     return SearchResource(
-      key: json['key'] as String? ?? '',
-      name: json['name'] as String? ?? '',
-      // v2.4.4: api 字段 trim, 去除前后空格. 之前没 trim,
-      //   如果用户配置的 api 前后有空格, 拼出的 URL 会破损.
-      //   详见 source_browser_service.dart _buildUrl 注释.
+      // v2.4.5: 全字段 trim, 之前只 trim api. detail 字段若有空格,
+      //   search_service._handleSpecialSourceDetail 拼 detail URL 会带空格,
+      //   URL 破损. name/key/from 顺手 trim 一致.
+      key: (json['key'] as String? ?? '').trim(),
+      name: (json['name'] as String? ?? '').trim(),
       api: (json['api'] as String? ?? '').trim(),
-      detail: json['detail'] as String? ?? '',
-      from: json['from'] as String? ?? '',
+      detail: (json['detail'] as String? ?? '').trim(),
+      from: (json['from'] as String? ?? '').trim(),
       disabled: json['disabled'] as bool? ?? false,
     );
   }

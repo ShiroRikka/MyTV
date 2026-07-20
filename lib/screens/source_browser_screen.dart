@@ -362,6 +362,12 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
 
   void _onSourceTap(String key) {
     if (_selectedSourceKey == key) return;
+    // v2.4.5: 切换源时清 SourceBrowserService 内存 cache, 跟 web 行为对齐
+    //   (web list 是 useState+useEffect, 每次切源都必然 fetchItems, 必有 loading).
+    //   之前 mobile 5 分钟 in-memory cache 让切回旧源时 cache 命中, 不发请求,
+    //   没 loading 没数据刷新, 用户感知「切源不刷新」.
+    //   全清 (含 categories cache) 简单可靠, categories 请求很小, 多打一次没影响.
+    SourceBrowserService.clearCache();
     setState(() {
       _selectedSourceKey = key;
     });

@@ -1,10 +1,12 @@
 import 'dart:async';
-import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:gbk_codec/gbk_codec.dart';
+
 import 'package:luna_tv/models/search_resource.dart';
 import 'package:luna_tv/models/search_result.dart';
 import 'package:luna_tv/services/content_filter_service.dart';
+import 'package:luna_tv/services/http_shared.dart';
 import 'package:luna_tv/services/local_search_cache_service.dart';
 
 /// 分页搜索结果
@@ -19,6 +21,11 @@ class SearchPageResult {
 }
 
 /// 下游搜索服务
+///
+/// v2.4.5: 改用 HttpShared 公共 helper (UA Chrome 147 / 15s timeout / buildUrl /
+///   decodeBody / parseVodPlayUrl). 之前是 Chrome 122 + 8s + 直接拼 URL +
+///   .endsWith('.m3u8') 过滤, 跟 SourceBrowserService 配置分叉, 导致同一个源
+///   「源浏览器能开但全局搜索搜不到」「点开视频没集数」.
 class DownstreamService {
   /// 从指定的搜索资源API搜索
   static Future<List<SearchResult>> searchFromApi(
@@ -27,8 +34,9 @@ class DownstreamService {
   ) async {
     try {
       final apiBaseUrl = resource.api;
-      final apiUrl =
-          '$apiBaseUrl?ac=videolist&wd=${Uri.encodeComponent(query)}';
+      // v2.4.5: 用 HttpShared.buildUrl 检查 api 是否已带 `?`.
+      final apiUrl = HttpShared.buildUrl(
+          apiBaseUrl, 'ac=videolist&wd=${Uri.encodeComponent(query)}');
 
       final firstPageResult = await searchPage(
         resource: resource,
@@ -52,8 +60,8 @@ class DownstreamService {
         final additionalPageFutures = <Future<List<SearchResult>>>[];
 
         for (int page = 2; page <= pagesToFetch + 1; page++) {
-          final pageUrl =
-              '$apiBaseUrl?ac=videolist&wd=${Uri.encodeComponent(query)}&pg=$page';
+          final pageUrl = HttpShared.buildUrl(apiBaseUrl,
+              'ac=videolist&wd=${Uri.encodeComponent(query)}&pg=$page');
 
           final pageFuture = searchPage(
             resource: resource,
@@ -133,14 +141,12 @@ class DownstreamService {
     }
 
     try {
+      // v2.4.5: UA Chrome 122 → 147 (HttpShared.userAgent), timeout 8s → 15s
+      //   (HttpShared.timeoutList, 跟 web list route 1:1, 解决中等速度源超时)
       final response = await http.get(
         Uri.parse(url),
-        headers: {
-          'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-        },
-      ).timeout(const Duration(seconds: 8));
+        headers: HttpShared.jsonHeaders(),
+      ).timeout(HttpShared.timeoutList);
 
       // 检查 403 状态码，缓存 forbidden
       if (response.statusCode == 403) {
@@ -158,42 +164,9 @@ class DownstreamService {
         return SearchPageResult(results: [], pageCount: 1);
       }
 
-      // 尝试从响应头获取编码
-      String? charset;
-      final contentType = response.headers['content-type'];
-      if (contentType != null) {
-        final charsetMatch = RegExp(r'charset=([^;]+)').firstMatch(contentType);
-        if (charsetMatch != null) {
-          charset = charsetMatch.group(1)?.toLowerCase().trim();
-        }
-      }
-
-      // 根据编码解码响应体
-      String responseBody;
-      if (charset == 'gbk' || charset == 'gb2312') {
-        // GBK/GB2312 编码
-        try {
-          responseBody = gbk.decode(response.bodyBytes);
-        } catch (e) {
-          // 如果 GBK 解码失败，尝试 UTF-8
-          responseBody = utf8.decode(response.bodyBytes, allowMalformed: true);
-        }
-      } else {
-        // UTF-8 或其他编码
-        try {
-          responseBody = utf8.decode(response.bodyBytes, allowMalformed: true);
-        } catch (e) {
-          // 如果 UTF-8 解码失败，尝试 GBK
-          try {
-            responseBody = gbk.decode(response.bodyBytes);
-          } catch (e2) {
-            // 都失败了，使用默认的 body
-            responseBody = response.body;
-          }
-        }
-      }
-
-      final data = json.decode(responseBody);
+      // v2.4.5: 解码 + JSON 解析改用 HttpShared (charset 检测 + GBK/UTF-8 自动 + 失败 fallback)
+      final responseBody = HttpShared.decodeBody(response);
+      final data = HttpShared.parseJson(responseBody);
 
       if (data == null ||
           data['list'] == null ||
@@ -205,31 +178,21 @@ class DownstreamService {
       final list = data['list'] as List;
 
       final allResults = list.map((item) {
+        // v2.4.5: vod_play_url 解析改用 HttpShared.parseVodPlayUrl (startsWith('http')),
+        //   跟 source_browser_service.dart 一致. 之前 .endsWith('.m3u8') 把
+        //   .mp4 直链 / .m3u8?token=xxx 带鉴权参数的 URL 全部过滤掉了.
         List<String> episodes = [];
         List<String> titles = [];
 
         if (item['vod_play_url'] != null) {
           final vodPlayUrlArray =
-              (item['vod_play_url'] as String).split('\$\$\$');
+              (item['vod_play_url'] as String).split(r'$$$');
 
           for (final url in vodPlayUrlArray) {
-            List<String> matchEpisodes = [];
-            List<String> matchTitles = [];
-
-            final titleUrlArray = url.split('#');
-
-            for (final titleUrl in titleUrlArray) {
-              final episodeTitleUrl = titleUrl.split('\$');
-              if (episodeTitleUrl.length == 2 &&
-                  episodeTitleUrl[1].endsWith('.m3u8')) {
-                matchTitles.add(episodeTitleUrl[0]);
-                matchEpisodes.add(episodeTitleUrl[1]);
-              }
-            }
-
-            if (matchEpisodes.length > episodes.length) {
-              episodes = matchEpisodes;
-              titles = matchTitles;
+            final parsed = HttpShared.parseVodPlayUrl(url);
+            if (parsed.length > episodes.length) {
+              episodes = parsed.map((e) => e.url).toList();
+              titles = parsed.map((e) => e.name).toList();
             }
           }
         }
@@ -291,6 +254,9 @@ class DownstreamService {
 
       return SearchPageResult(results: [], pageCount: 1);
     } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Downstream] searchPage err resource=${resource.key} e=$e');
+      }
       // 其他异常不缓存，直接返回空结果
       return SearchPageResult(results: [], pageCount: 1);
     }

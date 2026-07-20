@@ -1,9 +1,9 @@
-import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:luna_tv/models/search_result.dart';
 import 'package:luna_tv/models/search_resource.dart';
 import 'package:luna_tv/services/api_service.dart';
 import 'package:luna_tv/services/downstream_service.dart';
+import 'package:luna_tv/services/http_shared.dart';
 import 'package:luna_tv/services/user_data_service.dart';
 import 'package:luna_tv/services/local_mode_storage_service.dart';
 
@@ -68,9 +68,14 @@ class SearchService {
   ///   给源浏览器 (settings/源浏览器) 用, 拿所有未 disable 的 SearchResource.
   ///   跟 [searchSync] / [getDetailSync] 用同一份内存缓存, 不另起链路.
   ///   返回顺序 = server 推过来 / 本地 模式 读 LocalModeStorageService 的顺序.
+  ///
+  /// v2.4.5: 同时过滤空 api (跟 web sites/route.ts:17
+  ///   `.filter((s) => Boolean(s.api?.trim()))` 1:1). 之前空 api 源会出现在
+  ///   UI 列表里但点进去 _buildUrl 返 '' → _getJson 返 null → 「加载失败」,
+  ///   silent failure 极难排查.
   static Future<List<SearchResource>> getActiveResources() async {
     final all = await _getSearchResourcesWithCache();
-    return all.where((r) => !r.disabled).toList();
+    return all.where((r) => !r.disabled && r.api.trim().isNotEmpty).toList();
   }
 
   /// 搜索推荐（只搜索第一个资源）
@@ -168,23 +173,23 @@ class SearchService {
       }
 
       // 构建详情请求 URL
-      final detailUrl = '${apiSite.api}?ac=videolist&ids=$id';
+      // v2.4.5: 用 HttpShared.buildUrl 检查 api 是否已带 `?`.
+      final detailUrl = HttpShared.buildUrl(apiSite.api, 'ac=videolist&ids=$id');
 
-      // 发起请求，设置 10 秒超时
+      // v2.4.5: UA Chrome 122 → 147 (HttpShared.jsonHeaders),
+      //   timeout 10s → 8s (HttpShared.timeoutDefault, 跟 SourceBrowser.getDetail 1:1)
       final response = await http.get(
         Uri.parse(detailUrl),
-        headers: {
-          'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-        },
-      ).timeout(const Duration(seconds: 10));
+        headers: HttpShared.jsonHeaders(),
+      ).timeout(HttpShared.timeoutDefault);
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw Exception('详情请求失败: ${response.statusCode}');
       }
 
-      final data = json.decode(response.body);
+      // v2.4.5: 解码 + JSON 解析改用 HttpShared (charset 检测 + GBK/UTF-8 自动 + 失败 fallback).
+      //   之前直接 response.body (Latin-1 解码), GBK 源拿到乱码 json.decode 抛异常.
+      final data = HttpShared.parseJson(HttpShared.decodeBody(response));
 
       if (data == null ||
           data['list'] == null ||
@@ -197,31 +202,18 @@ class SearchService {
       List<String> episodes = [];
       List<String> titles = [];
 
-      // 处理播放源拆分
+      // v2.4.5: vod_play_url 解析改用 HttpShared.parseVodPlayUrl (startsWith('http')),
+      //   跟 SourceBrowser.getDetail / DownstreamService.searchPage 一致.
+      //   之前 .endsWith('.m3u8') 把 .mp4 直链 / .m3u8?token=xxx 全部过滤掉了.
       if (videoDetail['vod_play_url'] != null) {
-        // 先用 $$$ 分割
         final vodPlayUrlArray =
-            (videoDetail['vod_play_url'] as String).split('\$\$\$');
+            (videoDetail['vod_play_url'] as String).split(r'$$$');
 
-        // 分集之间 # 分割，标题和播放链接 $ 分割
         for (final url in vodPlayUrlArray) {
-          List<String> matchEpisodes = [];
-          List<String> matchTitles = [];
-
-          final titleUrlArray = url.split('#');
-
-          for (final titleUrl in titleUrlArray) {
-            final episodeTitleUrl = titleUrl.split('\$');
-            if (episodeTitleUrl.length == 2 &&
-                episodeTitleUrl[1].endsWith('.m3u8')) {
-              matchTitles.add(episodeTitleUrl[0]);
-              matchEpisodes.add(episodeTitleUrl[1]);
-            }
-          }
-
-          if (matchEpisodes.length > episodes.length) {
-            episodes = matchEpisodes;
-            titles = matchTitles;
+          final parsed = HttpShared.parseVodPlayUrl(url);
+          if (parsed.length > episodes.length) {
+            episodes = parsed.map((e) => e.url).toList();
+            titles = parsed.map((e) => e.name).toList();
           }
         }
       }
@@ -266,25 +258,25 @@ class SearchService {
   }
 
   /// 处理特殊源的详情（通过 HTML 页面解析）
+  ///
+  /// v2.4.5: UA Chrome 122 → 147 (HttpShared.htmlHeaders), apiSite 类型 dynamic
+  ///   改成 SearchResource. detail 字段去掉末尾斜杠避免双斜杠.
   static Future<SearchResult> _handleSpecialSourceDetail(
-      String id, dynamic apiSite) async {
-    final detailUrl = '${apiSite.detail}/index.php/vod/detail/id/$id.html';
+      String id, SearchResource apiSite) async {
+    final detailBase = apiSite.detail.trim().replaceAll(RegExp(r'/+$'), '');
+    final detailUrl = '$detailBase/index.php/vod/detail/id/$id.html';
 
-    // 发起请求，设置 10 秒超时
+    // v2.4.5: UA Chrome 122 → 147 (HttpShared.htmlHeaders), timeout 10s → 8s
     final response = await http.get(
       Uri.parse(detailUrl),
-      headers: {
-        'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html',
-      },
-    ).timeout(const Duration(seconds: 10));
+      headers: HttpShared.htmlHeaders(),
+    ).timeout(HttpShared.timeoutDefault);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('详情页请求失败: ${response.statusCode}');
     }
 
-    final html = response.body;
+    final html = HttpShared.decodeBody(response);
     List<String> matches = [];
 
     // 如果是 ffzy 源，使用特殊的正则表达式
