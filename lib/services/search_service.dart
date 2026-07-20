@@ -64,6 +64,15 @@ class SearchService {
     _cachedResources = null;
   }
 
+  /// v2.3.31: 取当前激活的源列表 (公开版 _getSearchResourcesWithCache).
+  ///   给源浏览器 (settings/源浏览器) 用, 拿所有未 disable 的 SearchResource.
+  ///   跟 [searchSync] / [getDetailSync] 用同一份内存缓存, 不另起链路.
+  ///   返回顺序 = server 推过来 / 本地 模式 读 LocalModeStorageService 的顺序.
+  static Future<List<SearchResource>> getActiveResources() async {
+    final all = await _getSearchResourcesWithCache();
+    return all.where((r) => !r.disabled).toList();
+  }
+
   /// 搜索推荐（只搜索第一个资源）
   /// 用于快速获取搜索建议
   static Future<List<String>> searchRecommand(String query) async {

@@ -9,6 +9,7 @@ import 'package:luna_tv/screens/login_screen.dart';
 import 'package:luna_tv/services/douban_cache_service.dart';
 import 'package:luna_tv/services/page_cache_service.dart';
 import 'package:luna_tv/screens/diary_screen.dart';
+import 'package:luna_tv/screens/source_browser_screen.dart';
 import 'package:luna_tv/services/diary_service.dart';
 import 'package:luna_tv/services/local_search_cache_service.dart';
 import 'package:luna_tv/services/tmdb_service.dart';
@@ -1847,6 +1848,23 @@ class _UserMenuState extends State<UserMenu> {
                 icon: LucideIcons.trash2,
                 iconColor: const Color(0xFFf59e0b),
                 onTap: _handleClearDoubanCache,
+              ),
+              _buildDivider(),
+              // v2.3.31: 源浏览器 — 跟 web LunaTV /source-browser 1:1 对齐
+              //   入口放在 "其他" section 的 清除豆瓣缓存 之后, 跟 "日记" 同级
+              //   (都是导航型 action, 不是 toggle). 配色 emerald→teal 渐变跟
+              //   web 一致. 图标 LucideIcons.layers (web 也是 layers).
+              _buildActionItem(
+                title: '源浏览器',
+                icon: LucideIcons.layers,
+                iconColor: const Color(0xFF10b981),
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const SourceBrowserScreen(),
+                    ),
+                  );
+                },
               ),
               _buildDivider(),
               // v2.0.99.2: 日记 — 跳到 DiaryScreen, 看全流程运行日志
