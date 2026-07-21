@@ -525,8 +525,10 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
                 child: _buildCategoriesItemsCard(theme, isDark),
               ),
             // 留底 padding
+            //   v2.4.8: 40 → 120 (跟 web pb-40 1:1). 之前 40 太小,
+            //   内容贴近底部 nav bar, 最后两行 card 被 nav bar 挡住一半.
             const SliverToBoxAdapter(
-              child: SizedBox(height: 40),
+              child: SizedBox(height: 120),
             ),
           ],
         ),
@@ -672,8 +674,9 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
   // -------- Source card (1:1 web source section) --------
 
   Widget _buildSourceCard(ThemeData theme, bool isDark) {
+    // v2.4.8: 卡片上下间距 8 → 16 (跟 web space-y-6 1:1, 之前卡片黏在一起)
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 16),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -874,7 +877,7 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
 
   Widget _buildQuerySortCard(ThemeData theme, bool isDark) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       decoration: BoxDecoration(
         color: isDark ? Colors.grey.shade800 : Colors.white,
         borderRadius: BorderRadius.circular(12),
@@ -966,46 +969,46 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            // 第二行: 排序 / 年份 / 关键词 (grid-cols-2 同款)
+            // 第二行: 排序 / 年份 / 关键词
+            //   v2.4.8: 跟 web 移动端 1:1 — 排序+年份同一行, 关键词单独一行.
+            //   之前永远 3 列横向 (sort 1 / year 1 / keyword 2), 窄屏每个
+            //   控件挤成一条, dropdown label 都看不全. web 端 mobile 视口是
+            //   grid-cols-2 (sort/year 各一列) + keyword col-span-2 整行.
             Row(
               children: [
                 Expanded(child: _buildSortDropdown(isDark)),
                 const SizedBox(width: 8),
                 Expanded(child: _buildYearDropdown(isDark)),
-                const SizedBox(width: 8),
-                Expanded(
-                  flex: 2,
-                  child: SizedBox(
-                    height: 40,
-                    child: TextField(
-                      controller: _filterKeywordController,
-                      onChanged: (v) => setState(() => _filterKeyword = v),
-                      decoration: InputDecoration(
-                        hintText: '地区/关键词',
-                        hintStyle: const TextStyle(fontSize: 12),
-                        prefixIcon: const Icon(Icons.filter_list, size: 16),
-                        isDense: true,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: BorderSide(
-                            color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
-                          ),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: BorderSide(
-                            color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
-                          ),
-                        ),
-                        filled: true,
-                        fillColor: isDark ? Colors.grey.shade700 : Colors.white,
-                      ),
-                      style: const TextStyle(fontSize: 12),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 40,
+              child: TextField(
+                controller: _filterKeywordController,
+                onChanged: (v) => setState(() => _filterKeyword = v),
+                decoration: InputDecoration(
+                  hintText: '地区/关键词',
+                  hintStyle: const TextStyle(fontSize: 12),
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(
+                      color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
                     ),
                   ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(
+                      color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+                    ),
+                  ),
+                  filled: true,
+                  fillColor: isDark ? Colors.grey.shade700 : Colors.white,
                 ),
-              ],
+                style: const TextStyle(fontSize: 12),
+              ),
             ),
           ],
         ),
@@ -1103,7 +1106,7 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
 
   Widget _buildCategoriesItemsCard(ThemeData theme, bool isDark) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -1373,9 +1376,13 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
           padding: EdgeInsets.zero,
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 3,
-            childAspectRatio: 0.52,
-            crossAxisSpacing: 10,
-            mainAxisSpacing: 14,
+            // v2.4.8: childAspectRatio 0.52 → 0.55 (跟 web 移动端 1:1).
+            //   web 移动端海报 aspect-[2/3] + 标题 min-h-[2rem], 整体比例约 0.55.
+            //   之前 0.52 标题区被压扁, 2 行标题挤在一起.
+            childAspectRatio: 0.55,
+            // v2.4.8: 横纵间距统一 12 (跟 web gap-3 1:1, 之前 10/14 不一致)
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
           ),
           itemCount: visible.length,
           itemBuilder: (_, idx) => _ItemCard(
@@ -1560,17 +1567,23 @@ class _ItemCardState extends State<_ItemCard> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        item.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: _hovering
-                              ? Colors.blue
-                              : (isDark ? Colors.white : Colors.grey.shade900),
-                          height: 1.3,
+                      // v2.4.8: 标题加 min-height (跟 web min-h-[2rem] 1:1).
+                      //   之前 1 行标题的 card 比 2 行标题的 card 矮一截, grid
+                      //   参差不齐. 加 min-height 保证 1 行也占 2 行高度.
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(minHeight: 32),
+                        child: Text(
+                          item.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: _hovering
+                                ? Colors.blue
+                                : (isDark ? Colors.white : Colors.grey.shade900),
+                            height: 1.3,
+                          ),
                         ),
                       ),
                       if (item.remarks.isNotEmpty) ...[
@@ -1918,35 +1931,46 @@ class _PreviewDialogState extends State<_PreviewDialog> {
     }
     final d = _detail;
     final item = widget.item;
+    // v2.4.8: 跟 web 移动端 1:1 — vertical 布局 (海报在上, 内容在下),
+    //   海报 max 200px 宽 + 2:3 比例 + 居中. 之前永远 horizontal (海报左 120x170
+    //   + 内容右), 比例失真 + 在窄屏挤压. web 端 mobile 视口是 grid-cols-1
+    //   (vertical), md+ 才 grid-cols-3 (horizontal).
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // 左: 海报 (1:1 web md:sticky md:top-0)
-          ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: SizedBox(
-              width: 120,
-              height: 170,
-              child: (d?.poster.isNotEmpty ?? false)
-                  ? CachedNetworkImage(
-                      imageUrl: d!.poster,
-                      fit: BoxFit.cover,
-                      errorWidget: (_, __, ___) => _placeholderPoster(isDark),
-                    )
-                  : (item.poster.isNotEmpty
+          // 海报: 居中 + max 200 宽 + 2:3 比例 (跟 web 移动端 max-w-[200px]
+          //   mx-auto + 原图比例 1:1)
+          Center(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                width: 200,
+                child: AspectRatio(
+                  aspectRatio: 2 / 3,
+                  child: (d?.poster.isNotEmpty ?? false)
                       ? CachedNetworkImage(
-                          imageUrl: item.poster,
+                          imageUrl: d!.poster,
                           fit: BoxFit.cover,
-                          errorWidget: (_, __, ___) => _placeholderPoster(isDark),
+                          errorWidget: (_, __, ___) =>
+                              _placeholderPoster(isDark),
                         )
-                      : _placeholderPoster(isDark)),
+                      : (item.poster.isNotEmpty
+                          ? CachedNetworkImage(
+                              imageUrl: item.poster,
+                              fit: BoxFit.cover,
+                              errorWidget: (_, __, ___) =>
+                                  _placeholderPoster(isDark),
+                            )
+                          : _placeholderPoster(isDark)),
+                ),
+              ),
             ),
           ),
-          const SizedBox(width: 16),
-          // 右: 元数据 + 简介 + 豆瓣/Bangumi
-          Expanded(child: _buildRightColumn(theme, isDark, d, item)),
+          const SizedBox(height: 16),
+          // 元数据 + 简介 + 豆瓣/Bangumi
+          _buildRightColumn(theme, isDark, d, item),
         ],
       ),
     );
@@ -2001,20 +2025,16 @@ class _PreviewDialogState extends State<_PreviewDialog> {
           style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
         ),
         const SizedBox(height: 8),
-        // 类型标签
+        // 类型标签 (v2.4.8: 跟 web 1:1, 主标签行只放 typeName + class_,
+        //   douban.genres/countries/languages 移到 _buildDoubanSection,
+        //   bangumi.tags 移到 _buildBangumiSection. 之前全混在主标签行,
+        //   类型信息一多就堆成一大片分不清归属.)
         Wrap(
-          spacing: 6,
-          runSpacing: 6,
+          spacing: 8,
+          runSpacing: 8,
           children: [
             if (item.typeName.isNotEmpty) _tag(item.typeName, isDark),
             if (d?.class_ != null && d!.class_!.isNotEmpty) _tag(d.class_!, isDark),
-            if (_douban != null) ...[
-              ..._douban!.genres.map((g) => _tag(g, isDark)),
-              ..._douban!.countries.map((c) => _tag(c, isDark)),
-              ..._douban!.languages.map((l) => _tag(l, isDark)),
-            ],
-            if (_bangumi != null)
-              ..._bangumi!.tags.take(5).map((t) => _tag(t, isDark)),
           ],
         ),
         const SizedBox(height: 12),
@@ -2142,6 +2162,20 @@ class _PreviewDialogState extends State<_PreviewDialog> {
         if (d.actors.isNotEmpty)
           Text('主演: ${d.actors.take(8).join('、')}${d.actors.length > 8 ? "…" : ""}',
               style: const TextStyle(fontSize: 12)),
+        // v2.4.8: 类型标签移回 douban section (genres + countries + languages)
+        //   之前全混在主标签行, 现在跟 web 1:1 分 section 展示
+        if (d.genres.isNotEmpty || d.countries.isNotEmpty || d.languages.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              ...d.genres.map((g) => _tag(g, isDark)),
+              ...d.countries.map((c) => _tag(c, isDark)),
+              ...d.languages.map((l) => _tag(l, isDark)),
+            ],
+          ),
+        ],
         if (d.releaseDate != null && d.releaseDate!.isNotEmpty)
           Text('首播/上映: ${d.releaseDate}', style: const TextStyle(fontSize: 12)),
         if (d.totalEpisodes != null || d.duration != null)
@@ -2186,10 +2220,21 @@ class _PreviewDialogState extends State<_PreviewDialog> {
         ),
         if (b.date != null && b.date!.isNotEmpty)
           Text('首播: ${b.date}', style: const TextStyle(fontSize: 12)),
+        // v2.4.8: tags 移回 bangumi section (之前混在主标签行)
+        //   跟 web 1:1 取 slice(0,10)
+        if (b.tags.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: b.tags.take(10).map((t) => _tag(t, isDark)).toList(),
+          ),
+        ],
         if (b.eps > 0) Text('集数: ${b.eps}', style: const TextStyle(fontSize: 12)),
         if (b.infobox.isNotEmpty) ...[
           const SizedBox(height: 4),
-          ...b.infobox.take(8).map((s) => Text(s, style: const TextStyle(fontSize: 11))),
+          // v2.4.8: infobox take(10) (跟 web 1:1, 之前 take(8))
+          ...b.infobox.take(10).map((s) => Text(s, style: const TextStyle(fontSize: 11))),
         ],
         if (b.summary.trim().isNotEmpty)
           Container(

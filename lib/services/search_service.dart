@@ -38,6 +38,14 @@ class SearchService {
   }
 
   /// 刷新缓存（仅用于服务器模式）
+  ///
+  /// v2.4.8: 失败 (拿到空 list) **不更新 cache**, 让下次重试.
+  ///   之前 ApiService.getSearchResources 在 HTTP 失败/异常时返 [],
+  ///   _refreshCache 把 [] 当成有效结果缓存进 _cachedResources →
+  ///   后续 _getSearchResourcesWithCache 直接返空 cache →
+  ///   UI 显示「暂无可用源」, 直到进程重启. 网络抖动一次就显示「没源」
+  ///   体验极差. 修: 拿到空 list 时不更新 cache, 仍返旧 cache (或 []),
+  ///   下次再试.
   static Future<List<SearchResource>> _refreshCache() async {
     if (_isRefreshing) {
       // 如果正在刷新，等待当前刷新完成
@@ -50,8 +58,11 @@ class SearchService {
     _isRefreshing = true;
     try {
       final resources = await ApiService.getSearchResources();
-      _cachedResources = resources;
-      return resources;
+      // v2.4.8: 空 list 视为失败, 不更新 cache (避免网络抖动把空 list 缓存住)
+      if (resources.isNotEmpty) {
+        _cachedResources = resources;
+      }
+      return _cachedResources ?? resources;
     } catch (e) {
       return _cachedResources ?? [];
     } finally {
