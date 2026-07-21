@@ -1138,11 +1138,15 @@ class UserDataService {
         _githubAssetUrlCache[originalUrl] = wrapped;
         return wrapped;
       } else {
-        // 没配 worker — 1:1 返 (用户走原 URL, 国内 100% 拉不到, 但不报错)
+        // 没配 worker — fallback 走 gh-proxy.org (国内可达)
+        final wrapped = originalUrl.replaceFirst(
+          'https://github.com/',
+          'https://gh-proxy.org/github.com/',
+        );
         DiaryService.add(
-            '[GitHub] buildAssetUrl: passthrough, reason="worker URL 未配 (国内 GFW 拉不到, 在「设置 → 代理 URL」填)", in=$originalUrl');
-        _githubAssetUrlCache[originalUrl] = originalUrl;
-        return originalUrl;
+            '[GitHub] buildAssetUrl: fallback gh-proxy.org, in=$originalUrl out=$wrapped');
+        _githubAssetUrlCache[originalUrl] = wrapped;
+        return wrapped;
       }
     } else {
       // URL 不是 GitHub release download 格式 (罕见, fallback 透传)
