@@ -51,11 +51,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 class PlayerScreen extends StatefulWidget {
   final VideoInfo videoInfo;
   final String? preferredSource;
+  // v2.4.7: 源浏览器点播放直接传 detail (含 episodes), 跳过 _loadSources
+  //   (会调 /api/search 全源搜索), 直接用当前源播. 用户反馈 "点击播放后
+  //   应该直接播放当前源不应该再跳转到播放详情页去搜索源".
+  final SearchResult? initialDetail;
 
   const PlayerScreen({
     super.key,
     required this.videoInfo,
     this.preferredSource,
+    this.initialDetail,
   });
 
   @override
@@ -293,7 +298,20 @@ class _PlayerScreenState extends State<PlayerScreen>
     // 加载收藏状态
     _loadFavorite();
     // 一集播完自动播下一集 (避免用户点下一集的繁琐)
-    _loadSources();
+    // v2.4.7: 源浏览器点播放直接传 initialDetail (含 episodes), 跳过
+    //   _loadSources (会调 /api/search 全源搜索), 直接用当前源播.
+    //   用户反馈 "点击播放后应该直接播放当前源不应该再跳转到播放详情页
+    //   去搜索源". 单源模式不跑测速 (只有一个源, 测了也没意义).
+    if (widget.initialDetail != null) {
+      setState(() {
+        _sourceResults = [widget.initialDetail!];
+        _sourcesLoading = false;
+        _error = null;
+      });
+      _selectSource(widget.initialDetail!);
+    } else {
+      _loadSources();
+    }
   }
 
   /// v2.2.0: 异步初始化 ExoPlayer + 订阅所有 stream.

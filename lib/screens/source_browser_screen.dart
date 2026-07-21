@@ -480,7 +480,14 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
           : null,
     );
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => PlayerScreen(videoInfo: videoInfo)),
+      MaterialPageRoute(
+          builder: (_) => PlayerScreen(
+                videoInfo: videoInfo,
+                // v2.4.7: 直接传 detail (含 episodes), 跳过 PlayerScreen 的
+                //   _loadSources 全源搜索, 直接用当前源播. 用户反馈 "点击播放后
+                //   应该直接播放当前源不应该再跳转到播放详情页去搜索源".
+                initialDetail: detail,
+              )),
     );
   }
 
