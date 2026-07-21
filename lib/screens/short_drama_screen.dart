@@ -67,6 +67,22 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
 
   /// v2.5.5: 加载分类列表 — 走 ShortDramaDirectService (写死分类, 0 延迟).
   /// v2.5.5 起: 分类 tab 最前面插入「全部」tab, 点击走 3 源聚合 getRecommend.
+  ///
+  /// v2.5.15: 修复 `_loadCategories` 完成时强制 setState `_selectedTypeTab = '全部'`
+  ///   会覆盖用户已切到「其他」tab 的选择 — 时序:
+  ///     1. App 启动 → initState → `_loadCategories` 启动 (getCategories 异步, ~1-2s)
+  ///     2. 用户**在 await 期间** 切到「ai 漫剧」→ `_onTypeTabChanged` → setState
+  ///        `_selectedTypeTab = 'ai 漫剧'`, 调 `_fetchDramaList` (gen=1, typeId=52)
+  ///     3. `_loadCategories` 完成 → setState `_selectedTypeTab = '全部'` (**覆盖了
+  ///        用户选择**) → 调 `_fetchDramaList` (gen=2, typeId=null, 拉全部)
+  ///     4. gen=1 (ai 漫剧) 完成 → myGen(1) != 2 → 丢弃
+  ///     5. gen=2 (全部) 完成 → setState `_dramaList = 全部内容`
+  ///     6. UI 高亮「全部」(被 step 3 改回), 内容「全部」
+  ///   用户体验: 「我切到 ai 漫剧, 怎么变回全部 + 全部内容?」 — 表现为切 tab
+  ///   后内容变成「全部分类」 (用户原话: 「切换到其他的分类会变成全部分类的内容」).
+  ///   修法: `_loadCategories` 完成时只在 `_selectedTypeTab` 仍为空 (未初始化) 才
+  ///   设回「全部」, 用户已选的 tab 不动. 同时只在 `_dramaList` 为空时调
+  ///   `_fetchDramaList` (避免重复拉, 因为 _onTypeTabChanged 已拉过).
   Future<void> _loadCategories() async {
     final categories = await ShortDramaDirectService.getCategories();
     if (!mounted) return;
@@ -89,12 +105,18 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
       _typeToCategoryId
         ..clear()
         ..addAll(typeToId);
-      // 默认选中「全部」tab (第一位)
-      _selectedTypeTab = _kAllTabKey;
+      // v2.5.15: 只在未初始化时设回「全部」. 避免覆盖用户在 await
+      //   期间已切到「其他」tab 的选择.
+      if (_selectedTypeTab.isEmpty) {
+        _selectedTypeTab = _kAllTabKey;
+      }
     });
 
-    // 初次加载：根据当前筛选状态拉取
-    _fetchDramaList(isRefresh: true);
+    // v2.5.15: 只在 _dramaList 为空 (初次进入) 且没在 loading 时才自动拉.
+    //   避免覆盖 _onTypeTabChanged 已发起的请求.
+    if (_dramaList.isEmpty && !_isLoading) {
+      _fetchDramaList(isRefresh: true);
+    }
   }
 
   /// 处理滚动事件，上拉加载更多
