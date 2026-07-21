@@ -3,6 +3,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:luna_tv/services/diary_service.dart';
 
 class UserDataService {
+  // v2.5.13: 硬编码默认值 — 首次启动免填直接自动登录
+  static const String defaultServerUrl = 'https://tv.shirorikka.dpdns.org';
+  static const String defaultUsername = '111111';
+  static const String defaultPassword = '111111';
+
   static const String _serverUrlKey = 'server_url';
   static const String _usernameKey = 'username';
   static const String _passwordKey = 'password';
@@ -101,19 +106,19 @@ class UserDataService {
   // 获取服务器地址
   static Future<String?> getServerUrl() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_serverUrlKey);
+    return prefs.getString(_serverUrlKey) ?? defaultServerUrl;
   }
 
   // 获取用户名
   static Future<String?> getUsername() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_usernameKey);
+    return prefs.getString(_usernameKey) ?? defaultUsername;
   }
 
   // 获取密码
   static Future<String?> getPassword() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_passwordKey);
+    return prefs.getString(_passwordKey) ?? defaultPassword;
   }
 
   // 获取cookies
@@ -148,9 +153,9 @@ class UserDataService {
   static Future<Map<String, String?>> getAllUserData() async {
     final prefs = await SharedPreferences.getInstance();
     return {
-      'serverUrl': prefs.getString(_serverUrlKey),
-      'username': prefs.getString(_usernameKey),
-      'password': prefs.getString(_passwordKey),
+      'serverUrl': prefs.getString(_serverUrlKey) ?? defaultServerUrl,
+      'username': prefs.getString(_usernameKey) ?? defaultUsername,
+      'password': prefs.getString(_passwordKey) ?? defaultPassword,
       'cookies': prefs.getString(_cookiesKey),
     };
   }
