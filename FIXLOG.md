@@ -6,6 +6,105 @@
 
 ---
 
+## v2.5.15 (2026-07-21) — 短剧切 tab 串内容 (v2.5.14 没修好) + 打开 app 就开始加载短剧
+
+### 现象
+
+1. v2.5.14 装上后,**「全部」tab loading 中切到「其他」tab,内容变成「全部」内容**
+2. **App 一打开就开始加载短剧内容**,即使用户根本没切到短剧 tab
+
+### 排查
+
+- 复现 1: 选「全部」等 0.5-1s 切到「ai 漫剧」, 70% 触发「列表内容是全部」
+- 复现 2: App 启动后看 logcat, 9+ 个 `tyyszyapi.com` / `wujinapi.com` / `lziapi.com` HTTP 请求在飞, 跟用户操作无关
+
+### 根因 (两个独立 bug)
+
+**Bug A — `_loadCategories` 完成时强制覆盖 `_selectedTypeTab = '全部'`**
+
+```dart
+// v2.5.5 - v2.5.14 都有这行
+setState(() {
+  ...
+  _selectedTypeTab = _kAllTabKey;  // 强制设回「全部」
+});
+```
+
+时序:
+- T0: app 启动 → `_loadCategories` 启动 (await `getCategories`, ~1-2s)
+- T1: 用户在 await 期间切到「ai 漫剧」 → `_onTypeTabChanged` → setState `_selectedTypeTab = 'ai 漫剧'` → `_fetchDramaList` (gen=1, typeId=52)
+- T2: `_loadCategories` 完成 → setState `_selectedTypeTab = '全部'` **覆盖用户选择** → `_fetchDramaList` (gen=2, typeId=null, 拉「全部」)
+- T3: gen=1 (ai 漫剧) 完成 → myGen(1) != 2 → 丢弃
+- T4: gen=2 (全部) 完成 → setState `_dramaList = 全部内容`
+- 结果: UI 高亮「全部」+ 内容「全部」
+
+v2.5.14 的 generation 机制只丢了**已经发起**的旧请求, 但 `_loadCategories` 完成后又**重新发起**了 gen=2 (拉「全部」), generation 没能阻止这个 — 因为 gen=2 自身是新的、有效的请求, 只是它**不该被发起**。
+
+**Bug B — PageView 一次性 build 所有 children**
+
+`home_screen.dart:587`:
+```dart
+return PageView(
+  ...
+  children: [
+    _buildHomeContentWithPageView(),
+    const MovieScreen(),
+    const TvScreen(),
+    const AnimeScreen(),
+    const ShortDramaScreen(),  // initState 立即跑, 拉 ~9 个 HTTP
+    const ShowScreen(),
+  ],
+);
+```
+
+`PageView` 默认**一次性** build 所有 children, `ShortDramaScreen.initState` 调 `_loadCategories` + 完成后调 `_fetchDramaList`, 即使短剧 tab 远离 viewport (用户没切到) 也会发 HTTP。
+
+### 修复
+
+#### Bug A — `_loadCategories` 不再覆盖
+
+```dart
+// v2.5.15
+setState(() {
+  _typeTabs = typeTabs;
+  _typeToCategoryId
+    ..clear()
+    ..addAll(typeToId);
+  // 只在未初始化时设回「全部」, 用户已切到「其他」tab 时不动
+  if (_selectedTypeTab.isEmpty) {
+    _selectedTypeTab = _kAllTabKey;
+  }
+});
+
+// 只在 _dramaList 为空 + 没在 loading 时才自动拉, 避免覆盖 _onTypeTabChanged 已发起的请求
+if (_dramaList.isEmpty && !_isLoading) {
+  _fetchDramaList(isRefresh: true);
+}
+```
+
+#### Bug B — PageView.builder + KeepAlive
+
+`home_screen.dart`:
+- `PageView` → `PageView.builder` (`itemCount: 6` + `itemBuilder` switch on index)
+- 新加 `_KeepAliveTab` widget (`AutomaticKeepAliveClientMixin`, `wantKeepAlive = true`), 包每个 child
+
+`PageView.builder` 默认只 build viewport 内 (当前页 + 左右各 1 页) 的 child, 远离的 child 不会 initState, 数据不会提前拉。`AutomaticKeepAliveClientMixin` 让已 build 过的 child 在 viewport 之外仍 keep alive, 切回来时 State 还在。
+
+### 影响
+
+- App 启动时短剧 tab 不再发 HTTP, 直到用户切到底栏「短剧」tab (viewport 内 build) 才会触发
+- 切 tab 体验不变 (切回短剧 tab 数据 / 滚动位置都在, 不会 reload)
+- 切 tab race condition 现在两层防护: generation 失配丢弃 + `_loadCategories` 不再覆盖用户选择
+
+### 修改文件
+
+- `lib/screens/short_drama_screen.dart`: `_loadCategories` 加 `if (_selectedTypeTab.isEmpty)` 守卫 + `if (_dramaList.isEmpty && !_isLoading)` 拉取守卫
+- `lib/screens/home_screen.dart`: `_buildBottomNavPageView` 改 `PageView.builder` + 加 `_KeepAliveTab` widget
+- `pubspec.yaml`: 2.5.14+1 → 2.5.15+1
+- `.github/changelogs.json`: 头部插 v2.5.15 entry
+
+---
+
 ## v2.5.14 (2026-07-21) — 短剧切 tab 偶尔显示上一个 tab 的内容
 
 ### 现象
