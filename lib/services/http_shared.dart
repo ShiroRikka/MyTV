@@ -12,12 +12,19 @@
 //   - URL 构建: 检查 api 是否已带 `?` (web 也没检查, 但用户配置的某些源 api 带 ?from=xxx)
 //   - 响应解码: GBK / UTF-8 自动检测 (跟 web downstream.ts 1:1)
 //   - SSL 验证: main.dart 全局 HttpOverrides.global 信任所有证书 (v2.4.4 加的)
+//
+// v2.4.6: 加 isServerMode + getViaServer, 服务器模式走服务端代理
+//   /api/source-browser/* + /api/detail (跟 web 1:1). mobile 直连源 API 在
+//   中国大陆常被 DNS 污染 / GFW 拦截, 服务端代理能正常访问.
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:gbk_codec/gbk_codec.dart';
 import 'package:http/http.dart' as http;
+
+import 'user_data_service.dart';
 
 /// v2.4.5: 公共 HTTP 配置 + helper, 3 个 service 共用.
 class HttpShared {
@@ -133,5 +140,61 @@ class HttpShared {
       }
     }
     return episodes;
+  }
+
+  // -------- v2.4.6: 服务器模式服务端代理 helpers --------
+
+  /// 服务器模式 = 非本地模式 (有 serverUrl + cookies).
+  ///   服务器模式走服务端代理 /api/source-browser/* + /api/detail (跟 web 1:1),
+  ///   本地模式 fallback 直连源 API.
+  ///   mobile 直连源 API 在中国大陆常被 DNS 污染 / GFW 拦截 / CDN 不友好,
+  ///   服务端 (部署在海外) 能正常访问 → 服务器模式必须走服务端代理.
+  static Future<bool> isServerMode() async {
+    return !await UserDataService.getIsLocalMode();
+  }
+
+  /// 走服务端代理 GET 拿 JSON.
+  ///   endpoint 形如 `/api/source-browser/categories?source=xxx`
+  ///   或 `/api/detail?source=K&id=ID`.
+  ///   携带登录 cookie (authInfo), 服务端 route 用 cookie 鉴权.
+  ///   失败返 null (让上层 fallback 直连源 API).
+  static Future<Map<String, dynamic>?> getViaServer(String endpoint,
+      {Duration? timeout}) async {
+    try {
+      final baseUrl = await UserDataService.getServerUrl();
+      if (baseUrl == null || baseUrl.isEmpty) return null;
+      final cleanBase = baseUrl.endsWith('/')
+          ? baseUrl.substring(0, baseUrl.length - 1)
+          : baseUrl;
+      final cleanEndpoint =
+          endpoint.startsWith('/') ? endpoint : '/$endpoint';
+      final url = '$cleanBase$cleanEndpoint';
+
+      final cookies = await UserDataService.getCookies();
+      final headers = <String, String>{
+        'Accept': 'application/json',
+        if (cookies != null && cookies.isNotEmpty) 'Cookie': cookies,
+      };
+
+      final response = await http
+          .get(Uri.parse(url), headers: headers)
+          .timeout(timeout ?? timeoutCategories);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        if (kDebugMode) {
+          debugPrint(
+              '[HttpShared] getViaServer HTTP ${response.statusCode} url=$url');
+        }
+        return null;
+      }
+      final decoded = parseJson(decodeBody(response));
+      if (decoded is Map<String, dynamic>) return decoded;
+      return null;
+    } on TimeoutException {
+      if (kDebugMode) debugPrint('[HttpShared] getViaServer timeout: $endpoint');
+      return null;
+    } catch (e) {
+      if (kDebugMode) debugPrint('[HttpShared] getViaServer err: $e');
+      return null;
+    }
   }
 }

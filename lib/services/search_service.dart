@@ -154,9 +154,33 @@ class SearchService {
   }
 
   /// 获取视频详情（本地直接调用下游API）
+  ///
+  /// v2.4.6: 服务器模式走服务端代理 `/api/detail?source=K&id=ID`
+  ///   (跟 web detail/route.ts 1:1). 本地模式 / 服务端代理失败 → fallback 直连.
+  ///   mobile 直连源 API 在中国大陆常失败, 服务端代理能正常访问.
+  ///   web `/api/detail` 返回格式跟 SearchResult.fromJson 完全匹配
+  ///   (id/title/poster/episodes/episodes_titles/source/source_name/class/
+  ///    year/desc/type_name/douban_id), 直接解析.
   static Future<List<SearchResult>> getDetailSync(
       String source, String id) async {
     try {
+      // v2.4.6: 服务器模式优先走服务端代理
+      if (await HttpShared.isServerMode()) {
+        final data = await HttpShared.getViaServer(
+            '/api/detail?source=${Uri.encodeComponent(source)}&id=${Uri.encodeComponent(id)}',
+            timeout: HttpShared.timeoutDefault);
+        if (data != null) {
+          // web /api/detail 返回 SearchResult 对象 (不是 list),
+          // 直接用 SearchResult.fromJson 解析.
+          // 失败 (404 / 500) 时 data == null, fallback 直连.
+          final result = SearchResult.fromJson(data);
+          if (result.id.isNotEmpty || result.title.isNotEmpty) {
+            return [result];
+          }
+        }
+        // 服务端代理失败 → fallback 直连源 API
+      }
+
       // 获取搜索资源列表（使用缓存）
       final allResources = await _getSearchResourcesWithCache();
 

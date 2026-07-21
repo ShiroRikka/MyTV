@@ -6,6 +6,15 @@
 //     ac=videolist&wd=Q&pg=N   → search         在某源内搜
 //     ac=videolist&ids=ID      → getDetail      取详情
 //
+// v2.4.6: 服务器模式走服务端代理 (跟 web /api/source-browser/* 1:1).
+//   v2.4.5 之前 mobile 全部直连源 API, 但用户手机在中国大陆直连 iqiyizyapi.com
+//   等源常被 DNS 污染 / GFW 拦截 / CDN 不友好 → _getJson 抛异常返 null →
+//   UI 显示「加载分类失败」. web 端 /api/source-browser/* route 是服务端代理
+//   (服务端部署在海外, 能正常访问), 所以 web 正常 mobile 失败.
+//   修: 服务器模式下 mobile 也走服务端代理; 本地模式 (无服务端) fallback 直连.
+//   这就是用户反馈「v2.4.5 还是很多不行」的真凶 — 不是 UA/timeout/SSL,
+//   而是手机网络直连源 API 被拦.
+//
 // v2.4.5: 改用 HttpShared 公共 helper (UA / timeout / buildUrl / decodeBody).
 //   v2.4.4 把传输层配置 (Chrome 147 / 15s timeout / _buildUrl) 写死在本文件,
 //   导致 downstream_service 和 search_service 仍是 Chrome 122 + 8s + 直接拼 URL.
@@ -62,12 +71,39 @@ class SourceBrowserService {
 
   /// 取源分类 (源 API `?ac=list`)
   /// 返回 List<SourceCategory>, 失败返 null.
+  ///
+  /// v2.4.6: 服务器模式走服务端代理 `/api/source-browser/categories?source=K`
+  ///   (跟 web categories/route.ts 1:1). 本地模式 / 服务端代理失败 → fallback 直连.
   static Future<List<SourceCategory>?> getCategories(
       SearchResource resource) async {
     final key = 'categories:${resource.key}';
     final cached = _getCached<List<SourceCategory>>(key);
     if (cached != null) return cached;
 
+    // v2.4.6: 服务器模式优先走服务端代理
+    if (await HttpShared.isServerMode()) {
+      final data = await HttpShared.getViaServer(
+          '/api/source-browser/categories?source=${Uri.encodeComponent(resource.key)}',
+          timeout: HttpShared.timeoutCategories);
+      if (data != null) {
+        final catsRaw = data['categories'];
+        if (catsRaw is List) {
+          final list = catsRaw
+              .whereType<Map<String, dynamic>>()
+              .map(SourceCategory.fromJson)
+              .where((c) => c.typeId > 0 && c.typeName.isNotEmpty)
+              .toList();
+          _setCached(key, list);
+          return list;
+        }
+        // 服务端返了但 categories 不是 List → 空 (跟 web Array.isArray 1:1)
+        _setCached(key, const <SourceCategory>[]);
+        return const <SourceCategory>[];
+      }
+      // 服务端代理失败 → fallback 直连源 API
+    }
+
+    // 本地模式 / 服务端代理失败 fallback: 直连源 API
     final url = HttpShared.buildUrl(resource.api, 'ac=list');
     final json = await _getJson(url, timeout: HttpShared.timeoutCategories);
     if (json == null) return null;
@@ -90,17 +126,35 @@ class SourceBrowserService {
 
   /// 按分类取列表 (源 API `?ac=videolist&t=X&pg=N`)
   /// 失败返 null, page 从 1 开始.
+  ///
+  /// v2.4.6: 服务器模式走服务端代理 `/api/source-browser/list?source=K&type_id=T&page=N`
+  ///   (跟 web list/route.ts 1:1). 本地模式 / 服务端代理失败 → fallback 直连.
   static Future<SourceBrowserPage?> getList(
     SearchResource resource, {
     required int typeId,
     required int page,
   }) async {
+    final cacheKey = 'list:$typeId:$page';
+
+    // v2.4.6: 服务器模式优先走服务端代理
+    if (await HttpShared.isServerMode()) {
+      final endpoint =
+          '/api/source-browser/list?source=${Uri.encodeComponent(resource.key)}&type_id=$typeId&page=$page';
+      final result = await _fetchPageViaServer(endpoint, cacheKey,
+          timeout: HttpShared.timeoutList);
+      if (result != null) return result;
+      // 服务端代理失败 → fallback 直连源 API
+    }
+
     final url = HttpShared.buildUrl(resource.api, 'ac=videolist&t=$typeId&pg=$page');
-    return _fetchPage(url, 'list:$typeId:$page', timeout: HttpShared.timeoutList);
+    return _fetchPage(url, cacheKey, timeout: HttpShared.timeoutList);
   }
 
   /// 搜索 (源 API `?ac=videolist&wd=Q&pg=N`)
   /// 不传 typeId 全源搜; 传 typeId 在某分类下搜.
+  ///
+  /// v2.4.6: 服务器模式走服务端代理 `/api/source-browser/search?source=K&q=Q&page=N`
+  ///   (跟 web search/route.ts 1:1). 本地模式 / 服务端代理失败 → fallback 直连.
   static Future<SourceBrowserPage?> search(
     SearchResource resource, {
     required String query,
@@ -109,10 +163,21 @@ class SourceBrowserService {
   }) async {
     final encoded = Uri.encodeComponent(query);
     final tParam = typeId != null ? '&t=$typeId' : '';
+    final cacheKey = 'search:$query:$typeId:$page';
+
+    // v2.4.6: 服务器模式优先走服务端代理
+    if (await HttpShared.isServerMode()) {
+      final endpoint =
+          '/api/source-browser/search?source=${Uri.encodeComponent(resource.key)}&q=$encoded&page=$page';
+      final result = await _fetchPageViaServer(endpoint, cacheKey,
+          timeout: HttpShared.timeoutDefault);
+      if (result != null) return result;
+      // 服务端代理失败 → fallback 直连源 API
+    }
+
     final url = HttpShared.buildUrl(
         resource.api, 'ac=videolist&wd=$encoded$tParam&pg=$page');
-    return _fetchPage(url, 'search:$query:$typeId:$page',
-        timeout: HttpShared.timeoutDefault);
+    return _fetchPage(url, cacheKey, timeout: HttpShared.timeoutDefault);
   }
 
   /// 取详情 (源 API `?ac=videolist&ids=ID`)
@@ -137,6 +202,40 @@ class SourceBrowserService {
   }
 
   // -------- private helpers --------
+
+  /// v2.4.6: 走服务端代理取分页 (web list/search route 返 `{items, meta}` 格式).
+  ///   跟 _fetchPage 区别: _fetchPage 解析 AppleCMS 原始格式 `{list, page, pagecount...}`,
+  ///   _fetchPageViaServer 解析 web route 包装格式 `{items: [...], meta: {...}}`.
+  ///   web route 已经做了字段标准化 (vod_id→id / vod_name→title 等),
+  ///   SourceBrowserItem.fromJson 有 fallback 兼容两种字段名.
+  static Future<SourceBrowserPage?> _fetchPageViaServer(
+      String endpoint, String cacheKey,
+      {required Duration timeout}) async {
+    final key = 'page:$cacheKey';
+    final cached = _getCached<SourceBrowserPage>(key);
+    if (cached != null) return cached;
+
+    final data = await HttpShared.getViaServer(endpoint, timeout: timeout);
+    if (data == null) return null;
+
+    final itemsRaw = data['items'];
+    if (itemsRaw is! List) return null;
+    final items = itemsRaw
+        .whereType<Map<String, dynamic>>()
+        .map(SourceBrowserItem.fromJson)
+        .where((it) => it.id.isNotEmpty && it.title.isNotEmpty)
+        .toList();
+    final metaJson = data['meta'] as Map<String, dynamic>? ?? const {};
+    final meta = SourceBrowserPageMeta(
+      page: (metaJson['page'] as num?)?.toInt() ?? 1,
+      pageCount: (metaJson['pagecount'] as num?)?.toInt() ?? 1,
+      total: (metaJson['total'] as num?)?.toInt() ?? items.length,
+      limit: (metaJson['limit'] as num?)?.toInt() ?? 20,
+    );
+    final page = SourceBrowserPage(items: items, meta: meta);
+    _setCached(key, page);
+    return page;
+  }
 
   static Future<SourceBrowserPage?> _fetchPage(
       String url, String cacheKey,
