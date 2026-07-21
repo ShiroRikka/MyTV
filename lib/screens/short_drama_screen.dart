@@ -26,11 +26,13 @@ class ShortDramaScreen extends StatefulWidget {
 class _ShortDramaScreenState extends State<ShortDramaScreen> {
   final ScrollController _scrollController = ScrollController();
 
-  // 类型筛选（来自 API 的分类列表，去掉名字为"全部"和"短剧"的项）
+  // 类型筛选（来自 API 的分类列表，去掉名字为"短剧"的项）
   List<String> _typeTabs = const [];
   String _selectedTypeTab = '';
-  // 类型 -> 分类 typeId 的映射
+  // 类型 -> 分类 typeId 的映射. 「全部」tab 不进 map, 走 _fetchDramaList 兜底逻辑.
   final Map<String, int> _typeToCategoryId = {};
+  // 「全部」tab 的 key (selectedTypeTab 用这个字符串表示「全部」)
+  static const String _kAllTabKey = '全部';
 
   // 列表数据
   final List<ShortDrama> _dramaList = [];
@@ -54,18 +56,20 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
     super.dispose();
   }
 
-  /// v2.5.3: 加载分类列表 — 走 ShortDramaDirectService (写死分类, 0 延迟).
+  /// v2.5.5: 加载分类列表 — 走 ShortDramaDirectService (写死分类, 0 延迟).
+  /// v2.5.5 起: 分类 tab 最前面插入「全部」tab, 点击走 3 源聚合 getRecommend.
   Future<void> _loadCategories() async {
     final categories = await ShortDramaDirectService.getCategories();
     if (!mounted) return;
 
-    // 过滤掉"全部"、"短剧"这些不需要的项
-    final typeTabs = <String>[];
+    // 过滤掉 "短剧" (被「全部」tab 替代, 「全部」走 3 源聚合)
+    final typeTabs = <String>[_kAllTabKey]; // 「全部」永远排第一
     final typeToId = <String, int>{};
     for (final c in categories) {
       final name = c.typeName.trim();
       if (name.isEmpty) continue;
-      if (name == '全部' || name == '短剧') continue;
+      if (name == '短剧') continue; // 主类被「全部」替代
+      if (name == '全部') continue; // 不会出现在 getCategories 返回里, 兜底
       if (typeTabs.contains(name)) continue;
       typeTabs.add(name);
       typeToId[name] = c.typeId;
@@ -76,16 +80,12 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
       _typeToCategoryId
         ..clear()
         ..addAll(typeToId);
-      // 默认选中第一个类型
-      if (typeTabs.isNotEmpty) {
-        _selectedTypeTab = typeTabs.first;
-      }
+      // 默认选中「全部」tab (第一位)
+      _selectedTypeTab = _kAllTabKey;
     });
 
-    // 初次加载：根据当前筛选状态拉取（仅在有类型时才拉）
-    if (typeTabs.isNotEmpty) {
-      _fetchDramaList(isRefresh: true);
-    }
+    // 初次加载：根据当前筛选状态拉取
+    _fetchDramaList(isRefresh: true);
   }
 
   /// 处理滚动事件，上拉加载更多
@@ -109,10 +109,11 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
     }
   }
 
-  /// v2.5.3: 根据当前筛选拉取数据 — 走 ShortDramaDirectService.
-  /// - 选中"短剧"父分类 (typeId=54/41/46) → 3 源全拉 + 去重 (getRecommend)
-  /// - 选中具体子类 (typeId=64-69/73/63/52) → 该源按 type_id 拉
-  /// - 选中空 (即"全部"等) → getRecommend 全拉
+  /// v2.5.5: 根据当前筛选拉取数据 — 走 ShortDramaDirectService.
+  /// - 选中「全部」tab (selectedTypeTab == _kAllTabKey) → 3 源全聚合
+  ///   + 去重 (getRecommend, size=20 一次拿全, 不分页)
+  /// - 选中具体子类 (typeId=64-69/62/63/52) → 该源按 type_id 拉 + 分页
+  /// - 选中空 → 兜底走 getRecommend
   Future<void> _fetchDramaList({bool isRefresh = false}) async {
     if (!mounted) return;
 
@@ -126,10 +127,10 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
       _errorMessage = null;
     });
 
-    final selectedTypeId = _typeToCategoryId[_selectedTypeTab];
+    final selectedTypeId = _currentSelectedTypeId();
     ShortDramaListResponse result;
-    if (selectedTypeId == null || selectedTypeId <= 0) {
-      // 没具体分类: 3 源聚合推荐
+    if (selectedTypeId == null) {
+      // 「全部」tab: 3 源聚合推荐
       final recommend = await ShortDramaDirectService.getRecommend(size: 20);
       result = ShortDramaListResponse(list: recommend, hasMore: false);
     } else {
@@ -160,9 +161,9 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
 
     _page++;
 
-    final selectedTypeId = _typeToCategoryId[_selectedTypeTab];
+    final selectedTypeId = _currentSelectedTypeId();
     ShortDramaListResponse result;
-    if (selectedTypeId == null || selectedTypeId <= 0) {
+    if (selectedTypeId == null) {
       // 聚合模式不分页, 一次拿全
       final recommend = await ShortDramaDirectService.getRecommend(size: 20);
       result = ShortDramaListResponse(list: recommend, hasMore: false);
@@ -180,6 +181,14 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
       _hasMore = result.hasMore;
       _isLoadingMore = false;
     });
+  }
+
+  /// v2.5.5: 当前选中 tab 的 typeId. 返回 null 表示「全部」(走聚合).
+  int? _currentSelectedTypeId() {
+    if (_selectedTypeTab == _kAllTabKey) return null;
+    final id = _typeToCategoryId[_selectedTypeTab];
+    if (id == null || id <= 0) return null;
+    return id;
   }
 
   /// 下拉刷新
