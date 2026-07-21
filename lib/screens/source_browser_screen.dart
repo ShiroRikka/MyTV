@@ -513,8 +513,8 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
         child: CustomScrollView(
           controller: _scrollController,
           slivers: [
-            // Hero header
-            SliverToBoxAdapter(child: _buildHeroHeader(theme, isDark)),
+            // Hero header (v2.5.12 自身已含 status bar top padding)
+            SliverToBoxAdapter(child: _buildHeroHeader(context, theme, isDark)),
             // Source card
             SliverToBoxAdapter(child: _buildSourceCard(theme, isDark)),
             // Query & Sort card (源选了才显示)
@@ -539,14 +539,28 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
 
   // -------- Hero header (1:1 web 顶部渐变 icon + 标题) --------
 
-  Widget _buildHeroHeader(ThemeData theme, bool isDark) {
+  Widget _buildHeroHeader(BuildContext context, ThemeData theme, bool isDark) {
     // v2.4.9: 移除 BackdropFilter. 之前用 BackdropFilter + Stack(Positioned.fill)
     //   包裹 hero header, 在 CustomScrollView 滚动时会引起渲染异常 —
     //   滑动到顶时整个 hero header 区域 + 下方 items card 都被 BackdropFilter
     //   捕获 backdrop, 视觉上「模糊一片」. 改成纯 Container + 渐变背景,
     //   不再用 BackdropFilter, 跟 web 端 hero header 1:1 (web 也没用 backdrop-blur).
+    //
+    // v2.5.12: 把 status bar 顶部 inset 加到 hero header 的 top padding.
+    //   之前 hero header 的 `fromLTRB(16, 16, 16, 8)` 只有 16dp 顶部
+    //   padding, 但源浏览器页面用独立 Scaffold (不被 main_layout 的
+    //   SafeArea 包住), 状态栏下方紧贴 hero header, 视觉上被「切到」.
+    //   加上 viewPadding.top (含挖孔/灵动岛切口) 兜底 24dp + 16dp 缓冲.
+    //   用户反馈「整个界面往下挪一点或加一点空白」 — 用 16dp 缓冲让
+    //   hero header 明显避开状态栏, 视觉上「挪下去」, 下面 source
+    //   grid 等也跟着下移, 满足用户「整个界面」要求.
+    final mediaQuery = MediaQuery.of(context);
+    final mediaTop = mediaQuery.padding.top;
+    final viewTop = mediaQuery.viewPadding.top;
+    final baseTop = viewTop > mediaTop ? viewTop : mediaTop;
+    final safeTop = baseTop < 24.0 ? 24.0 : baseTop;
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      padding: EdgeInsets.fromLTRB(16, safeTop + 16, 16, 8),
       child: Container(
         padding: const EdgeInsets.all(20),
         decoration: BoxDecoration(
