@@ -1,0 +1,66 @@
+name: 'Upstream Sync'
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # 每隔6小时运行一次，在每小时的0分 (UTC)
+
+  workflow_dispatch:  # 在 Github 仓库中点击按钮！
+    inputs:
+      sync_test_mode: # 添加一个布尔值选项，该选项在手动运行工作流时显示，方便配置测试模式。
+        description: 'Fork Sync Test Mode'
+        type: boolean
+        default: false
+
+jobs:
+  sync_latest_from_upstream:
+    runs-on: ubuntu-latest
+    name: Sync latest commits from upstream repo
+
+    steps:
+    # 必需步骤
+    # 步骤 1：运行由 GitHub 提供的标准签出操作
+    - name: Checkout target repo
+      uses: actions/checkout@v7
+      with:
+        # 可选：设置要检出的分支，
+        # 同步操作无论如何都会检出您的“target_sync_branch”
+        ############################ 例如：main #######
+        ref: main
+
+    # 必需步骤
+    # 步骤 2：运行同步操作
+    - name: Sync upstream changes
+      id: sync
+      uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
+      with:
+        ########################## 例如：main #######
+        target_sync_branch: main
+        # 必需 'target_repo_token' 必须完全如此！
+        target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+        ########################## 例如：main #######
+        upstream_sync_branch: main
+        ########################## 例如：aormsby/Fork-Sync-With-Upstream-action #######
+        upstream_sync_repo: djsevenx1/LunaTV-Mobile
+
+        # 在手动调度期间设置 test_mode 为 true 以运行测试，而不是执行实际操作！！
+        test_mode: ${{ inputs.sync_test_mode }}
+      
+    # 步骤 3：根据同步输出变量“has_new_commits”显示示例消息
+    - name: New commits found
+      if: steps.sync.outputs.has_new_commits == 'true'
+      run: echo "✨ New commits were found to sync."
+    
+    - name: No new commits
+      if: steps.sync.outputs.has_new_commits == 'false'
+      run: echo "There were no new commits."
+      
+    - name: Show value of 'has_new_commits'
+      run: echo ${{ steps.sync.outputs.has_new_commits }}
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        repository: ${{ github.repository }}
+        retain_days: 0
+        keep_minimum_runs: 2
