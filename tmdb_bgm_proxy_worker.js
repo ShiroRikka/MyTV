@@ -129,7 +129,7 @@ async function handleBgmApi(request, url, env, corsHeaders) {
   const headers = new Headers(request.headers)
   // 强制 UA: api.bgm.tv 拒绝浏览器 UA (返 400)
   if (!headers.has('User-Agent')) {
-    headers.set('User-Agent', 'LunaTV-Mobile/1.0 (https://github.com/djsevenx1/LunaTV-Mobile)')
+    headers.set('User-Agent', 'LunaTV-Mobile/1.0 (https://github.com/ShiroRikka/MyTV)')
   }
   // 服务端持有 access_token 时, 注入 Bearer (缺省透传客户端)
   if (env.BGM_ACCESS_TOKEN && !headers.has('Authorization')) {

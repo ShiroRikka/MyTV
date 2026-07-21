@@ -124,7 +124,7 @@ fail-over 到 `google()` / `mavenCentral()`：
 - 触发: `git push origin v1.0.35` → Actions 跑 `Build APK` (#362) → 成功后自动
   `softprops/action-gh-release` 创建 release，再用 `github-script` 把
   changelog 写回 release body
-- Release: <https://github.com/djsevenx1/LunaTV-Mobile/releases/tag/v1.0.35>
+- Release: <https://github.com/ShiroRikka/MyTV/releases/tag/v1.0.35>
   - assets: `app-release.apk`
   - body: 729 字符（v1.0.35 changelog + 之前的实现细节）
 
@@ -211,7 +211,7 @@ childAspectRatio: cardWidth / (cardWidth * 1.5 + textAreaHeight),
 - 分支: `main` HEAD
 - 版本: 1.0.36+1
 - changelog: 已在 `build.yml` 的 `changelogs` map 顶部追加
-- Release: <https://github.com/djsevenx1/LunaTV-Mobile/releases/tag/v1.0.36>
+- Release: <https://github.com/ShiroRikka/MyTV/releases/tag/v1.0.36>
 
 ---
 
@@ -314,7 +314,7 @@ tag 构建触发 Release → `softprops/action-gh-release` 创建 release →
 - 分支: `main` HEAD
 - 版本: 1.0.37+1
 - changelog: 已在 `build.yml` 的 `changelogs` map 顶部追加
-- Release: <https://github.com/djsevenx1/LunaTV-Mobile/releases/tag/v1.0.37>
+- Release: <https://github.com/ShiroRikka/MyTV/releases/tag/v1.0.37>
 
 > ⚠️ v1.0.37 release **body 是空的**——见下方「v1.0.37 release body 失败」一节
 > 原因: build.yml changelog 模板字符串里有未转义的 markdown 反引号
@@ -576,7 +576,7 @@ String _upgradeDoubanPosterUrl(String url) {
 - 分支: `main` HEAD
 - 版本: 1.0.38+1
 - changelog: 已在 `build.yml` 的 `changelogs` map 顶部追加
-- Release: <https://github.com/djsevenx1/LunaTV-Mobile/releases/tag/v1.0.38>
+- Release: <https://github.com/ShiroRikka/MyTV/releases/tag/v1.0.38>
 
 
 

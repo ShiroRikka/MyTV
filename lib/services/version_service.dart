@@ -15,8 +15,8 @@ class VersionService {
   //   写法给 [getReleaseUrl] 当 fallback URL 用 (release 详情页
   //   URL 跟 API URL 是不同的, release 页国内也 GFW 但用户可以
   //   浏览器开 VPN 看).
-  static const String githubRepoUrl = 'https://github.com/djsevenx1/LunaTV-Mobile';
-  static const String githubApiUrl = 'https://api.github.com/repos/djsevenx1/LunaTV-Mobile/releases/latest';
+  static const String githubRepoUrl = 'https://github.com/ShiroRikka/MyTV';
+  static const String githubApiUrl = 'https://api.github.com/repos/ShiroRikka/MyTV/releases/latest';
   static const String _lastCheckKey = 'last_version_check';
   static const String _dismissedVersionKey = 'dismissed_version';
   

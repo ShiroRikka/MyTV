@@ -38,7 +38,7 @@
 2026-07-19T05:18:18.0827969Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
 2026-07-19T05:18:18.0836472Z ##[group]Run actions/checkout@v4
 2026-07-19T05:18:18.0837017Z with:
-2026-07-19T05:18:18.0837344Z   repository: djsevenx1/LunaTV-Mobile
+2026-07-19T05:18:18.0837344Z   repository: ShiroRikka/MyTV
 2026-07-19T05:18:18.0840919Z   token: ***
 2026-07-19T05:18:18.0841216Z   ssh-strict: true
 2026-07-19T05:18:18.0841490Z   ssh-user: git
@@ -52,7 +52,7 @@
 2026-07-19T05:18:18.0843775Z   submodules: false
 2026-07-19T05:18:18.0844051Z   set-safe-directory: true
 2026-07-19T05:18:18.0844628Z ##[endgroup]
-2026-07-19T05:18:18.2021502Z Syncing repository: djsevenx1/LunaTV-Mobile
+2026-07-19T05:18:18.2021502Z Syncing repository: ShiroRikka/MyTV
 2026-07-19T05:18:18.2023721Z ##[group]Getting Git version info
 2026-07-19T05:18:18.2024274Z Working directory is '/home/runner/work/LunaTV-Mobile/LunaTV-Mobile'
 2026-07-19T05:18:18.2025131Z [command]/usr/bin/git version
@@ -78,7 +78,7 @@
 2026-07-19T05:18:18.2392992Z hint:
 2026-07-19T05:18:18.2393488Z hint: Disable this message with "git config set advice.defaultBranchName false"
 2026-07-19T05:18:18.2399359Z Initialized empty Git repository in /home/runner/work/LunaTV-Mobile/LunaTV-Mobile/.git/
-2026-07-19T05:18:18.2412417Z [command]/usr/bin/git remote add origin https://github.com/djsevenx1/LunaTV-Mobile
+2026-07-19T05:18:18.2412417Z [command]/usr/bin/git remote add origin https://github.com/ShiroRikka/MyTV
 2026-07-19T05:18:18.2471355Z ##[endgroup]
 2026-07-19T05:18:18.2472260Z ##[group]Disabling automatic garbage collection
 2026-07-19T05:18:18.2476402Z [command]/usr/bin/git config --local gc.auto 0
@@ -94,7 +94,7 @@
 2026-07-19T05:18:18.3591237Z ##[endgroup]
 2026-07-19T05:18:18.3591956Z ##[group]Fetching the repository
 2026-07-19T05:18:18.3602106Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +1043b8e9c09f3c5d59e8f6e7e68bd4b13eb7981e:refs/tags/v2.3.14
-2026-07-19T05:18:19.1170765Z From https://github.com/djsevenx1/LunaTV-Mobile
+2026-07-19T05:18:19.1170765Z From https://github.com/ShiroRikka/MyTV
 2026-07-19T05:18:19.1172263Z  * [new ref]         1043b8e9c09f3c5d59e8f6e7e68bd4b13eb7981e -> v2.3.14
 2026-07-19T05:18:19.1210841Z ##[endgroup]
 2026-07-19T05:18:19.1211843Z ##[group]Determining the checkout info
