@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, 'trae/**', 'dev' ]
+    branches: [ main, 'trae/**' ]
     tags: [ 'v*.*.*' ]
   workflow_dispatch:
 
@@ -88,34 +88,18 @@ jobs:
       # 不能直接 gh release create (会报 "a release with the same tag name already exists"),
       # 改为 gh release upload --clobber 把 APK 挂到现有 release 上, 让 Set release body 步
       # 接着覆盖 body 即可. 这样手动创建空 release 也能被 CI 自动补 APK + changelog.
-      # 判断: tag 所在 commit 不在 main 上 → pre-release
-      - name: Check if pre-release
-        id: check-prerelease
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          if git merge-base --is-ancestor "${{ github.sha }}" refs/heads/main; then
-            echo "prerelease=false" >> $GITHUB_OUTPUT
-          else
-            echo "prerelease=true" >> $GITHUB_OUTPUT
-          fi
-
       - name: Create GitHub Release (APK)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IS_PRERELEASE: ${{ steps.check-prerelease.outputs.prerelease }}
         run: |
           TAG="${{ github.ref_name }}"
           APK="build/app/outputs/flutter-apk/app-release.apk"
           SHA="${{ github.sha }}"
-          PRERELEASE_FLAG=""
-          if [ "$IS_PRERELEASE" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
           for i in 1 2 3 4 5; do
             echo "::group::attempt $i"
             if gh release view "$TAG" >/dev/null 2>&1; then
-              # release 已存在, 只上传 APK (保留原 pre-release 状态, 不改)
+              # release 已存在, 只上传 APK
               if gh release upload "$TAG" "$APK" --clobber; then
                 echo "asset uploaded on attempt $i"
                 break
@@ -124,8 +108,7 @@ jobs:
               if gh release create "$TAG" "$APK" \
                 --title "$TAG" \
                 --generate-notes \
-                --target "$SHA" \
-                $PRERELEASE_FLAG; then
+                --target "$SHA"; then
                 echo "release created on attempt $i"
                 break
               fi
