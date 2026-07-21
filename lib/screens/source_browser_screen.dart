@@ -59,6 +59,7 @@ import 'package:luna_tv/services/downstream_service.dart';
 import 'package:luna_tv/services/douban_service.dart';
 import 'package:luna_tv/services/search_service.dart';
 import 'package:luna_tv/services/source_browser_service.dart';
+import 'package:luna_tv/utils/device_utils.dart';
 
 /// v2.3.32.1: 排序选项, 跟 web <select> 5 个 option 1:1
 enum _SortBy {
@@ -539,51 +540,35 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
   // -------- Hero header (1:1 web 顶部渐变 icon + 标题) --------
 
   Widget _buildHeroHeader(ThemeData theme, bool isDark) {
+    // v2.4.9: 移除 BackdropFilter. 之前用 BackdropFilter + Stack(Positioned.fill)
+    //   包裹 hero header, 在 CustomScrollView 滚动时会引起渲染异常 —
+    //   滑动到顶时整个 hero header 区域 + 下方 items card 都被 BackdropFilter
+    //   捕获 backdrop, 视觉上「模糊一片」. 改成纯 Container + 渐变背景,
+    //   不再用 BackdropFilter, 跟 web 端 hero header 1:1 (web 也没用 backdrop-blur).
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-      child: Stack(
-        children: [
-          // 模糊光晕
-          Positioned.fill(
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    Color(0xFF10B981).withOpacity(0.1),
-                    Colors.green.withOpacity(0.1),
-                    Colors.teal.withOpacity(0.1),
-                  ],
-                ),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: BackdropFilter(
-                filter: ColorFilter.mode(
-                  Colors.white.withOpacity(isDark ? 0.05 : 0.7),
-                  BlendMode.srcOver,
-                ),
-                child: Container(color: Colors.transparent),
-              ),
-            ),
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: isDark
+                ? [Colors.grey.shade800, Colors.grey.shade800.withOpacity(0.95)]
+                : [Colors.white, Color(0xFF10B981).withOpacity(0.05)],
           ),
-          // 实际内容
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: isDark ? Colors.grey.shade800.withOpacity(0.8) : Colors.white.withOpacity(0.8),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: isDark
-                    ? Colors.grey.shade700.withOpacity(0.5)
-                    : Colors.grey.shade300.withOpacity(0.5),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(isDark ? 0.3 : 0.08),
-                  blurRadius: 20,
-                  offset: const Offset(0, 4),
-                ),
-              ],
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isDark
+                ? Colors.grey.shade700.withOpacity(0.5)
+                : Colors.grey.shade300.withOpacity(0.5),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(isDark ? 0.3 : 0.08),
+              blurRadius: 20,
+              offset: const Offset(0, 4),
             ),
+          ],
+        ),
             child: Row(
               children: [
                 // 渐变 icon (emerald → green → teal)
@@ -666,7 +651,6 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
               ],
             ),
           ),
-        ],
       ),
     );
   }
@@ -1373,16 +1357,22 @@ class _SourceBrowserScreenState extends State<SourceBrowserScreen> {
         GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          padding: EdgeInsets.zero,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            // v2.4.8: childAspectRatio 0.52 → 0.55 (跟 web 移动端 1:1).
-            //   web 移动端海报 aspect-[2/3] + 标题 min-h-[2rem], 整体比例约 0.55.
-            //   之前 0.52 标题区被压扁, 2 行标题挤在一起.
-            childAspectRatio: 0.55,
-            // v2.4.8: 横纵间距统一 12 (跟 web gap-3 1:1, 之前 10/14 不一致)
+          // v2.4.9: padding 跟主页 douban_movies_grid.dart L197 1:1
+          //   之前 EdgeInsets.zero 让 grid 顶到 card 边缘
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            // v2.4.9: 列数走 DeviceUtils.getTabletColumnCount (手机 3 / 平板 6-8),
+            //   跟主页 douban_movies_grid.dart L200 1:1. 之前固定 3 列,
+            //   平板上一行只有 3 个 card 浪费空间. 用户反馈「能放三排吗不行按钮小点」
+            //   — 手机保持 3 排, 平板自动 6-8 排 (按钮/card 自然变小).
+            crossAxisCount: DeviceUtils.getTabletColumnCount(context),
+            // v2.4.9: childAspectRatio 0.55 → 0.5 跟主页 douban_movies_grid.dart L202 1:1
+            //   主页 itemWidth / (itemWidth * 2.0) = 0.5
+            childAspectRatio: 0.5,
+            // v2.4.9: mainAxisSpacing 12 → 6 (手机) / 0 (平板) 跟主页 L204 1:1
+            //   crossAxisSpacing 保持 12
             crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
+            mainAxisSpacing: DeviceUtils.isTablet(context) ? 0 : 6,
           ),
           itemCount: visible.length,
           itemBuilder: (_, idx) => _ItemCard(
@@ -1440,52 +1430,39 @@ class _ItemCardState extends State<_ItemCard> {
   Widget build(BuildContext context) {
     final item = widget.item;
     final isDark = widget.isDark;
+    // v2.4.9: 跟主页 VideoCard 风格 1:1 — 透明背景 + 无 border + 海报自带阴影
+    //   + 圆角 8 + 标题居中 + 主页字色 (#2c3e50 / white).
+    //   之前整卡 grey800/white 背景 + 2px border + 双层 boxShadow + 圆角 12,
+    //   跟主页 VideoCard (透明 + 无 border + 海报单层 boxShadow blur 4 +
+    //   圆角 8) 完全不同, 用户反馈「同步 app 内电视剧电影 UI」.
     return MouseRegion(
       onEnter: (_) => setState(() => _hovering = true),
       onExit: (_) => setState(() => _hovering = false),
       child: GestureDetector(
         onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
-          transform: Matrix4.translationValues(0, _hovering ? -4 : 0, 0),
-          decoration: BoxDecoration(
-            color: isDark ? Colors.grey.shade800 : Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: _hovering
-                  ? Colors.blue.withOpacity(0.6)
-                  : (isDark ? Colors.grey.shade700 : Colors.grey.shade300),
-              width: 2,
-            ),
-            boxShadow: _hovering
-                ? [
-                    BoxShadow(
-                      color: Colors.blue.withOpacity(0.2),
-                      blurRadius: 20,
-                      offset: const Offset(0, 8),
-                    ),
-                  ]
-                : [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(isDark ? 0.15 : 0.03),
-                      blurRadius: 6,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 海报 (aspect 2:3, 跟 web 同款)
-                AspectRatio(
-                  aspectRatio: 2 / 3,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      // 海报
-                      item.poster.isNotEmpty
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // 海报 (aspect 2:3, 跟主页 VideoCard 1:1)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: AspectRatio(
+                aspectRatio: 2 / 3,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    // 海报 + 单层 boxShadow (跟主页 video_card.dart L89-95 1:1)
+                    Container(
+                      decoration: BoxDecoration(
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.1),
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: item.poster.isNotEmpty
                           ? CachedNetworkImage(
                               imageUrl: item.poster,
                               fit: BoxFit.cover,
@@ -1502,108 +1479,102 @@ class _ItemCardState extends State<_ItemCard> {
                               color: isDark ? Colors.grey.shade700 : Colors.grey.shade100,
                               child: Icon(Icons.tv, size: 28, color: Colors.grey.shade400),
                             ),
-                      // hover 渐变遮罩 (跟 web group-hover:from-blue-500/10 同款)
-                      if (_hovering)
-                        Container(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.bottomCenter,
-                              end: Alignment.topCenter,
-                              colors: [
-                                Colors.blue.withOpacity(0.1),
-                                Colors.transparent,
-                              ],
-                            ),
-                          ),
-                        ),
-                      // 年份标签 (top-right, 跟 web 同款)
-                      if (item.year.isNotEmpty)
-                        Positioned(
-                          top: 6,
-                          right: 6,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.7),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text(
-                              item.year,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                        ),
-                      // 分类标签 (bottom-left, 跟 web bg-blue-500/90 同款)
-                      if (item.typeName.isNotEmpty)
-                        Positioned(
-                          bottom: 6,
-                          left: 6,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: Colors.blue.withOpacity(0.9),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text(
-                              item.typeName,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-                // 标题 + 备注
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(6, 8, 6, 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // v2.4.8: 标题加 min-height (跟 web min-h-[2rem] 1:1).
-                      //   之前 1 行标题的 card 比 2 行标题的 card 矮一截, grid
-                      //   参差不齐. 加 min-height 保证 1 行也占 2 行高度.
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(minHeight: 32),
-                        child: Text(
-                          item.title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                            color: _hovering
-                                ? Colors.blue
-                                : (isDark ? Colors.white : Colors.grey.shade900),
-                            height: 1.3,
+                    ),
+                    // hover 渐变遮罩 (跟主页 video_card.dart L155-164 1:1, 黑色渐变)
+                    if (_hovering)
+                      Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.bottomCenter,
+                            end: Alignment.topCenter,
+                            colors: [
+                              Colors.black.withOpacity(0.6),
+                              Colors.transparent,
+                            ],
+                            stops: const [0.5, 1.0],
                           ),
                         ),
                       ),
-                      if (item.remarks.isNotEmpty) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          item.remarks,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: isDark ? Colors.grey.shade400 : Colors.grey.shade500,
+                    // 年份标签 (top-right, 跟主页 video_card.dart L179-180 1:1)
+                    if (item.year.isNotEmpty)
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.7),
+                            borderRadius: BorderRadius.circular(5),
+                          ),
+                          child: Text(
+                            item.year,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
                         ),
-                      ],
-                    ],
-                  ),
+                      ),
+                    // 分类标签 (bottom-left, source_browser 独有, 保留)
+                    if (item.typeName.isNotEmpty)
+                      Positioned(
+                        bottom: 4,
+                        left: 4,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.withOpacity(0.9),
+                            borderRadius: BorderRadius.circular(5),
+                          ),
+                          child: Text(
+                            item.typeName,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
-              ],
+              ),
             ),
-          ),
+            const SizedBox(height: 2),
+            // 标题 (居中 + 主页字色, 跟 video_card.dart L532-540 1:1)
+            //   v2.4.8: 保留 minHeight 让 1 行标题也占 2 行高度, grid 等高.
+            ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 32),
+              child: Text(
+                item.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: _hovering
+                      ? Colors.blue
+                      : (isDark ? Colors.white : const Color(0xFF2C3E50)),
+                  height: 1.3,
+                ),
+              ),
+            ),
+            if (item.remarks.isNotEmpty) ...[
+              const SizedBox(height: 2),
+              Text(
+                item.remarks,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: isDark ? Colors.grey.shade400 : Colors.grey.shade500,
+                ),
+              ),
+            ],
+          ],
         ),
       ),
     );
