@@ -36,7 +36,7 @@ jobs:
         ########################## 例如：main #######
         target_sync_branch: main
         # 必需 'target_repo_token' 必须完全如此！
-        target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+        target_repo_token: ${{ secrets.GH_PAT }}
         ########################## 例如：main #######
         upstream_sync_branch: main
         ########################## 例如：aormsby/Fork-Sync-With-Upstream-action #######
