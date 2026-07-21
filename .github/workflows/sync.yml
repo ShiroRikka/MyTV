@@ -31,7 +31,7 @@ jobs:
     # 步骤 2：运行同步操作
     - name: Sync upstream changes
       id: sync
-      uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
+      uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
       with:
         ########################## 例如：main #######
         target_sync_branch: main
