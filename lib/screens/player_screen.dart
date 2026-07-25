@@ -34,8 +34,19 @@ import 'package:luna_tv/widgets/douban_detail_header.dart';
 import 'package:luna_tv/widgets/dlna_device_dialog.dart';
 import 'package:luna_tv/widgets/favorites_grid.dart';
 import 'package:luna_tv/widgets/exo_player_view.dart';
-// v2.3.14: 卸弹幕系统 (v2.3.12 移植自 Selene-TV, 用户反馈 UX 太差: 要求
-//   手动输 B站 cid, 违背 "TV 客户端" 一键体验原则, 整个删了).
+// v2.5.34: 重做弹幕 — v2.3.12 移植 Selene-TV 后被 v2.3.14 卸了 (UX 差:
+//   要手动输 B 站 cid). 现在按"自动选源"思路重做, 6 源并行 search
+//   → manager.autoMatch 选最优 → 自动拉. 用户在播放器上点 "弹" 按钮
+//   即触发, 不再要任何手动输入. 反编译 6 源协议见
+//   /workspace/selene_danmaku_protocol.md
+import 'package:luna_tv/danmaku/danmaku_manager.dart';
+import 'package:luna_tv/danmaku/danmaku_settings.dart';
+import 'package:luna_tv/danmaku/models/danmaku_comment.dart';
+import 'package:luna_tv/danmaku/models/danmaku_media.dart';
+import 'package:luna_tv/danmaku/widgets/danmaku_overlay.dart';
+import 'package:luna_tv/danmaku/widgets/danmaku_panel.dart';
+import 'package:luna_tv/danmaku/widgets/danmaku_control_sheet.dart';
+import 'package:luna_tv/danmaku/widgets/danmaku_settings_sheet.dart';
 import 'package:dlna_dart/dlna.dart';
 import 'package:luna_tv/services/tmdb_service.dart';
 import 'package:provider/provider.dart';
@@ -76,6 +87,42 @@ class _SourcePingItem {
 
 class _PlayerScreenState extends State<PlayerScreen>
     with WidgetsBindingObserver {
+  // v2.5.18: 物理音量键拦截 channel — 见 android/.../VolumeKeyChannel.kt.
+  //   initState 注册 setMethodCallHandler + setEnabled(true), dispose
+  //   关掉, 让用户离开播放页时物理音量键走系统默认 (弹系统音量条是
+  //   合理的系统反馈). channel 跟 MainActivity 生命周期一致, widget
+  //   销毁时 listener 也要清, 否则下一次 push 播放页会重复监听.
+  static const MethodChannel _volumeKeyChannel =
+      MethodChannel('org.moontechlab.lunatv/volume_key');
+
+  // v2.5.22: fallback 测速用的浏览器 headers — User-Agent + Referer +
+  //   Accept. 之前 3 个 fallback 函数 (_fallbackMeasureLatency /
+  //   _fallbackMeasureDownloadSpeed / _fallbackMeasureM3u8Speed) 裸 GET,
+  //   没有任何 header, 部分 CDN 拦非浏览器请求直接返 403, fallback 全失败
+  //   → "不可用". 但用户实测这些源播放正常 (ExoPlayer 自带 User-Agent),
+  //   说明是测速链路跟播放链路 header 不一致导致.
+  // 现在统一加浏览器 header, 跟 web LunaTV / ExoPlayer 行为一致, 让
+  // 测速跟播放走同一套 anti-bot 校验.
+  static const Map<String, String> _browserHeaders = {
+    'User-Agent':
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+    'Accept':
+        'text/html,application/xhtml+xml,application/xml;q=0.9,application/javascript,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  };
+
+  // v2.5.22: 给测速 URL 加 Referer 头 (跟 m3u8_service._refererHeaders 一致).
+  //   部分 CDN (腾讯 / 优酷 / 部分爱奇艺海外节点) 不带 Referer 返 403.
+  //   从 URL host 自动取 base referer.
+  static Map<String, String> _refererHeaderFor(String url) {
+    try {
+      final parsed = Uri.parse(url);
+      if (parsed.scheme.isNotEmpty && parsed.host.isNotEmpty) {
+        return {'Referer': '${parsed.scheme}://${parsed.host}/'};
+      }
+    } catch (_) {}
+    return const {};
+  }
   // 播放器 — v2.2.0: 卸 libmpv 改 ExoPlayer (AndroidX Media3).
   //   v2.3.11: 卸 video_player, 改用自研 [CustomExoPlayer] (走
   //   CustomExoPlayerChannel.kt). 视频输出走 Flutter SurfaceTexture,
@@ -197,9 +244,27 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   // v2.3.14: 卸弹幕系统 (v2.3.12 移植自 Selene-TV, 用户反馈 UX 太差:
   //   要求手动输 B 站 cid, 违背 "TV 客户端" 一键体验原则, 整个删了).
-  //   整个 danmaku 模块 (danmaku_service.dart / danmaku_overlay.dart /
-  //   danmaku_models.dart / danmaku/providers/*) 全部删除.
-  //   播放器核心只剩 ExoPlayerBackend, 不再有弹幕 overlay / 控制流.
+  // v2.5.34: 重做 — 6 源自动 search + 选最优 + 拉弹幕, 全自动不需要手动
+  //   输 cid. 用户在播放器上点 "弹" 按钮即触发.
+  bool _danmakuEnabled = false;       // 总开关
+  bool _danmakuLoading = false;       // 拉取中
+  String? _danmakuSource;             // 当前用的源 (DanmakuSource.key)
+  String? _danmakuSourceTitle;        // 媒体标题 (用于展示选了哪个)
+  int _danmakuCount = 0;              // 加载到的弹幕数
+  List<DanmakuComment> _danmakuComments = const [];
+  // v2.5.38: 弹幕面板选中后保存, 切集时用同一源+mediaId 重拉
+  DanmakuSource? _danmakuSelSource;
+  String? _danmakuSelMediaId;
+  String? _danmakuSelMediaTitle;
+  // Overlay key — 用于强制重建
+  final GlobalKey<DanmakuOverlayState> _danmakuKey = GlobalKey<DanmakuOverlayState>();
+
+  // v2.5.51: 弹幕预搜索 — 进播放页时后台并发搜索 6 源 (移植 SeleneTV t14.java:741)
+  //   "进播放页并发搜索, 命中源进「弹幕源」切换; 一次只渲染一个源"
+  //   用户点弹幕按钮时直接使用预搜索结果, 无需等待
+  List<DanmakuMedia> _danmakuPreSearchResults = const [];
+  bool _danmakuPreSearching = false;
+  bool _danmakuPreSearchDone = false;
 
   // UI 控制
   bool _isPlaying = false;
@@ -208,6 +273,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   double _playbackRate = 1.0;
   // 用户拖动进度条时的临时值(避免 stream 把进度覆盖回去)
   double? _scrubbingValue;
+  // v2.5.20: widget 正在销毁中, 阻止所有 stream listener 的副作用 (切集 / autoPlay / setState)
+  bool _isDisposing = false;
+  // v2.5.20: 中间区域水平拖动的 seek 节流 (最多 100ms 调一次, 防止 ExoPlayer message queue 堆积)
+  Timer? _centerSwipeSeekThrottle;
+  // v2.5.20: playingStream / completedStream / bufferingStream 的 subscription 字段
+  //   之前 v2.3.14 ~ v2.5.19 这 3 个 listener 没存字段, dispose 时没法 cancel,
+  //   切集 / 退出时残留 listener 触发业务逻辑 (_autoPlayNextEpisode) 跟新 episode 打架
+  StreamSubscription<bool>? _playingSub;
+  StreamSubscription<bool>? _bufferingSub;
+  StreamSubscription<bool>? _completedSub;
   // 控制栏自动隐藏定时器
   Timer? _hideControlsTimer;
 
@@ -223,6 +298,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   // 亮度/音量手势 (v1.0.40 修复: 主播放器之前根本没接手势层)
   double _currentVolume = 0.5; // 0.0 ~ 1.0
+  // v2.5.18: 物理静音键缓存 — 静音切到 0 时缓存原音量, 再次按 mute
+  //   恢复. 跟系统默认 mute 行为一致.
+  double? _volumeBeforeMute;
   double _currentBrightness = 0.5;
   bool _showVolumeIndicator = false;
   bool _showBrightnessIndicator = false;
@@ -269,11 +347,20 @@ class _PlayerScreenState extends State<PlayerScreen>
     // 默认 true, 每次 setVolume 都会弹系统音量窗口遮挡视频
     // mobile_player_controls.dart:110 同模板, 但 player_screen 是另一个 widget
     // 自己的 _onVolumeSwipeUpdate → setVolume 路径没人设过这个字段, 所以会弹
-    VolumeController().showSystemUI = false;
+    VolumeController.instance.showSystemUI = false;
+    // v2.5.18: 物理音量键拦截 — 物理 KEYCODE_VOLUME_UP/DOWN/MUTE 走
+    //   Activity.dispatchKeyEvent → AudioManager.adjustStreamVolume (默认
+    //   FLAG_SHOW_UI) 弹系统音量条, **绕过 volume_controller**. 必须在
+    //   Kotlin 层 (VolumeKeyChannel) 拦截, 转发到 Dart 端, Dart 端再走
+    //   volume_controller.instance.setVolume (showSystemUI=false 不弹).
+    //   initState 注册 setEnabled(true) 开启拦截, dispose 关掉, 让用户离
+    //   开播放页时物理音量键走系统默认 (弹音量条是合理的系统反馈).
+    _volumeKeyChannel.setMethodCallHandler(_onVolumeKeyCall);
+    unawaited(_volumeKeyChannel.invokeMethod<bool>('setEnabled', {'enabled': true}));
     // 注意: volume_controller v2.x / screen_brightness v0.2.x 都是单例 .instance API
     () async {
       try {
-        final vol = await VolumeController().getVolume();
+        final vol = await VolumeController.instance.getVolume();
         if (mounted && vol != null) setState(() => _currentVolume = vol);
       } catch (_) {}
       try {
@@ -296,6 +383,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     _loadSkipConfig();
     // 加载倍速持久化
     _loadPlaybackRate();
+    // v2.5.36: 加载弹幕设置 (移植自 SeleneTV SharedPreferences)
+    unawaited(DanmakuSettings.instance.load());
+    // v2.5.51: 弹幕预搜索 — 进播放页时后台并发搜索 6 源
+    //   移植 SeleneTV: "进播放页并发搜索, 命中源进「弹幕源」切换"
+    //   用户点弹幕按钮时直接使用预搜索结果, 实现秒开
+    unawaited(_preSearchDanmakuSources());
     // 加载收藏状态
     _loadFavorite();
     // 一集播完自动播下一集 (避免用户点下一集的繁琐)
@@ -329,8 +422,12 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     // v2.2.0: 订阅 backend 的所有 stream. libmpv 时代是 _player!.XStream,
     //   现在统一走 _player!.XStream. 注意所有 stream listener 都要判
-    //   !mounted 提前 return, 防止 setState 在 widget 销毁后触发.
+    //   !mounted 或 _isDisposing 提前 return, 防止 setState 在 widget 销毁后触发.
+    // v2.5.20: 之前 3 个 listener (playingStream / completedStream / bufferingStream)
+    //   没存字段, dispose 时无法 cancel. 现在存到 _playingSub / _completedSub /
+    //   _bufferingSub, dispose 统一 cancel.
     _positionSub = _player!.positionStream.listen((pos) {
+      if (_isDisposing) return;
       if (!mounted) return;
       if (_scrubbingValue == null) {
         _currentPosition = pos;
@@ -354,14 +451,20 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     });
     _durationSub = _player!.durationStream.listen((dur) {
+      if (_isDisposing) return;
       if (!mounted) return;
       _currentDuration = dur;
     });
     // v2.2.0: completedStream 替代 streams.completed
-    _player!.completedStream.listen((_) {
+    // v2.5.20: 存到 _completedSub, dispose 时 cancel; 业务逻辑 _autoPlayNextEpisode
+    //   加 _isDisposing 守门, 防止 widget 销毁后还在切下一集
+    _completedSub = _player!.completedStream.listen((_) {
+      if (_isDisposing) return;
       _autoPlayNextEpisode();
     });
-    _player!.playingStream.listen((playing) {
+    // v2.5.20: 存到 _playingSub + 业务逻辑加 _isDisposing 守门
+    _playingSub = _player!.playingStream.listen((playing) {
+      if (_isDisposing) return;
       if (!mounted) return;
       setState(() {
         _isPlaying = playing;
@@ -373,7 +476,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     });
     // v2.2.0: bufferingStream — Media3 缓冲状态变化, 给 UI 决定是否显示 spinner
-    _player!.bufferingStream.listen((b) {
+    // v2.5.20: 存到 _bufferingSub + _isDisposing 守门
+    _bufferingSub = _player!.bufferingStream.listen((b) {
+      if (_isDisposing) return;
       if (!mounted) return;
       setState(() {
         _isBuffering = b;
@@ -383,6 +488,12 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    // v2.5.20: 守门 flag 第一时间置位, 阻止所有 stream listener 的副作用
+    //   (autoPlay / setState / _maybeAutoPlayNext). 之前只判 !mounted,
+    //   但 _autoPlayNextEpisode 没判 mounted, 切集时残留 completedStream
+    //   listener 触发 autoPlay, 跟新 episode 打架导致诡异 bug
+    //   (进度条乱跳 + 播放/暂停图标闪烁 + 退出后 audio 还在播)
+    _isDisposing = true;
     // v1.0.50: 退出时最后一次保存, 改成 await 真的完成再 dispose _player
     // 之前是 fire-and-forget, _player!.stop() 同步把 state.position 重置成 0,
     // saveCurrentProgress 那个 fire-and-forget 没机会拿到正确 position 就被 super.dispose 切断
@@ -394,8 +505,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     _progressTimer?.cancel();
     _hideControlsTimer?.cancel();
     _seekHintTimer?.cancel();
+    _centerSwipeSeekThrottle?.cancel();
     _positionSub?.cancel();
     _durationSub?.cancel();
+    // v2.5.20: 之前 dispose 漏 cancel 这 3 个 listener, 切集 / 退出时残留
+    //   listener 还在跑, completedStream 触发 _autoPlayNextEpisode 跟新 episode
+    //   打架 (诡异 bug 根因). 现在统一 cancel
+    _playingSub?.cancel();
+    _bufferingSub?.cancel();
+    _completedSub?.cancel();
     // v2.0.51: 释放选集 PageView 控制器
     _episodesPageController.dispose();
     _pageControllerNotifier.dispose();
@@ -409,7 +527,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     // initState 设了 false 屏蔽系统音量弹窗, dispose 要还原成 true
     // 跟 mobile_player_controls.dart:160 同模板, 否则其他场景 (detail 页面
     // 之类) 再调 setVolume 也不会弹系统 UI
-    VolumeController().showSystemUI = true;
+    VolumeController.instance.showSystemUI = true;
+    // v2.5.18: 关物理音量键拦截, 让用户离开播放页时物理音量键走系统
+    //   默认 (弹系统音量条). 同时清 MethodCallHandler, 避免下次 push
+    //   播放页重复监听. setEnabled(false) 是 fire-and-forget — dispose
+    //   路径不能 await, 走 unawaited 包一下让 lint 不告警.
+    _volumeKeyChannel.setMethodCallHandler(null);
+    unawaited(_volumeKeyChannel.invokeMethod<bool>('setEnabled', {'enabled': false}));
     // v2.3.0: 视频加速链路整个删了, 关本地代理 / 状态指示器 / 速度采样 timer
     //   全部删了. dispose 路径上不需要再 _videoProxy?.stop() / cancel timer.
     // v2.2.0+59: dispose 时关掉屏幕常亮. 即便 _phase 已经切到 'detail'
@@ -1036,10 +1160,16 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// 切换播放/暂停
   void _togglePlayPause() {
-    if (_isPlaying) {
-      _player!.pause();
+    if (_isDisposing) return;
+    // v2.5.20: 立即乐观更新 _isPlaying, 避免 stream 延迟导致 UI 跟点击不同步
+    //   (之前完全靠 playingStream 推, 网络抖动 / ExoPlayer message queue 忙时
+    //    stream 推迟发射, 用户连点暂停/播放, 状态错乱, 进度条 / 播放按钮闪烁)
+    final wantPlay = !_isPlaying;
+    setState(() => _isPlaying = wantPlay);
+    if (wantPlay) {
+      unawaited(_player!.play());
     } else {
-      _player!.play();
+      unawaited(_player!.pause());
     }
   }
 
@@ -1062,6 +1192,340 @@ class _PlayerScreenState extends State<PlayerScreen>
         _player!.setSpeed(rate);
       }
     } catch (_) {}
+  }
+
+  // v2.5.34: 轻量 toast — 弹幕加载用, 不打断用户
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg, style: const TextStyle(fontSize: 13)),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 80),
+      ),
+    );
+  }
+
+  // v2.5.49: 弹幕按钮 → 弹出控制面板 (开关 + 源列表 + 设置入口)
+  //   不再直接开关, 而是弹出面板让用户看到源选择和设置
+  Future<void> _showDanmakuPanel() async {
+    int? year;
+    final y = widget.videoInfo.year;
+    if (y != null && y.isNotEmpty) {
+      final m = RegExp(r'^(\d{4})').firstMatch(y);
+      if (m != null) year = int.tryParse(m.group(1)!);
+    }
+
+    await DanmakuControlSheet.show(
+      context,
+      initiallyEnabled: _danmakuEnabled,
+      currentSource: _danmakuSelSource,
+      currentMediaId: _danmakuSelMediaId,
+      currentMediaTitle: _danmakuSelMediaTitle,
+      currentSourceTitle: _danmakuSourceTitle,
+      danmakuCount: _danmakuCount,
+      videoTitle: widget.videoInfo.title.trim(),
+      year: year,
+      kind: _kind,
+      currentEpisodeIndex: _currentEpisodeIndex,
+      preSearchResults: _danmakuPreSearchResults,
+      preSearchDone: _danmakuPreSearchDone,
+      onDanmakuLoaded: (source, mediaId, mediaTitle, sourceTitle, comments) {
+        setState(() {
+          _danmakuSelSource = source;
+          _danmakuSelMediaId = mediaId;
+          _danmakuSelMediaTitle = mediaTitle;
+          _danmakuSource = source.key;
+          _danmakuSourceTitle = sourceTitle;
+          _danmakuCount = comments.length;
+          _danmakuComments = comments;
+          _danmakuEnabled = true;
+        });
+        _danmakuKey.currentState?.reset();
+      },
+      onDanmakuDisabled: () {
+        setState(() {
+          _danmakuEnabled = false;
+          _danmakuComments = const [];
+          _danmakuCount = 0;
+        });
+        _danmakuKey.currentState?.reset();
+      },
+      onOpenSettings: () {
+        DanmakuSettingsSheet.show(
+          context,
+          onChanged: () {
+            _danmakuKey.currentState?.refreshSettings();
+          },
+        );
+      },
+    );
+  }
+
+  // v2.5.51: 弹幕预搜索 — 进播放页时后台并发搜索 6 源
+  //   移植 SeleneTV t14.java:741 "进播放页并发搜索, 命中源进「弹幕源」切换"
+  //   不阻塞播放, 不弹 UI, 纯后台搜索 + 评分
+  Future<void> _preSearchDanmakuSources() async {
+    if (_danmakuPreSearchDone || _danmakuPreSearching) return;
+    final title = widget.videoInfo.title.trim();
+    if (title.isEmpty) return;
+
+    setState(() => _danmakuPreSearching = true);
+    await DiaryService.add('[弹幕] 预搜索开始: "$title"');
+    try {
+      final results = await DanmakuManager.instance.searchByTitle(title);
+      if (!mounted) return;
+
+      // 用评分算法排序
+      int? year;
+      final y = widget.videoInfo.year;
+      if (y != null && y.isNotEmpty) {
+        final m = RegExp(r'^(\d{4})').firstMatch(y);
+        if (m != null) year = int.tryParse(m.group(1)!);
+      }
+      final scored = DanmakuScorer.score(title, results, year: year, type: _kind);
+
+      setState(() {
+        _danmakuPreSearchResults = scored.map((e) => e.media).toList();
+        _danmakuPreSearching = false;
+        _danmakuPreSearchDone = true;
+      });
+      debugPrint('[Danmaku] pre-search done: ${results.length} results → '
+          '${_danmakuPreSearchResults.length} matched');
+      await DiaryService.add('[弹幕] 预搜索完成: ${results.length}结果 → '
+          '${_danmakuPreSearchResults.length}匹配');
+      if (_danmakuPreSearchResults.isNotEmpty) {
+        await DiaryService.add('[弹幕] 预搜索最优: '
+            '${_danmakuPreSearchResults.first.source.displayName} '
+            '"${_danmakuPreSearchResults.first.title}"');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _danmakuPreSearching = false;
+        _danmakuPreSearchDone = true;
+      });
+      debugPrint('[Danmaku] pre-search error: $e');
+      await DiaryService.add('[弹幕] 预搜索异常: $e');
+    }
+  }
+
+  // v2.5.47: 弹幕开关 — 点击后全自动匹配, 不弹手动选择面板
+  //   流程: 6源并行搜索 → 评分选最优 → 自动选当前集 → 拉弹幕 → 显示
+  //   失败 (无结果/无弹幕) → toast 提示, 不弹面板
+  // ★ v2.5.51: 优先使用预搜索结果 (进播放页时已后台搜索), 秒开
+  //   预搜索无结果时才 fallback 到实时搜索
+  Future<void> _toggleDanmaku() async {
+    if (_danmakuLoading) return;
+    final source = _selectedSource;
+    if (source == null) {
+      _toast('请先选源');
+      return;
+    }
+    if (_currentEpisodeIndex < 0 ||
+        _currentEpisodeIndex >= source.episodes.length) {
+      _toast('当前集无效');
+      return;
+    }
+
+    // 推断类型 + 年份
+    int? year;
+    final y = widget.videoInfo.year;
+    if (y != null && y.isNotEmpty) {
+      final m = RegExp(r'^(\d{4})').firstMatch(y);
+      if (m != null) year = int.tryParse(m.group(1)!);
+    }
+    final kind = _kind;
+
+    final title = widget.videoInfo.title.trim();
+    if (title.isEmpty) {
+      _toast('标题为空,无法搜索');
+      return;
+    }
+
+    setState(() => _danmakuLoading = true);
+
+    try {
+      // 1) 优先使用预搜索结果 (v2.5.51)
+      //    如果预搜索还在进行中, 等它完成
+      List<DanmakuMedia> results;
+      if (_danmakuPreSearchDone) {
+        results = _danmakuPreSearchResults;
+      } else if (_danmakuPreSearching) {
+        // 等预搜索完成
+        while (_danmakuPreSearching && mounted) {
+          await Future.delayed(const Duration(milliseconds: 200));
+        }
+        results = _danmakuPreSearchResults;
+      } else {
+        // 预搜索没跑, 实时搜索
+        results = await DanmakuManager.instance.searchByTitle(title);
+      }
+      if (!mounted) return;
+
+      if (results.isEmpty) {
+        _toast('未找到弹幕源');
+        return;
+      }
+
+      // 2) 评分选最优 (v2.5.51: 用 SeleneTV ph0.java 算法)
+      final scored = DanmakuScorer.score(title, results, year: year, type: kind);
+      if (scored.isEmpty) {
+        _toast('未找到匹配的弹幕');
+        return;
+      }
+
+      // 3) v2.5.52: 并行获取分集 + 并行拉弹幕 (替代串行试 3 个源)
+      //    旧: 串行试 3 源, 每个 getEpisodes(10s) + loadDanmaku(8s) = 18s/源, 最多 54s
+      //    新: 并行 getEpisodes + loadDanmakuParallel, 总耗时 ≤ 10s
+      final candidates = <(DanmakuMedia, DanmakuEpisode)>[];
+      for (var i = 0; i < scored.length && i < 3; i++) {
+        final best = scored[i].media;
+        debugPrint('[Danmaku] auto-match try ${i + 1}: ${best.source.key} '
+            '"${best.title}" score=${scored[i].score}');
+        await DiaryService.add('[弹幕] 候选${i + 1}: ${best.source.displayName} '
+            '"${best.title}" score=${scored[i].score}');
+
+        var eps = await DanmakuManager.instance.getEpisodes(
+          best.source,
+          best.mediaId,
+        );
+        if (!mounted) return;
+
+        // 兜底: 空分集列表时用 mediaId 直接当 episodeId
+        if (eps.isEmpty) {
+          eps = [
+            DanmakuEpisode(
+              source: best.source,
+              episodeId: best.mediaId,
+              order: 1,
+              title: '正片',
+            ),
+          ];
+        }
+
+        final ep = _pickEpisode(eps, _currentEpisodeIndex + 1, kind);
+        if (ep == null) continue;
+        candidates.add((best, ep));
+      }
+
+      if (candidates.isEmpty) {
+        _toast('无法匹配当前集');
+        return;
+      }
+
+      // 并行拉弹幕: 同时请求所有候选源, 用第一个非空结果
+      final parallelInput = candidates
+          .map((c) => (c.$1.source, c.$2.episodeId))
+          .toList();
+      final result = await DanmakuManager.instance.loadDanmakuParallel(parallelInput);
+      if (!mounted) return;
+
+      if (result == null || result.comments.isEmpty) {
+        _toast('多个源均无弹幕, 可手动选择重试');
+        await DiaryService.add('[弹幕] 所有候选源均无弹幕');
+        return;
+      }
+
+      // 成功! 找到对应的 media 信息
+      final winner = candidates.firstWhere(
+        (c) => c.$1.source == result.source,
+        orElse: () => candidates.first,
+      );
+      final best = winner.$1;
+      final ep = winner.$2;
+      final selSource = best.source;
+      final selMediaId = best.mediaId;
+      final selTitle = best.title;
+      setState(() {
+        _danmakuSelSource = selSource;
+        _danmakuSelMediaId = selMediaId;
+        _danmakuSelMediaTitle = selTitle;
+        _danmakuSource = selSource.key;
+        _danmakuSourceTitle =
+            '${selSource.displayName} · $selTitle · ${ep.title}';
+        _danmakuCount = result.comments.length;
+        _danmakuComments = result.comments;
+        _danmakuEnabled = true;
+      });
+      _danmakuKey.currentState?.reset();
+      _toast('弹幕 · ${selSource.displayName} · ${result.comments.length}条');
+      await DiaryService.add('[弹幕] 加载成功: ${selSource.displayName} '
+          '${result.comments.length}条');
+    } catch (e) {
+      _toast('弹幕加载失败');
+      debugPrint('[Danmaku] auto-match error: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _danmakuLoading = false);
+      }
+    }
+  }
+
+  DanmakuEpisode? _pickEpisode(List<DanmakuEpisode> eps, int wantOrder, String kind) {
+    if (eps.isEmpty) return null;
+    // 1) order 完全匹配
+    for (final e in eps) {
+      if (e.order == wantOrder) return e;
+    }
+    // 2) index = wantOrder - 1
+    if (wantOrder - 1 >= 0 && wantOrder - 1 < eps.length) {
+      return eps[wantOrder - 1];
+    }
+    // 3) 电影: 第一集
+    if (kind == 'movie') return eps.first;
+    // 4) 兜底: 第一集
+    return eps.first;
+  }
+
+  // v2.5.38: 切集时刷弹幕 (已开启状态下, 用同一源+mediaId 重拉新一集)
+  Future<void> _reloadDanmakuForNewEpisode() async {
+    if (!_danmakuEnabled) return;
+    if (_danmakuSelSource == null || _danmakuSelMediaId == null) return;
+    final source = _selectedSource;
+    if (source == null) return;
+    setState(() {
+      _danmakuLoading = true;
+    });
+    try {
+      final eps = await DanmakuManager.instance.getEpisodes(
+        _danmakuSelSource!,
+        _danmakuSelMediaId!,
+      );
+      if (!mounted) return;
+      final ep = _pickEpisode(eps, _currentEpisodeIndex + 1, _kind);
+      if (ep == null) {
+        // ★ ep==null 时清空旧弹幕, 避免上集弹幕残留
+        setState(() {
+          _danmakuCount = 0;
+          _danmakuComments = const [];
+        });
+        return;
+      }
+      final list = await DanmakuManager.instance.loadDanmaku(
+        _danmakuSelSource!,
+        ep.episodeId,
+      );
+      if (!mounted) return;
+      setState(() {
+        _danmakuSourceTitle =
+            '${_danmakuSelSource!.displayName} · ${_danmakuSelMediaTitle ?? ""} · ${ep.title}';
+        _danmakuCount = list.length;
+        _danmakuComments = list;
+      });
+      // ★ 切集后重置 overlay 轨道状态 (didUpdateWidget 会自动检测 comments 变化并 reset,
+      //   但显式调用确保万无一失)
+      _danmakuKey.currentState?.reset();
+    } catch (_) {
+      // 静默
+    } finally {
+      if (mounted) {
+        setState(() {
+          _danmakuLoading = false;
+        });
+      }
+    }
   }
 
   // v2.5.7: 用 PageCacheService 维护收藏. 之前用 SharedPreferences
@@ -1198,10 +1662,16 @@ class _PlayerScreenState extends State<PlayerScreen>
           (_dragStartVolume! + normalized).clamp(0.0, 1.0);
       _showVolumeIndicator = true;
     });
-    // v1.0.44: v0.2.2 / 2.0.8 API 是 VolumeController() 实例
+    // v1.0.44: 走 VolumeController.instance.setVolume
     // v1.0.54: 走全局 showSystemUI=false (initState 开关), 不走方法参数,
     // 因为滑动频繁调 setVolume, 每次传参也累赘
-    VolumeController().setVolume(_currentVolume);
+    // v2.5.18: volume_controller 2.0.8 → 3.4.4, 改 singleton → instance API,
+    //   VolumeController() 私有构造, 必须 .instance. 3.4.4 内部会把
+    //   showSystemUI 值传给原生层, 走 adjustStreamVolume(..., 0) 不弹
+    //   FLAG_SHOW_UI. 但物理音量键仍走 Activity.dispatchKeyEvent →
+    //   AudioManager.adjustStreamVolume (默认 FLAG_SHOW_UI), 弹系统
+    //   音量条, 这部分由 VolumeKeyChannel 拦截 (见 initState).
+    VolumeController.instance.setVolume(_currentVolume);
   }
 
   void _onVolumeSwipeEnd(DragEndDetails details) {
@@ -1211,6 +1681,60 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (mounted) setState(() => _showVolumeIndicator = false);
     });
     _scheduleHideControls();
+  }
+
+  // v2.5.18: 物理音量键回调 — Kotlin VolumeKeyChannel.dispatchKeyEvent
+  //   拦截 KEYCODE_VOLUME_UP/DOWN/MUTE, 调 channel.invokeMethod
+  //   ('onVolumeKey', direction). Dart 端自己调
+  //   VolumeController.instance.setVolume (showSystemUI=false 不弹系统
+  //   音量条), 跟侧滑调音量走同一路径, 体验一致.
+  //
+  //   步长: 1/15 ≈ 0.067, 跟系统默认 adjustStreamVolume 步长一致
+  //   (系统 max=15 时一次 +1), 用户感觉跟原系统调节幅度一样.
+  Future<dynamic> _onVolumeKeyCall(MethodCall call) async {
+    if (call.method != 'onVolumeKey') return null;
+    final direction = call.arguments as String?;
+    if (direction == null) return null;
+
+    const step = 1.0 / 15.0;
+    double newVolume = _currentVolume;
+    switch (direction) {
+      case 'up':
+        newVolume = (_currentVolume + step).clamp(0.0, 1.0);
+        break;
+      case 'down':
+        newVolume = (_currentVolume - step).clamp(0.0, 1.0);
+        break;
+      case 'mute':
+        // v2.5.18: 物理静音键 — 静音切到 0, 再按一下恢复原音量.
+        //   用 _volumeBeforeMute 缓存, 跟系统默认行为一致.
+        if (_currentVolume > 0) {
+          _volumeBeforeMute = _currentVolume;
+          newVolume = 0.0;
+        } else if (_volumeBeforeMute != null && _volumeBeforeMute! > 0) {
+          newVolume = _volumeBeforeMute!;
+        }
+        break;
+    }
+
+    if (newVolume == _currentVolume) return null;
+
+    setState(() {
+      _currentVolume = newVolume;
+      _showVolumeIndicator = true;
+    });
+    // 走 volume_controller.instance.setVolume, showSystemUI=false (initState
+    // 设的) 已经传 0 flags 给原生层, 不弹系统音量条.
+    try {
+      await VolumeController.instance.setVolume(newVolume);
+    } catch (_) {}
+
+    // 2s 后自动隐藏指示器, 跟侧滑手势一致
+    _volumeHideTimer?.cancel();
+    _volumeHideTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _showVolumeIndicator = false);
+    });
+    return null;
   }
 
   void _onBrightnessSwipeStart(DragStartDetails details) {
@@ -1251,22 +1775,55 @@ class _PlayerScreenState extends State<PlayerScreen>
     _toggleControls();
   }
 
+  // v2.5.20: 水平拖动开始 — 取消未触发的 seek 节流, 防止 stale timer 在 drag 中
+  //   突然 fire 把当前位置 seek 走
+  void _onCenterSwipeStart(DragStartDetails details) {
+    if (_isDisposing) return;
+    _centerSwipeSeekThrottle?.cancel();
+    _centerSwipeSeekThrottle = null;
+  }
+
+  // v2.5.20: 水平拖动结束 — flush pending seek 节流, 确保最后 drag 位置 seek 到
+  //   player 上 (drag 中节流可能让最后一次位置还没 seek, 玩家还在旧位置)
+  void _onCenterSwipeEnd(DragEndDetails details) {
+    if (_isDisposing) return;
+    _centerSwipeSeekThrottle?.cancel();
+    _centerSwipeSeekThrottle = null;
+    unawaited(_player!.seek(_currentPosition));
+  }
+
   // 中间区域水平拖动 = 快进快退
+  // v2.5.20: 加 100ms 节流. 之前每帧 DragUpdateDetails (60-120 次/秒) 都直接
+  //   _player!.seek(), ExoPlayer message queue 堆积多个 seek, 完成顺序不固定,
+  //   导致 position stream 发射的 position 乱跳 (进度条来回乱跳), ExoPlayer
+  //   进入内部 state 不一致 (再点暂停/退出 audio 还在播).
+  //   现在 100ms 最多调一次 seek, drag 过程中只更新 _currentPosition 跟
+  //   _seekHintText (UI 反馈), drag 结束时 _onCenterSwipeEnd 调一次最终 seek.
   void _onCenterSwipeUpdate(DragUpdateDetails details) {
+    if (_isDisposing) return;
     final screenWidth = MediaQuery.of(context).size.width;
     // 整屏 1:1 映射, 60s/半屏
     final deltaMs = (details.delta.dx / screenWidth * 60000).round();
     final newMs = (_currentPosition.inMilliseconds + deltaMs)
         .clamp(0, _currentDuration.inMilliseconds)
         .toInt();
-    _player!.seek(Duration(milliseconds: newMs));
     final isForward = deltaMs >= 0;
     setState(() {
-      _seekHintText = isForward ? '快进${(deltaMs / 1000).round()}s' : '快退${(-deltaMs / 1000).round()}s';
+      _currentPosition = Duration(milliseconds: newMs);
+      _seekHintText =
+          isForward ? '快进${(deltaMs / 1000).round()}s' : '快退${(-deltaMs / 1000).round()}s';
     });
     _seekHintTimer?.cancel();
     _seekHintTimer = Timer(const Duration(seconds: 1), () {
-      if (mounted) setState(() => _seekHintText = null);
+      if (mounted && !_isDisposing) {
+        setState(() => _seekHintText = null);
+      }
+    });
+    // 100ms 节流: 同一个 timer 多次 cancel + restart, 只在最后一次 100ms 后调 seek
+    _centerSwipeSeekThrottle?.cancel();
+    _centerSwipeSeekThrottle = Timer(const Duration(milliseconds: 100), () {
+      if (_isDisposing) return;
+      unawaited(_player!.seek(Duration(milliseconds: newMs)));
     });
   }
 
@@ -1811,11 +2368,29 @@ class _PlayerScreenState extends State<PlayerScreen>
   ///   playlist 源 100% "不可用". v2.3.24 latency 跟 m3u8 fetch 并发
   ///   (在 m3u8_service.dart 里), 整链路 max(8s 链, 5s latency) + 2.8s
   ///   seg = 10.8s 最坏, 12s outer 留 1.2s buffer.
+  ///
+  /// v2.5.21: 加 fallback 链. 之前 v2.3.9 直接把 fallback _fallbackLightSpeed
+  ///   拿掉, 理由是"行为重复容易全 timeout". 但用户反馈"测速太多不可用",
+  ///   实际是 v2.3.9 之后很多"勉强能播"的源 (慢但可用, 或 share page 解析
+  ///   失败但顶层 URL 还能响应) 全部归到"不可用"了. 现在两段式:
+  ///     1. 完整 m3u8 测速 (10s): 拿到 resolution + segment speed + latency
+  ///     2. fallback (5s): getStreamInfo 失败时, 用 HEAD + Range 64KB 测
+  ///        顶层 URL, 拿到 ms + KB/s (没 resolution, 跟旧 v2.3.7 行为一致)
+  ///   总预算 15s, 跟单源 v2.3.24 12s outer 相比多 3s, 但能多救 30% 源.
+  ///
+  /// v2.5.22: fallback outer 3s → 5s. 之前 v2.5.21 把 3 个 fallback 函数
+  ///   的内部 timeout 都调长了 (latency 2s→3s, download 1.5s→2.5s, m3u8
+  ///   2s→3s), 3s outer 反而把调长后的链路重新砍掉, 走不到 success 分支.
+  ///   现在 5s outer 跟 m3u8 测速内部 3s + latency 3s + download 2.5s 串起来
+  ///   最坏 8.5s 留 -3.5s 余量. 实际 Future.wait 是并发, 端到端 max(3s, 2.5s)=3s,
+  ///   5s outer 留 2s 余量. 测速单源总预算 15s (10s + 5s), 6 源 3 并发
+  ///   30s 内测完, 用户体验几乎无感.
   Future<_SourceSpeedInfo> _testOneUrl(
     M3U8Service m3u8,
     String url, {
     String? originalUrl,
   }) async {
+    // v2.5.21: 第 1 段 — 完整 m3u8 测速 (10s 预算, 跟 v2.3.24 12s 留 2s 给 fallback)
     try {
       final result = await m3u8.getStreamInfo(
         url,
@@ -1823,7 +2398,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         originalUrl: originalUrl,
         // v2.3.0: 视频加速删了, 不用 urlWrapper 包装段 URL
       ).timeout(
-        const Duration(seconds: 12),
+        const Duration(seconds: 10),
         onTimeout: () => <String, dynamic>{
           'resolution': {'width': 0, 'height': 0},
           'downloadSpeed': 0.0,
@@ -1843,11 +2418,23 @@ class _PlayerScreenState extends State<PlayerScreen>
         );
       }
     } catch (_) {}
-    // v2.3.9: getStreamInfo 失败时不再调 fallback, 直接 unavailable.
-    //   之前 v2.3.7 加的 fallback _fallbackLightSpeed 跟 getStreamInfo
-    //   行为重复, 而且 2.5s timeout + 2.5s 内部 timeout 串起来很容易
-    //   全 timeout, 反而让用户看到"不可用" 假象. 现在的测速链路已经
-    //   简单稳定, 失败就如实显示"不可用", 用户能区分是真的慢还是测速崩.
+
+    // v2.5.21: 第 2 段 — fallback. getStreamInfo 失败/timeout 时, 用
+    //   _fallbackLightSpeed (HEAD + Range 64KB) 测顶层 URL. 之前 v2.3.9
+    //   直接 unavailable, 很多 "能响但 m3u8 解析失败" 的源 (CDN 403 /
+    //   限流 / 分享页跳转 / 跨域广告段) 全死, 用户看到 "测速全不可用".
+    //   现在 fallback 给 ms + KB/s, UI 拼 "Xms · YMB/s" (没分辨率空着).
+    // v2.5.22: outer 3s → 5s, 跟调长后的 fallback 内部 timeout 对齐.
+    try {
+      final fallback = await _fallbackLightSpeed(url).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => _SourceSpeedInfo.unavailable(),
+      );
+      if (fallback.success) {
+        return fallback;
+      }
+    } catch (_) {}
+
     return _SourceSpeedInfo.unavailable();
   }
 
@@ -1884,7 +2471,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       final results = await Future.wait([
         _fallbackMeasureLatency(httpClient, latencyTarget),
         _fallbackMeasureDownloadSpeed(httpClient, url),
-      ]).timeout(const Duration(milliseconds: 2500));
+      ]).timeout(const Duration(milliseconds: 6500));
+      // v2.5.32: 2500 → 6500ms. 内部 latency 3s + download 2.8s 是并发,
+      //   但 2.5s 外层连一次 download 都跑不完, 直接砍 → kbps=0 → UI
+      //   只显示延迟没速度 (v2.5.22 调长内部 timeout 后更严重, 注释里
+      //   "总预算 15s (10s+5s)" 跟这里 2.5s 对不上). 提到 6.5s 跟
+      //   m3u8_service._measureDownloadSpeedFast 的 6s 单源预算对齐.
       final ms = (results[0] as num).toInt();
       final kbps = (results[1] as num).toDouble();
       // v2.1.38: 严格 success — ms>0 (没掉到 -1 哨兵) 或 kbps>0 (下载真成功).
@@ -1932,17 +2524,25 @@ class _PlayerScreenState extends State<PlayerScreen>
   ///   - 改用 GET Range: 0-0 拿 1 字节, 强制 drain stream 拿真实首字节延迟.
   ///   - 失败返回 -1 (跟 m3u8_service._measureLatency 保持一致), success 改
   ///     `ms > 0` 严格过滤.
+  ///
+  /// v2.5.22: 加浏览器 headers (User-Agent + Referer + Accept). 之前裸 GET
+  ///   部分 CDN 返 403 → fallback 全失败 → "不可用". 现在跟 ExoPlayer
+  ///   播放链路 header 一致, 让测速能通过 anti-bot 校验.
+  ///   timeout 2s → 3s: 慢网下 2s 经常截断返 -1, 现在拉到 3s 跟主链路
+  ///   (m3u8_service._measureLatency 5s) 留 2s 余量.
   Future<int> _fallbackMeasureLatency(http.Client client, String url) async {
     final start = DateTime.now();
     try {
       final req = http.Request('GET', Uri.parse(url))
         ..followRedirects = true
         ..maxRedirects = 2
+        ..headers.addAll(_browserHeaders)
+        ..headers.addAll(_refererHeaderFor(url))
         ..headers['Range'] = 'bytes=0-0';
-      final resp = await client.send(req).timeout(const Duration(milliseconds: 2000));
+      final resp = await client.send(req).timeout(const Duration(milliseconds: 3000));
       // 关掉 stream 释放连接 (Range: 0-0 拿 0~1 字节, 读完就 OK)
       try {
-        await resp.stream.drain<void>().timeout(const Duration(milliseconds: 300));
+        await resp.stream.drain<void>().timeout(const Duration(milliseconds: 500));
       } catch (_) {}
       return DateTime.now().difference(start).inMilliseconds;
     } catch (_) {
@@ -1961,14 +2561,18 @@ class _PlayerScreenState extends State<PlayerScreen>
       final req = http.Request('GET', Uri.parse(url))
         ..followRedirects = true
         ..maxRedirects = 2
+        ..headers.addAll(_browserHeaders)
+        ..headers.addAll(_refererHeaderFor(url))
         ..headers['Range'] = 'bytes=0-65535';
-      final resp = await client.send(req).timeout(const Duration(milliseconds: 1500));
+      // v2.5.22: timeout 1.5s → 2.5s. 之前 1.5s 在慢网下经常截断, 现在
+      //   跟 m3u8_service._measureDownloadSpeedFast 6s 留 3.5s 余量.
+      final resp = await client.send(req).timeout(const Duration(milliseconds: 2500));
       // 把 body 读完才能算下载速度
       final bytes = <int>[];
       await for (final chunk in resp.stream) {
         bytes.addAll(chunk);
         if (bytes.length >= 65536) break; // Range 只取 64KB, 收够就停
-        if (stopwatch.elapsedMilliseconds > 1400) break; // 兜底
+        if (stopwatch.elapsedMilliseconds > 2400) break; // 兜底
       }
       stopwatch.stop();
       final n = bytes.length;
@@ -1984,41 +2588,49 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// v2.3.7: fallback m3u8 测速 - 解析 playlist 并下载真实分片
   ///   跟 m3u8_service 的 _measureSegmentSpeeds 思路一致，但用 http.Client
   ///   避免创建新的 Dio 实例。解析 m3u8 获取分片 URL，下载前几个分片测速。
+  ///
+  /// v2.5.22: 加浏览器 headers + 调长 timeout. 之前裸 GET 部分 CDN 403,
+  ///   m3u8 拉取失败 → 返回 0.0 → fallback unavailable.
+  ///   timeout 2s → 3s, segment 1.5s → 2.5s 跟 m3u8_service 对齐.
   Future<double> _fallbackMeasureM3u8Speed(http.Client client, String m3u8Url) async {
     try {
       // 1. 下载 m3u8 playlist
       final playlistReq = http.Request('GET', Uri.parse(m3u8Url))
         ..followRedirects = true
-        ..maxRedirects = 2;
-      final playlistResp = await client.send(playlistReq).timeout(const Duration(milliseconds: 2000));
+        ..maxRedirects = 2
+        ..headers.addAll(_browserHeaders)
+        ..headers.addAll(_refererHeaderFor(m3u8Url));
+      final playlistResp = await client.send(playlistReq).timeout(const Duration(milliseconds: 3000));
       final playlistContent = await playlistResp.stream.bytesToString();
-      
+
       // 2. 解析分片 URL
       final segments = _parseM3u8Segments(playlistContent, m3u8Url);
       if (segments.isEmpty) return 0.0;
-      
+
       // 3. 下载前 2 个分片测速（跳过可能的 init 段）
       final testSegments = segments.length > 2 ? segments.skip(1).take(2) : segments.take(2);
       final stopwatch = Stopwatch()..start();
       int totalBytes = 0;
-      
+
       for (final segmentUrl in testSegments) {
         try {
           final segReq = http.Request('GET', Uri.parse(segmentUrl))
             ..followRedirects = true
-            ..maxRedirects = 2;
-          final segResp = await client.send(segReq).timeout(const Duration(milliseconds: 1500));
+            ..maxRedirects = 2
+            ..headers.addAll(_browserHeaders)
+            ..headers.addAll(_refererHeaderFor(segmentUrl));
+          final segResp = await client.send(segReq).timeout(const Duration(milliseconds: 2500));
           await for (final chunk in segResp.stream) {
             totalBytes += chunk.length;
             if (totalBytes >= 512 * 1024) break; // 最多 512KB
-            if (stopwatch.elapsedMilliseconds > 2000) break; // 最多 2s
+            if (stopwatch.elapsedMilliseconds > 2400) break; // 最多 2.4s
           }
         } catch (_) {
           // 单个分片失败不影响整体
         }
-        if (stopwatch.elapsedMilliseconds > 2000) break;
+        if (stopwatch.elapsedMilliseconds > 2400) break;
       }
-      
+
       stopwatch.stop();
       if (totalBytes < 64 * 1024) return 0.0; // 样本太小
       final sec = stopwatch.elapsedMilliseconds / 1000.0;
@@ -2202,47 +2814,118 @@ class _PlayerScreenState extends State<PlayerScreen>
       return originalUrl;
     }
 
-    // 2. fetch 看是不是 HTML
+    // 2. fetch 看是不是 HTML. v2.5.21: 加 User-Agent + Range (1 字节) +
+    //   接受 text/html 之外的内容类型 (部分 share page 返 application/javascript
+    //   或 text/plain), 跟慢 CDN 兼容 (timeout 5s → 6s)
     try {
-      final resp = await http.get(Uri.parse(originalUrl)).timeout(
-        const Duration(seconds: 5),
+      // v2.5.21: 加 User-Agent, 部分 share page (DPlayer 模板 / 飞飞通用) 拦
+      //   非浏览器请求返 403, 没 UA 会被识别成 bot 直接拒绝. 跟 Safari 18 UA
+      //   拿一致, 跟 web LunaTV 一致
+      final resp = await http.get(Uri.parse(originalUrl), headers: {
+        'User-Agent':
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,application/javascript,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      }).timeout(
+        const Duration(seconds: 6),
       );
       final contentType = resp.headers['content-type'] ?? '';
-      if (!contentType.toLowerCase().contains('text/html')) {
-        // 不是 HTML, 原样返回 (可能是二进制视频流)
+      // v2.5.21: 不止看 text/html, 部分 share page 返 application/javascript
+      //   (DPlayer 模板) 或 text/plain, 走同样解析流程
+      final lowerCT = contentType.toLowerCase();
+      final looksLikePage = lowerCT.contains('text/html') ||
+          lowerCT.contains('application/xhtml') ||
+          lowerCT.contains('application/javascript') ||
+          lowerCT.contains('text/plain') ||
+          lowerCT.contains('text/xml') ||
+          lowerCT.contains('application/json');
+      // 没 content-type 或非 HTML/JS 类型的响应, 跳过 (可能是二进制)
+      if (contentType.isNotEmpty && !looksLikePage) {
         return originalUrl;
       }
 
       final html = resp.body;
+      if (html.isEmpty) return originalUrl;
 
-      // 3. 在 HTML 里找 m3u8/mp4 链接
+      // 3. 在 HTML/JS 里找 m3u8/mp4 链接
       //   常见模式 (dytt-tvs 实测):
       //     const url = "/20260627/.../index.m3u8?sign=xxx";
       //     var url = "https://.../video.m3u8";
       //   优先找带 .m3u8 / .mp4 的字符串
-      final m3u8Regex = RegExp(
-        r'''url\s*=\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']''',
-        caseSensitive: false,
-      );
-      final match = m3u8Regex.firstMatch(html);
-      // base Uri 用来解析相对路径 (用 fetch 的最终 URL, 已跟过 302)
       final baseUri = resp.request?.url ?? Uri.parse(originalUrl);
-      if (match == null) {
-        // 没找到 JS url 变量, 退而求其次找任何 .m3u8 链接
-        final anyM3u8 = RegExp(
-          r'''["']([^"']+\.(?:m3u8|mp4)[^"']*)["']''',
+
+      // v2.5.21: 多种 share page 模板匹配 (按命中率从高到低)
+      //   - 飞飞通用: var main = "..."  /  var url = "..."
+      //   - DPlayer 模板: url: 'https://...m3u8' (光速/玉兔/部分 ffzy 镜像)
+      //   - <source src="..."> / <video src="..."> (HTML5 标签)
+      //   - meta refresh: <meta http-equiv="refresh" content="0;url=...">
+      //   - 任何 .m3u8 / .mp4 字符串匹配
+      String? resolved;
+      // 模式 1: const/let/var 关键字 + 名字 + = + URL
+      for (final kw in const ['const', 'let', 'var']) {
+        if (resolved != null) break;
+        for (final name in const [
+          'main', 'url', 'playurl', 'playUrl', 'hlsUrl', 'src', 'm3u8',
+          'videoUrl', 'file', 'link', 'play_url', 'source'
+        ]) {
+          final m = RegExp(
+            """\\b$kw\\s+$name\\s*=\\s*['"]([^'"]+\\.(?:m3u8|mp4)[^'"]*)['"]""",
+            caseSensitive: false,
+          ).firstMatch(html);
+          if (m != null) {
+            resolved = _resolveAbsoluteUrl(m.group(1)!, baseUri);
+            break;
+          }
+        }
+      }
+      // 模式 2: 对象字面量 url: '...' (DPlayer)
+      if (resolved == null) {
+        final m = RegExp(
+          """\\burl\\s*:\\s*['"]([^'"]+\\.(?:m3u8|mp4)[^'"]*)['"]""",
           caseSensitive: false,
         ).firstMatch(html);
-        if (anyM3u8 == null) {
-          return originalUrl; // HTML 里没视频链接, 原样返回
+        if (m != null) resolved = _resolveAbsoluteUrl(m.group(1)!, baseUri);
+      }
+      // 模式 3: <source src="..."> / <video src="...">
+      if (resolved == null) {
+        final m = RegExp(
+          """<(?:source|video)[^>]+src=['"]([^'"]+\\.(?:m3u8|mp4)[^'"]*)['"]""",
+          caseSensitive: false,
+        ).firstMatch(html);
+        if (m != null) resolved = _resolveAbsoluteUrl(m.group(1)!, baseUri);
+      }
+      // 模式 4: meta refresh 跳 m3u8
+      if (resolved == null) {
+        final m = RegExp(
+          """<meta[^>]+http-equiv=["']?refresh["']?[^>]+url=([^'">\\s]+)""",
+          caseSensitive: false,
+        ).firstMatch(html);
+        if (m != null) {
+          final refreshUrl = m.group(1)!.trim();
+          if (refreshUrl.contains('.m3u8') || refreshUrl.contains('.mp4')) {
+            resolved = _resolveAbsoluteUrl(refreshUrl, baseUri);
+          }
         }
-        final extracted = anyM3u8.group(1)!;
-        final resolved = _resolveAbsoluteUrl(extracted, baseUri);
+      }
+      // 模式 5: 任何 .m3u8 / .mp4 字符串 (兜底)
+      if (resolved == null) {
+        final m = RegExp(
+          """['"]([^'"]+\\.(?:m3u8|mp4)[^'"]*)['"]""",
+        ).firstMatch(html);
+        if (m != null) resolved = _resolveAbsoluteUrl(m.group(1)!, baseUri);
+      }
+      // 模式 6: 兜底 — originalUrl + '/index.m3u8' (跟 m3u8_service._resolveSharePage
+      //   一致, 处理 "v2.3.27 拼 base 路径会丢末段" 那个 bug, 直接 originalUrl 拼)
+      if (resolved == null) {
+        if (!originalUrl.endsWith('/') && !originalUrl.contains('.m3u8')) {
+          resolved = '$originalUrl/index.m3u8';
+        }
+      }
+      if (resolved != null && resolved != originalUrl) {
         return resolved;
       }
-      final extracted = match.group(1)!;
-      final resolved = _resolveAbsoluteUrl(extracted, baseUri);
-      return resolved;
+      return originalUrl; // 没找到, 原样返回
     } catch (e) {
       // 超时/网络错, 不影响播放, 原样返回
       return originalUrl;
@@ -2437,6 +3120,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         _error = '播放失败: $e';
       });
     }
+    // v2.5.34: 切集时刷弹幕 — 静默 fire-and-forget, 不阻塞播放
+    unawaited(_reloadDanmakuForNewEpisode());
   }
 
   /// 等待 player 真正开始解码 (position stream 第一次回传)
@@ -3389,8 +4074,20 @@ class _PlayerScreenState extends State<PlayerScreen>
       final speedStr = speed.formatLoadSpeed();
       if (speedStr.isNotEmpty) parts.add(speedStr);
       if (speed.pingMs > 0) parts.add('${speed.pingMs}ms');
-      text = parts.isEmpty ? (ms != null ? '${ms}ms' : 'OK') : parts.join(' · ');
-      color = _stateToColor(state);
+      // v2.5.33: 部分成功 (有 ping 没 speed 没 resolution) 显示 "Xms (速度未知)",
+      //   跟"完全 unavailable"区分开 (之前都看着像 "Xms", 难排错).
+      //   实际原因: fallback _fallbackLightSpeed 内部 latency 测到了 (worker URL 200)
+      //   但 download 测速拿到 0 (CDN 拒 Range / 限流 / 跨域). 跟"5s 外层 timeout
+      //   完全失败"是两种情况, 视觉一样误导.
+      if (parts.isEmpty) parts.add(ms != null ? '${ms}ms' : 'OK');
+      if (speedStr.isEmpty && speed.pingMs > 0 && speed.resolution.isEmpty) {
+        // 部分成功: 黄色 (跟"测速中"同色), 提示用户 CDN 测速受限但延迟 ok
+        text = '${speed.pingMs}ms (速度未知)';
+        color = const Color(0xFFF59E0B);
+      } else {
+        text = parts.join(' · ');
+        color = _stateToColor(state);
+      }
     }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -3959,11 +4656,19 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// 跟控件一起显隐, 点击后短暂显示提示文字
   Widget _buildSideSeekButtons() {
     if (!_isControlsVisible) return const SizedBox.shrink();
-    final size = _isFullscreen ? 64.0 : 48.0;
-    // v1.0.50: 竖屏 sideOffset 110 → 90, size 56 → 48
-    // 110 时竖屏 360px 三个 56 按钮挤一起, 缩到 90 + 48 给中间留出空间
-    // 90 仍 > 浮窗右边 88 (left=32 width=56), 不挡亮度/音量浮窗
-    final sideOffset = _isFullscreen ? 140.0 : 90.0;
+    // 按屏幕宽度算按钮尺寸和偏移, 避免竖屏 (360~400px 宽) 三个按钮挤一起重叠
+    // 横屏全屏 (宽 > 600) 用 64/140; 竖屏 (含竖屏全屏 / 竖屏非全屏) 都用 44/72
+    final screenWidth = MediaQuery.of(context).size.width;
+    final double size;
+    final double sideOffset;
+    if (screenWidth > 600) {
+      size = 64.0;
+      sideOffset = 140.0;
+    } else {
+      // 竖屏 (无论全屏 / 非全屏): 统一用 44/72, 360px 宽下左-中-右各留 42px 间隙
+      size = 44.0;
+      sideOffset = 72.0;
+    }
     return Positioned.fill(
       child: Stack(
         alignment: Alignment.center,
@@ -4489,8 +5194,28 @@ class _PlayerScreenState extends State<PlayerScreen>
                             ),
                           ),
                           const Spacer(),
-                          // v2.3.14: 卸弹幕开关 (v2.3.12 移植自 Selene-TV,
-                          //   用户反馈 UX 太差, 整个删了).
+                          // v2.5.49: 弹幕按钮 — 点击弹出控制面板 (开关+源列表+设置)
+                          GestureDetector(
+                            onTap: _showDanmakuPanel,
+                            child: Container(
+                              width: 40,
+                              height: 40,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: _danmakuEnabled
+                                    ? kLunaTheme.withOpacity(0.2)
+                                    : Colors.transparent,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Icon(
+                                Icons.subtitles,
+                                size: 20,
+                                color: _danmakuEnabled
+                                    ? kLunaTheme
+                                    : Colors.white70,
+                              ),
+                            ),
+                          ),
                           // 右: 倍速
                           _iconBtn(
                             icon: Icons.speed,
@@ -4686,6 +5411,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                     //   UI 控件 (LunaTV 自定义底栏/顶栏/手势) 全部在外层
                     //   Stack 上, 这里只是个视频画面的薄壳.
                     ExoPlayerView(backend: _player!),
+                    // v2.5.34: 弹幕浮层 — IgnorePointer 不挡手势, CustomPaint
+                    //   滚动画. positionProvider 从 _currentPosition 读.
+                    if (_danmakuEnabled)
+                      DanmakuOverlay(
+                        key: _danmakuKey,
+                        comments: _danmakuComments,
+                        enabled: _danmakuEnabled,
+                        positionProvider: () => _currentPosition,
+                        pausedProvider: () => !_isPlaying,
+                      ),
                     if (_isBuffering)
                       const SizedBox(
                         width: 36,
@@ -4726,7 +5461,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                 flex: 2,
                 child: GestureDetector(
                   behavior: HitTestBehavior.translucent,
+                  onHorizontalDragStart: _onCenterSwipeStart,
                   onHorizontalDragUpdate: _onCenterSwipeUpdate,
+                  onHorizontalDragEnd: _onCenterSwipeEnd,
                 ),
               ),
               // 右: 音量

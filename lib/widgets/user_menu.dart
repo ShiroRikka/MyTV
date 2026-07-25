@@ -16,7 +16,11 @@ import 'package:luna_tv/services/tmdb_service.dart';
 import 'package:luna_tv/services/version_service.dart';
 import 'package:luna_tv/utils/device_utils.dart';
 import 'package:luna_tv/utils/font_utils.dart';
+import 'package:luna_tv/utils/text_context_menu.dart';
 import 'package:luna_tv/widgets/update_dialog.dart';
+import 'package:luna_tv/danmaku/danmaku_settings.dart';
+import 'package:luna_tv/danmaku/models/danmaku_media.dart';
+import 'package:luna_tv/danmaku/widgets/danmaku_settings_page.dart';
 
 class UserMenu extends StatefulWidget {
   final bool isDarkMode;
@@ -40,6 +44,9 @@ class _UserMenuState extends State<UserMenu> {
   //   显示名 ('直连'), 跟新模式不一致, 这次改回 key.
   String _bangumiDataSource = 'direct';
   String _bangumiImageSource = 'direct';
+  // v2.5.29: 短剧 + GitHub 数据源选择项 (跟 TMDB/Bangumi 同 UX)
+  String _shortDramaDataSource = 'direct';
+  String _githubDataSource = 'direct';
   String _version = '';
   bool _preferSpeedTest = true;
   bool _localSearch = false;
@@ -87,6 +94,10 @@ class _UserMenuState extends State<UserMenu> {
     super.initState();
     _loadUserInfo();
     _loadVersion();
+    // v2.5.38: 加载弹幕设置 (源开关)
+    DanmakuSettings.instance.load().then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   Future<void> _loadVersion() async {
@@ -109,6 +120,10 @@ class _UserMenuState extends State<UserMenu> {
     // v2.1.42 改: 跟 v2.1.41 TMDB 一样, 存 key 值, UI 显示时再转显示名
     final bangumiDataSource = await UserDataService.getBangumiDataSourceKey();
     final bangumiImageSource = await UserDataService.getBangumiImageSourceKey();
+    // v2.5.29: 短剧 + GitHub 数据源选择项
+    final shortDramaDataSource =
+        await UserDataService.getShortDramaDataSourceKey();
+    final githubDataSource = await UserDataService.getGithubDataSourceKey();
     final preferSpeedTest = await UserDataService.getPreferSpeedTest();
     final localSearch = await UserDataService.getLocalSearch();
     // v2.3.0: 视频加速 (CF Worker 视频代理 + 优选 IP + 视频代理开关 + CF Worker 域名) 整个删了
@@ -142,6 +157,8 @@ class _UserMenuState extends State<UserMenu> {
         _doubanImageSource = doubanImageSource;
         _bangumiDataSource = bangumiDataSource;
         _bangumiImageSource = bangumiImageSource;
+        _shortDramaDataSource = shortDramaDataSource;
+        _githubDataSource = githubDataSource;
         _preferSpeedTest = preferSpeedTest;
         _localSearch = localSearch;
         // v2.3.0: 视频加速 4 个字段已删, 不再 setState
@@ -216,6 +233,7 @@ class _UserMenuState extends State<UserMenu> {
               controller: controller,
               maxLines: 4,
               minLines: 2,
+              contextMenuBuilder: chineseTextSelectionToolbarBuilder,
               style: FontUtils.sourceCodePro(
                 ctx,
                 fontSize: 12,
@@ -405,6 +423,7 @@ class _UserMenuState extends State<UserMenu> {
             TextField(
               controller: controller,
               maxLines: 1,
+              contextMenuBuilder: chineseTextSelectionToolbarBuilder,
               style: FontUtils.sourceCodePro(
                 ctx,
                 fontSize: 13,
@@ -584,6 +603,7 @@ class _UserMenuState extends State<UserMenu> {
             TextField(
               controller: controller,
               maxLines: 1,
+              contextMenuBuilder: chineseTextSelectionToolbarBuilder,
               keyboardType: TextInputType.url,
               autocorrect: false,
               style: FontUtils.sourceCodePro(
@@ -1719,6 +1739,96 @@ class _UserMenuState extends State<UserMenu> {
                     : const Color(0xFF22C55E),
               ),
               _buildDivider(),
+              // v2.5.29: 短剧数据源 selector — 跟 TMDB/Bangumi 同 UX.
+              //   2 选 1: '短剧 Worker 加速' (走 /sd-api + /sd-img) / '直连' (直连 TVBox 源).
+              //   配了 worker URL 但选 'shortdrama_proxy' 没配 worker URL → 弹 SnackBar + 落 '直连'.
+              _buildOptionSelector(
+                title: '短剧数据源',
+                currentValue:
+                    UserDataService.getShortDramaDataSourceDisplayName(
+                        _shortDramaDataSource),
+                options: const [
+                  '短剧 Worker 加速',
+                  '直连',
+                ],
+                onChanged: (value) async {
+                  final key = UserDataService
+                      .getShortDramaDataSourceKeyFromDisplayName(value);
+                  if (key == 'shortdrama_proxy' && _tmdbProxyDomain.isEmpty) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          '请先在下方「代理 URL」输入 worker 地址, 已自动回落「直连」',
+                        ),
+                        duration: Duration(seconds: 3),
+                      ),
+                    );
+                    await UserDataService.saveShortDramaDataSource('direct');
+                    if (!mounted) return;
+                    setState(() {
+                      _shortDramaDataSource = 'direct';
+                    });
+                    return;
+                  }
+                  await UserDataService.saveShortDramaDataSource(key);
+                  if (!mounted) return;
+                  setState(() {
+                    _shortDramaDataSource = key;
+                  });
+                },
+                icon: LucideIcons.film,
+                iconColor: _tmdbProxyDomain.isEmpty
+                    ? const Color(0xFF9ca3af)
+                    : const Color(0xFF22C55E),
+              ),
+              _buildDivider(),
+              // v2.5.29: GitHub 数据源 selector — 检查更新 + APK 下载走 worker 还是直连.
+              //   之前 v2.1.46-v2.5.28 是隐式 (配了 worker URL 自动走), 现在显式让用户选.
+              //   国内 GFW 直连 api.github.com 100% 拉不到, 但选 direct 不报错 (只是检查不到更新).
+              _buildOptionSelector(
+                title: 'GitHub 数据源',
+                currentValue: UserDataService.getGithubDataSourceDisplayName(
+                    _githubDataSource),
+                options: const [
+                  'GitHub Worker 加速',
+                  '直连',
+                ],
+                onChanged: (value) async {
+                  final key = UserDataService
+                      .getGithubDataSourceKeyFromDisplayName(value);
+                  if (key == 'github_proxy' && _tmdbProxyDomain.isEmpty) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          '请先在下方「代理 URL」输入 worker 地址, 已自动回落「直连」',
+                        ),
+                        duration: Duration(seconds: 3),
+                      ),
+                    );
+                    await UserDataService.saveGithubDataSource('direct');
+                    if (!mounted) return;
+                    setState(() {
+                      _githubDataSource = 'direct';
+                    });
+                    return;
+                  }
+                  await UserDataService.saveGithubDataSource(key);
+                  if (!mounted) return;
+                  setState(() {
+                    _githubDataSource = key;
+                  });
+                },
+                icon: LucideIcons.code,
+                // v2.5.32: github -> code. lucide_icons_flutter 不含 github (Simple Icons 才
+                //   有), v2.5.29 加这个选项时就编译不过, 所有 build 失败都卡 user_menu.dart:1816.
+                //   code icon 视觉上跟 <> 风格接近, 表达代码/开发/github 概念够用.
+                iconColor: _tmdbProxyDomain.isEmpty
+                    ? const Color(0xFF9ca3af)
+                    : const Color(0xFF22C55E),
+              ),
+              _buildDivider(),
               // v2.1.41: 代理 URL 输入行 — 用户自部署 [djsevenx1/tmdb-proxy]
               //   到 Cloudflare Pages 拿到的 https://xxx.pages.dev. 配了
               //   「TMDB 数据源」选 'TMDB Worker 加速' 才会用上, 没配选
@@ -1822,6 +1932,27 @@ class _UserMenuState extends State<UserMenu> {
               ],
             ],
           ),
+          // ===== 弹幕 =====
+          // v2.5.48: 弹幕设置合并为一个入口, 点开进子页面 (不再内联展开占地方)
+          _buildSectionHeader('弹幕'),
+          _buildCard(
+            children: [
+              _buildActionItem(
+                title: '弹幕设置',
+                icon: Icons.subtitles_rounded,
+                iconColor: const Color(0xFF22C55E),
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => DanmakuSettingsPage(
+                        isDarkMode: widget.isDarkMode,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
           // ===== 其他 =====
           _buildSectionHeader('其他'),
           _buildCard(
@@ -1881,6 +2012,19 @@ class _UserMenuState extends State<UserMenu> {
                   Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => const DiaryScreen(),
+                    ),
+                  );
+                },
+              ),
+              // v2.5.52: 弹幕日记 — 只看 [弹幕] 分类的日记, 方便排查弹幕加载问题
+              _buildActionItem(
+                title: '弹幕日记',
+                icon: LucideIcons.film,
+                iconColor: const Color(0xFF22C55E),
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const DiaryScreen(initialFilter: '弹幕'),
                     ),
                   );
                 },

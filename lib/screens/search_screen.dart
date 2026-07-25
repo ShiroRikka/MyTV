@@ -39,9 +39,16 @@ class _SearchScreenState extends State<SearchScreen> with TickerProviderStateMix
   List<String> _searchHistory = [];
   List<SearchResult> _searchResults = [];
   bool _hasSearched = false;
+  // v2.5.26: 加 loading 状态, 搜索中给用户即时反馈 (之前搜索时显示空状态, 用户以为卡死)
+  bool _isLoading = false;
   String? _searchError;
   Timer? _updateTimer;
   bool _useAggregatedView = true;
+
+  // v2.5.27: 搜索代际 guard. debounce 缩短到 400ms 后, 用户还在输入就可能触发
+  //   新搜索, 旧搜索的 await 晚返回会覆盖新搜索的空/loading 状态, 导致"结果突然消失".
+  //   每次发起新搜索递增 generation, await 返回后校验, 不匹配就丢弃结果.
+  int _searchGeneration = 0;
 
   // 筛选/排序状态（保持不变）
   String _selectedSource = 'all';
@@ -97,9 +104,18 @@ class _SearchScreenState extends State<SearchScreen> with TickerProviderStateMix
   void _onSearchQueryChanged(String query) {
     _searchQuery = query;
     if (_updateTimer?.isActive ?? false) _updateTimer!.cancel();
-    _updateTimer = Timer(const Duration(milliseconds: 800), () {
+    // v2.5.26: debounce 800→400ms. 800ms 偏长, 用户输入完到触发搜索的等待感明显.
+    // 400ms 既能避免逐字抖动, 又让搜索更"跟手".
+    // v2.5.27: 用户继续输入时, 让进行中的旧搜索结果作废, 避免覆盖新状态.
+    _searchGeneration++;
+    _updateTimer = Timer(const Duration(milliseconds: 400), () {
       if (query.trim().isEmpty) {
-        if (mounted) setState(() => _hasSearched = false);
+        if (mounted) {
+          setState(() {
+            _hasSearched = false;
+            _isLoading = false;
+          });
+        }
         return;
       }
       _performSearch(query.trim());
@@ -107,20 +123,27 @@ class _SearchScreenState extends State<SearchScreen> with TickerProviderStateMix
   }
 
   Future<void> _performSearch(String query) async {
+    // v2.5.27: 记录本次搜索的代次, await 后校验, 避免旧搜索覆盖新搜索状态
+    final gen = ++_searchGeneration;
     setState(() {
       _hasSearched = true;
       _searchResults = [];
       _searchError = null;
+      _isLoading = true;
     });
     try {
       final results = await ApiService.fetchSourcesData(query);
-      if (!mounted) return;
+      if (!mounted || gen != _searchGeneration) return;
       setState(() {
         _searchResults = results;
+        _isLoading = false;
       });
     } catch (e) {
-      if (!mounted) return;
-      setState(() => _searchError = e.toString());
+      if (!mounted || gen != _searchGeneration) return;
+      setState(() {
+        _searchError = e.toString();
+        _isLoading = false;
+      });
     }
   }
 
@@ -148,11 +171,14 @@ class _SearchScreenState extends State<SearchScreen> with TickerProviderStateMix
       onSearchSubmitted: (q) => _performSearch(q.trim()),
       onClearSearch: () {
         if (_searchController.hasListeners) _searchController.clear();
+        // v2.5.27: 清空时让进行中的搜索作废
+        _searchGeneration++;
         setState(() {
           _searchQuery = '';
           _hasSearched = false;
           _searchResults = [];
           _searchError = null;
+          _isLoading = false;
         });
       },
       content: Column(
@@ -178,6 +204,22 @@ class _SearchScreenState extends State<SearchScreen> with TickerProviderStateMix
   }
 
   Widget _buildSearchResults() {
+    // v2.5.26: 搜索中且还没结果时显示 loading, 给用户即时反馈
+    if (_isLoading && _searchResults.isEmpty) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 12),
+            Text(
+              '搜索中...',
+              style: TextStyle(fontSize: 13),
+            ),
+          ],
+        ),
+      );
+    }
     final themeService = Provider.of<ThemeService>(context, listen: false);
     // 保持原有逻辑不变：选中聚合视图或普通列表
     if (_useAggregatedView) {

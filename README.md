@@ -80,6 +80,59 @@ LunaTV-Mobile 保留用户自部署的 **tmdb-proxy** Worker,只负责元数据�
 - **GitHub 代理 (v2.1.46+, UI 合并 v2.1.49+)** — 配了「代理 URL」(自部署 [djsevenx1/tmdb-proxy](https://github.com/djsevenx1/tmdb-proxy), 跟 TMDB / Bangumi 共用同一个 URL) 后, ① 检查更新走 worker 的 `/github/repos/.../releases/latest`, ② app 内建下载器下 APK 走 worker 的 `/github/asset/{owner}/{repo}/{tag}/{asset}` (跟 302 跳到 `objects.githubusercontent.com` 流式转发). 解决国内 GFW 完全拉不到 `api.github.com` / `objects.githubusercontent.com` 的问题
 - 拿不到 apk 链接 fallback 到 release 详情页 (用 `url_launcher` 跳浏览器)
 
+## 自部署视频后端 (lunatv-cf-backend)
+
+App 默认对接官方 [LunaTV Web](https://github.com/MoonTechLab/LunaTV) 后端,也可改用 [djsevenx1/lunatv-cf-backend](https://github.com/djsevenx1/lunatv-cf-backend) —— 一个**完全跑在 Cloudflare Pages 边缘**的替代后端,无需 Node.js / 数据库 / Redis,纯 CF Worker + KV。
+
+### 跟 LunaTV Web 对比
+
+| 维度 | LunaTV Web | lunatv-cf-backend |
+|---|---|---|
+| 部署 | Node.js + DB + Redis | 5 分钟 Cloudflare Pages 一键 |
+| 维护 | 跟随 Next.js / DB schema 更新 | 0 (Worker 边缘运行, KV 存数据) |
+| 视频 API | 代理 maccms 源 (外部后端) | **自包含**:Worker 直接调源 API + 解析 maccms `vod_play_url` |
+| 账号 / 收藏 / 历史 | DB | CF KV (账号 bcrypt 加密) |
+| 月成本 | 服务器费用 | 免费额度内 (KV < 100MB 够 ~100 账号) |
+| 视频功能 | 完整 | 跨源搜索 / 详情 / SSE 流式搜 / 源浏览器 / 番剧日历 / 豆瓣 / 短剧  |
+| 额外能力 | — | 源标记 + 过滤开关 (v0.8) |
+
+### 部署步骤 (5 分钟)
+
+1. Fork [djsevenx1/lunatv-cf-backend](https://github.com/djsevenx1/lunatv-cf-backend)
+2. Cloudflare 控制台 → Pages → Connect to Git → 选你的 fork
+3. Build settings: `Build command` 留空,`Build output` = 根目录
+4. `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` 加到 fork 的 GitHub Secrets,首次 push 自动建 KV namespace 并 commit 回 `wrangler.toml`
+5. 部署完拿到 `https://<your-subdomain>.pages.dev`
+
+### App 配置
+
+1. App → 设置 → 「API 地址」填入 CF Pages URL
+2. 首次打开会引导注册账号(自带账号系统,bcrypt + Salt)
+3. 「源管理」→ 「导入订阅」粘贴 LunaTV 订阅(Base58 / JSON / URL 任意),或手动「+ 新增源」加 maccms 公开资源站
+4. 主页「搜索」即可跨源聚合,详情页自动解析 m3u8 选集播放
+
+### 内容过滤 (v0.8+)
+
+每个视频源可在 Web UI 标记为。Web UI 顶部有「仅本账号」开关,默认关闭 ;开启 → 该账号 app 看到所有源,App 根据 `adult` 字段显示标签。账号之间互不影响。
+
+### 端点兼容表
+
+App 所有调用的后端端点都已自包含实现,不依赖任何外部后端:
+
+| 端点 | 用途 |
+|---|---|
+| `POST /api/login` / `/register` / `/logout` | 账号 |
+| `GET /api/me` / `/favorites` / `/playrecords` / `/searchhistory` | 同步 |
+| `GET/POST/PUT/DELETE /api/sources` `/api/sources/import` | 源管理 |
+| `GET/PUT /api/config` | 每账号偏好 (adult_enabled) |
+| `GET /api/search/resources` | 源列表(给 app) |
+| `GET /api/search?q=` `/search/one?resourceId=&q=` | 跨源 / 单源搜索 |
+| `GET /api/search/suggestions?keyword=` `/api/search/ws?q=` | 搜建议 / SSE 流式搜 |
+| `GET /api/detail?source=&id=` | 视频详情 + maccms 解析 |
+| `GET /api/source-browser/{sites,categories,list,search}` | 源浏览器(分类/列表/搜) |
+| `GET /api/release-calendar` | 番剧日历(抓 bgm.tv) |
+| `GET /api/douban/details?id=` `/api/netdisk/search?wd=` `/api/proxy/bangumi?path=` | 第三方内容 |
+
 ## 快速开始
 
 ### 环境要求
@@ -155,6 +208,7 @@ GitHub Actions 在 `main` 分支 push + 打 tag `v*.*.*` 时自动构建。
 - [LunaTV](https://github.com/MoonTechLab/LunaTV) — 原始 Web 项目
 - [Selene](https://github.com/MoonTechLab/Selene) — Flutter 移动端/桌面端源起项目
 - [djsevenx1/tmdb-proxy](https://github.com/djsevenx1/tmdb-proxy) — 配套 CF Worker 后端,处理 TMDB API / 图片 + Bangumi 数据 / 图片 + GitHub 更新加速
+- [djsevenx1/lunatv-cf-backend](https://github.com/djsevenx1/lunatv-cf-backend) — 自包含视频后端 (账号 / 收藏 / 历史 / 源管理 + 视频搜索 / 详情),纯 CF Worker + KV,无需外部服务
 - [AndroidX Media3 ExoPlayer](https://developer.android.com/media/media3/exoplayer) — Android 媒体播放
 - [dlna_dart](https://github.com/dlna-dart/dlna_dart) — DLNA 投屏
 - [cached_network_image](https://github.com/Baseflow/flutter_cached_network_image) — 网络图片缓存

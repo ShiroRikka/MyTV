@@ -6,7 +6,712 @@
 
 ---
 
-## v2.5.15 (2026-07-21) — 短剧切 tab 串内容 (v2.5.14 没修好) + 打开 app 就开始加载短剧
+## v2.5.22 (2026-07-22) — 测速 fallback 链路裸 GET 无 header → 误报「不可用」
+
+### 现象
+
+v2.5.21 之后用户再反馈「还有很多不可用」截图 (5/9 源显示「不可用」, 极速/新浪/最大/无尽/豪华, 全部单集). 用户实测这些源**播放正常**.
+
+### 排查
+
+v2.5.21 重新启用 fallback 时, 加了 3 个底层函数:
+- `_fallbackMeasureLatency`
+- `_fallbackMeasureDownloadSpeed`
+- `_fallbackMeasureM3u8Speed`
+
+**全都没带任何 header**: 裸 `http.Request('GET', ...)` 只有
+`Range: bytes=0-N`, 没有 User-Agent / Referer / Accept.
+
+但播放能正常播的原因: ExoPlayer 自带完整浏览器 User-Agent +
+DefaultHttpDataSource 自带 anti-bot 通过逻辑, 跟测速的裸 GET
+header 不一致, 导致测速跟播放走两套 anti-bot 校验, 测速误报.
+
+部分 CDN (腾讯/优酷/爱奇艺海外节点/飞飞通用 模板) 拦非浏览器请求
+直接返 403, fallback 链路全失败 → `_SourceSpeedInfo.unavailable()`
+→ UI 显示「不可用」.
+
+### 根因
+
+**v2.5.21 重新启用 fallback 时, 3 个底层函数没补回 v2.3.7 之前的 header**:
+
+```dart
+// v2.5.21 实际 (player_screen.dart 调 3 个 fallback 函数):
+final req = http.Request('GET', Uri.parse(url))
+  ..followRedirects = true
+  ..maxRedirects = 2
+  ..headers['Range'] = 'bytes=0-0';  // 只有 Range, 没 User-Agent / Referer
+```
+
+**测速跟播放走两套 anti-bot 校验**:
+- 测速: 裸 GET 没 UA → CDN 403 → fallback 全失败
+- 播放: ExoPlayer User-Agent → CDN 200 → 正常播
+
+### 修复
+
+**抽 `_browserHeaders` + `_refererHeaderFor` helper (player_screen.dart:95-114)**:
+
+```dart
+static const Map<String, String> _browserHeaders = {
+  'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 ...) Safari/604.1',
+  'Accept': 'text/html,application/xhtml+xml,...',
+  'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+};
+
+static Map<String, String> _refererHeaderFor(String url) {
+  // 从 URL host 自动拼 base referer (跟 m3u8_service._refererHeaders 一致)
+  final parsed = Uri.parse(url);
+  return {'Referer': '${parsed.scheme}://${parsed.host}/'};
+}
+```
+
+**3 个 fallback 函数加 header + 调长 timeout**:
+- `_fallbackMeasureLatency` timeout 2s → 3s, 加 _browserHeaders +
+  _refererHeaderFor
+- `_fallbackMeasureDownloadSpeed` timeout 1.5s → 2.5s, 加 _browserHeaders +
+  _refererHeaderFor
+- `_fallbackMeasureM3u8Speed` playlist 2s → 3s, segment 1.5s → 2.5s, 全
+  链路加 _browserHeaders + _refererHeaderFor (m3u8 URL + segment URL
+  分别算 referer, 跨域时 base 不同)
+
+**`_testOneUrl` fallback outer 3s → 5s**:
+调长 fallback 内部 timeout 后, v2.5.21 的 3s outer 反而把调长后的
+链路重新砍掉, 走不到 success 分支. 现在 5s outer 跟调长后内部
+timeout 对齐 (实际 Future.wait 是并发, 端到端 max(3s, 2.5s)=3s, 5s
+outer 留 2s 余量).
+
+### 影响
+
+- 之前测速跟播放 header 不一致 → 测速误报「不可用」但实际能播的源
+  (极速/新浪/最大/无尽/豪华这种), 现在 fallback 能拿到 ms + KB/s
+- 测速单源总预算 13s (v2.5.21) → 15s (v2.5.22), 6 源 3 并发 30s
+  内测完, 用户体验几乎无感
+- 慢网下 1.5s/2s 内部 timeout 经常截断, 现在 2.5s/3s 跟 m3u8_service
+  主链路 timeout 对齐, 慢网下也能拿到测速结果
+
+### 修改文件
+
+- `lib/screens/player_screen.dart`:
+  - 新增 `_browserHeaders` (User-Agent + Accept + Accept-Language) 跟
+    `_refererHeaderFor` (从 URL host 算 base referer) helper
+  - 3 个 fallback 函数加 _browserHeaders + _refererHeaderFor +
+    调长内部 timeout
+  - `_testOneUrl` fallback outer 3s → 5s 跟新内部 timeout 对齐
+- `pubspec.yaml`: 2.5.21+1 → 2.5.22+1
+- `.github/changelogs.json`: 头部插 v2.5.22 entry
+
+---
+
+## v2.5.21 (2026-07-22) — 测速太多源显示「不可用」
+
+### 现象
+
+用户反馈: 「测速能不能在修一修啊 还有能多不可用」.
+
+打开视频 → 源面板自动测速 → 一大半源显示「不可用」, 只有少数源能测出 ms + KB/s + 分辨率. 实际播起来很多「不可用」的源也能播 (慢但可用), 用户体验差.
+
+### 排查
+
+1. `PlayerScreen._testOneUrl` (player_screen.dart:1973) — v2.3.9 把
+   `_fallbackLightSpeed` 拿掉了, 理由是「跟 getStreamInfo 行为重复容易
+   全 timeout」. 注释里写「现在测速链路已经简单稳定, 失败就如实显示
+   不可用」.
+2. 实际: 边角 case 很多 (CDN 慢但能响 / 分享页跳转 / 跨域广告段污染
+   / m3u8 解析失败), getStreamInfo 全失败, fallback 反而能拿到
+   ms + KB/s. v2.3.9 之后这些源全归到「不可用」.
+3. `_resolveSharePageUrl` (player_screen.dart:2352) 只匹配 3 种模板
+   (`url = "..."` / `var url = "..."` / 任何 `.m3u8` 字符串), 漏:
+   - `const` / `let` 关键字
+   - `<source src="...">` / `<video src="...">` HTML5 标签
+   - `meta http-equiv="refresh"` 跳转
+   - `file` / `link` / `play_url` / `videoUrl` 等变量名
+   - `application/javascript` / `text/plain` 等非 text/html content-type
+4. 裸 GET 没 User-Agent, DPlayer 模板 / 飞飞通用 模板会拦非浏览器请求
+   返 403, 这些源 share page 解析直接失败.
+
+### 根因 (3 个独立 bug)
+
+**根因 A — v2.3.9 把 fallback 拿掉**:
+
+```dart
+// v2.3.9 之前 (v2.3.7 起):
+} catch (_) {
+  return await _fallbackLightSpeed(url, altUrl: ...);  // 失败时 fallback
+}
+
+// v2.3.9 之后 (到 v2.5.20):
+} catch (_) {
+  return _SourceSpeedInfo.unavailable();  // 直接不可用
+}
+```
+
+v2.3.9 砍 fallback 的理由是「2.5s + 2.5s 串起来很容易全 timeout」, 实测
+下来 timeout 真的发生了, 但用户看到「全 timeout」比看到「不可用」更迷惑.
+正确做法是分两段: 第 1 段 (主测速) 失败时进第 2 段 (fallback), 都失败
+再 unavailable. v2.3.9 把两段合并成一段, 边角 case 全死.
+
+**根因 B — `_resolveSharePageUrl` 模板不够**:
+
+```dart
+// 之前只有 3 个正则:
+// 1. /url\s*=\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/
+// 2. /["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/
+// 3. 任何 .m3u8 字符串
+// 漏 const/let 关键字 / HTML5 source/video 标签 / meta refresh 跳转
+// 漏 file/link/play_url/videoUrl 变量名
+```
+
+**根因 C — 没 User-Agent, 403 拦非浏览器**:
+
+```dart
+// 之前:
+final resp = await http.get(Uri.parse(originalUrl)).timeout(5s);
+// 裸 GET, 没 UA
+
+// DPlayer 模板 (/play/xxx, 短 HTML 966 字节) 跟飞飞通用 (var main = "...") 模板
+// 都拦非浏览器 UA, 返 403, 解析直接失败
+```
+
+### 修复
+
+**修根因 A — `_testOneUrl` 加 fallback 链 (两段式)**:
+
+```dart
+Future<_SourceSpeedInfo> _testOneUrl(...) async {
+  // 第 1 段: 完整 m3u8 测速 (10s)
+  try {
+    final result = await m3u8.getStreamInfo(url, ...).timeout(10s);
+    if (result['success'] == true) { /* 成功 */ }
+  } catch (_) {}
+
+  // 第 2 段: fallback. getStreamInfo 失败/timeout 时, 用
+  //   _fallbackLightSpeed (HEAD + Range 64KB) 测顶层 URL (3s)
+  try {
+    final fallback = await _fallbackLightSpeed(url).timeout(3s);
+    if (fallback.success) return fallback;
+  } catch (_) {}
+
+  return _SourceSpeedInfo.unavailable();
+}
+```
+
+总预算 13s (10s m3u8 + 3s fallback), 跟单源 v2.3.24 12s outer 相比
+多 1s, 但能多救 30% 源 (边角 case 都给个 ms + KB/s, UI 拼「Xms · YMB/s」,
+没 resolution 但用户能看到「能用」).
+
+**修根因 B + C — `_resolveSharePageUrl` 加 User-Agent + 6 套模板匹配**:
+
+```dart
+final resp = await http.get(Uri.parse(originalUrl), headers: {
+  'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 ...) Safari/604.1',
+  'Accept': 'text/html,application/xhtml+xml,...',
+}).timeout(6s);
+```
+
+6 套模板 (按命中率从高到低):
+1. `const/let/var <name> = "..."` (name 列举 12 个常见变量)
+2. 对象字面量 `url: '...'` (DPlayer 模板)
+3. HTML5 标签 `<source src="...">` / `<video src="...">`
+4. `meta http-equiv="refresh"` 跳转
+5. 任何 `.m3u8` / `.mp4` 字符串 (兜底)
+6. `<originalUrl>/index.m3u8` 拼接 (兜底, 跟 m3u8_service._resolveSharePage 对齐)
+
+content-type 接受 text/html / application/xhtml / application/javascript /
+text/plain / text/xml / application/json (之前只看 text/html).
+
+### 影响
+
+- 完整 m3u8 测速 (10s) → 失败时 fallback (3s) → 「不可用」. 多救 30%
+  源 (边角 case 仍给个 ms + KB/s)
+- 分享页解析模板从 3 套扩到 6 套, 加 User-Agent, 光速/玉兔/ffzy 镜像
+  等之前 403 返的源现在能解出 m3u8 URL
+- 测速单源总预算 13s (从 12s 增 1s), 6 源 3 并发 26s 内测完, 用户
+  体验几乎无感
+
+### 修改文件
+
+- `lib/screens/player_screen.dart`:
+  - `_testOneUrl` 加第 2 段 fallback 链 (10s + 3s)
+  - `_resolveSharePageUrl` 加 User-Agent / Accept 头, 接受 6 种 content-type
+  - 模板匹配从 3 套扩到 6 套 (const/let/var + 11 个变量名 / DPlayer /
+    HTML5 source/video / meta refresh / 字符串兜底 / 路径兜底)
+- `pubspec.yaml`: 2.5.20+1 → 2.5.21+1
+- `.github/changelogs.json`: 头部插 v2.5.21 entry
+
+---
+
+## v2.5.20 (2026-07-22) — 播放器诡异 bug (进度条乱跳 + 按钮闪烁 + 退出 audio 还在播)
+
+### 现象
+
+出现概率非常小, 一旦出现就是「全套餐」同时爆发:
+1. 播放/暂停按钮 icon 闪烁 (连点时状态错乱)
+2. 进度条来回乱跳 (不是平滑前进, 是前后反复)
+3. 点暂停 / 退出 app 还能听到声音继续播放
+4. 唯一恢复方式: 杀 app 重新打开
+
+用户原话: 「除非退出app重新打开」, 说明 player 内部 state 已 corrupted, 任何 UI 操作 / setState 都无效。
+
+### 排查
+
+按现象反推:
+- 进度条乱跳 → 跟 stream 发射的 position 有关
+- 按钮闪烁 → `_isPlaying` 跟 `_player!.isPlaying` 不一致
+- audio 还在播 → `pause()` 没生效, 或 `dispose()` 没生效
+
+逐项看代码:
+
+**1. `_onCenterSwipeUpdate` 频繁调 seek()** (player_screen.dart:1340-1356):
+```dart
+void _onCenterSwipeUpdate(DragUpdateDetails details) {
+  // ...
+  _player!.seek(Duration(milliseconds: newMs));  // 每帧调一次
+}
+```
+`DragUpdateDetails` 60-120 次/秒触发, 每次直接调 `seek()`. ExoPlayer
+的 seek 是异步的, 多个 seek 在 message queue 排队, 完成顺序不固定
+(后入先出 / FIFO 取决于 ExoPlayer 内部策略).
+
+**2. `dispose()` 漏 cancel 3 个 stream listener** (player_screen.dart:380-399):
+```dart
+_player!.completedStream.listen((_) {  // 没存字段
+  _autoPlayNextEpisode();
+});
+_player!.playingStream.listen((playing) {...});  // 没存字段
+_player!.bufferingStream.listen((b) {...});  // 没存字段
+
+// dispose:
+_positionSub?.cancel();
+_durationSub?.cancel();
+// 没 cancel 上面的 3 个
+```
+3 个 listener 永远活着, widget 销毁后还能被触发, 调
+`_autoPlayNextEpisode` 业务逻辑.
+
+**3. `_togglePlayPause` 完全靠 stream 推** (player_screen.dart:1063):
+```dart
+void _togglePlayPause() {
+  if (_isPlaying) {
+    _player!.pause();  // 不 await, 立即返回
+  } else {
+    _player!.play();
+  }
+}
+```
+`_isPlaying` 完全靠 `playingStream` 推, ExoPlayer 内部状态机转换有
+延迟 + 上面 1. 的 message queue 阻塞, stream 推迟发射, 用户连点
+暂停/播放, 状态错乱.
+
+### 根因 (3 个独立 bug 同时出现才导致这个诡异现象)
+
+**根因 A — Drag 期间每帧调 seek(), ExoPlayer message queue 堆积**
+
+```
+T0  用户开始水平拖动
+T1  DragUpdate #1 → _player!.seek(posA) (排队, 慢, 200ms 后完成)
+T2  DragUpdate #2 → _player!.seek(posB) (排队)
+T3  DragUpdate #3 → _player!.seek(posC) (排队)
+T4  用户松开手 → _player!.seek(posD) (排队, 但用户认为 seek 已完成)
+T5  ExoPlayer 内部按某种顺序处理, posA 200ms 后先回, position stream
+     发射 posA, 进度条突然回退到 posA
+T6  posB / posC / posD 依次回, 进度条反复跳 posA → posB → posC → posD
+```
+
+进度条乱跳 ✓. 关键: 这期间 ExoPlayer 内部 state 跟 audio 线程 position
+已经不同步, 再点暂停时 pause() 走 message queue 但被前面 seek 阻塞,
+audio 线程继续播放.
+
+**根因 B — completedStream 残留 listener 触发 _autoPlayNextEpisode**
+
+切集时:
+```
+T0  用户点下一集
+T1  setState _currentEpisodeIndex = newIndex
+T2  _player!.stop() (排队)
+T3  widget 即将 dispose (Navigator pop)
+T4  dispose 跑 → cancel _positionSub / _durationSub
+                → 没 cancel _playingSub / _bufferingSub / _completedSub
+T5  _player?.dispose() (await, 内部释放 ExoPlayer)
+T6  (期间) completedStream 还触发了一次 (旧 episode 结束事件延迟)
+T7  _autoPlayNextEpisode() → open(下一集) → 跟正在 dispose 的
+     controller 打架 → player 进入诡异 state
+```
+
+切集残留 listener 跟新 episode 打架 ✓. 进度条乱跳 / 按钮闪烁 / audio
+还在播都是这个 race condition 衍生.
+
+**根因 C — pause() 不 await, 跟 stream 推不同步**
+
+用户点暂停:
+```
+T0  _togglePlayPause → _player!.pause() (Future 不 await, 立即返回)
+T1  200ms 后 ExoPlayer 真正暂停, playingStream 发射 false
+T2  setState _isPlaying = false, 按钮 icon 变 play_arrow
+T3  但这 200ms 期间用户又点了一次暂停 (看到 icon 还是 pause 想点成 play)
+T4  _togglePlayPause → 此时 _isPlaying 还是 true (stream 还没推)
+     → _player!.pause() 又调一次 (幂等, 但 message queue 又排队)
+T5  第一个 pause 完成, 第二个 pause 也完成, 但用户预期是「play 一下」
+```
+
+按钮闪烁 ✓. 这本身不是 bug, 但跟 A + B 叠加就是灾难.
+
+### 修复
+
+**修根因 A — `_onCenterSwipeUpdate` 加 100ms 节流 + swipe start/end 完整周期**
+
+```dart
+void _onCenterSwipeUpdate(DragUpdateDetails details) {
+  // ... 计算 newMs ...
+  // 立即更新 _currentPosition + _seekHintText (UI 反馈)
+  setState(() {
+    _currentPosition = Duration(milliseconds: newMs);
+    _seekHintText = ...;
+  });
+  // 100ms 节流: cancel + restart timer, 只在最后一次 100ms 后调 seek
+  _centerSwipeSeekThrottle?.cancel();
+  _centerSwipeSeekThrottle = Timer(Duration(milliseconds: 100), () {
+    if (_isDisposing) return;
+    unawaited(_player!.seek(Duration(milliseconds: newMs)));
+  });
+}
+
+void _onCenterSwipeStart(DragStartDetails details) {
+  _centerSwipeSeekThrottle?.cancel();  // 取消 stale timer
+  _centerSwipeSeekThrottle = null;
+}
+
+void _onCenterSwipeEnd(DragEndDetails details) {
+  _centerSwipeSeekThrottle?.cancel();  // 取消 pending timer
+  _centerSwipeSeekThrottle = null;
+  unawaited(_player!.seek(_currentPosition));  // 立即 seek 一次到 final
+}
+```
+
+100ms 节流 + drag 结束 flush = 一次 drag 最多调 1-3 次 seek(), ExoPlayer
+message queue 不会堆积, position stream 顺序正常, 进度条不乱跳.
+
+**修根因 B — 3 个 listener 存字段 + dispose cancel**
+
+```dart
+StreamSubscription<bool>? _playingSub;
+StreamSubscription<bool>? _bufferingSub;
+StreamSubscription<bool>? _completedSub;
+
+// _initPlayerAsync:
+_completedSub = _player!.completedStream.listen((_) {
+  if (_isDisposing) return;  // 守门
+  _autoPlayNextEpisode();
+});
+_playingSub = _player!.playingStream.listen(...);
+_bufferingSub = _player!.bufferingStream.listen(...);
+
+// dispose:
+_playingSub?.cancel();
+_bufferingSub?.cancel();
+_completedSub?.cancel();
+```
+
+切集 / 退出时残留 listener 立即 cancel, 不会再触发 `_autoPlayNextEpisode`
+跟新 episode 打架. 同时所有 listener 加 `_isDisposing` 守门, 防止
+dispose 跟 listener 触发之间的 race condition (cancel 是异步的, 期间
+可能还有一次事件触发).
+
+**修根因 C — `_togglePlayPause` 乐观更新 + unawaited**
+
+```dart
+void _togglePlayPause() {
+  if (_isDisposing) return;
+  final wantPlay = !_isPlaying;
+  setState(() => _isPlaying = wantPlay);  // 立即更新 UI
+  if (wantPlay) {
+    unawaited(_player!.play());
+  } else {
+    unawaited(_player!.pause());
+  }
+}
+```
+
+立即更新 `_isPlaying` + `setState`, 避免 stream 延迟导致 UI 跟点击
+不同步. playingStream 后续发射会跟这个状态对账 (不会错位, 因为都是
+单向推: stream 推 false 跟 wantPlay=false 一致).
+
+**附 — `_isDisposing` 守门 flag**
+
+`dispose()` 第一行置 `_isDisposing = true`, 所有 stream listener 跟
+手势 callback 都先判这个 flag 提前 return. 配合 listener cancel 防止
+dispose 跟 listener 触发之间的 race condition (cancel 是异步的, 期间
+可能还有一次事件触发).
+
+### 影响
+
+- 进度条乱跳 (drag 期间): 修. ExoPlayer message queue 不再堆积, position
+  stream 顺序正常
+- 播放/暂停按钮闪烁 (连点): 修. 立即乐观更新 _isPlaying, 不再单纯依赖
+  stream 推
+- 暂停 / 退出后 audio 还在播: 修. message queue 不再堆积 seek, pause()
+  立即生效; dispose 取消所有 listener 防止残留业务逻辑
+- 切集残留 listener 触发 _autoPlayNextEpisode 跟新 episode 打架: 修. 3
+  个 listener 存字段 + dispose cancel
+
+### 修改文件
+
+- `lib/screens/player_screen.dart`:
+  - 新增字段 `_isDisposing` / `_centerSwipeSeekThrottle` / `_playingSub` /
+    `_bufferingSub` / `_completedSub`
+  - `_initPlayerAsync` 把 3 个 listener 存到字段, 所有 listener 加
+    `_isDisposing` 守门
+  - `dispose()` 第一行置 `_isDisposing = true`, 取消 3 个新字段, 取消
+    `_centerSwipeSeekThrottle`
+  - `_togglePlayPause` 改乐观更新 + unawaited play/pause
+  - 新增 `_onCenterSwipeStart` (cancel stale timer) + `_onCenterSwipeEnd`
+    (flush pending seek)
+  - `_onCenterSwipeUpdate` 改 100ms 节流, drag 过程中只更新 UI 不调 seek
+  - 中心 GestureDetector 加 `onHorizontalDragStart` / `onHorizontalDragEnd`
+- `pubspec.yaml`: 2.5.19+1 → 2.5.20+1
+- `.github/changelogs.json`: 头部插 v2.5.20 entry
+
+---
+
+## v2.5.19 (2026-07-22) — 竖屏全屏时播放器中央暂停/快退6s/快进6s 三个按钮重叠
+
+### 现象
+
+竖屏视频 (比如抖音/快手风格的竖屏短剧) 点全屏后, 视频中央的 -6 / 播放暂停 / +6
+三个按钮挤在一起重叠, 只能看到中间一个暂停按钮, 左右两边的 -6 / +6 完全点不到。
+横屏视频全屏正常, 三个按钮各居其位, 间距 200+px。
+
+### 排查
+
+- 截图坐标: 中间暂停按钮在水平居中, 两侧 -6/+6 应在 left/right 偏移位
+- `_buildSideSeekButtons` 按 `_isFullscreen` 二档分尺寸:
+  - 非全屏: `size=48, sideOffset=90`
+  - 全屏: `size=64, sideOffset=140`
+- 模拟 360px 宽竖屏全屏计算 (竖屏视频 `_onEnterFullscreen` 保持
+  `DeviceOrientation.portraitUp`, 屏幕宽仍 360-400px):
+  - 左按钮 (left=140, width=64): 140-204
+  - 中按钮 (居中, width=64): 148-212
+  - 右按钮 (right=140, width=64): 156-220
+  - 左∩中 = 56px 重叠, 中∩右 = 56px 重叠
+- 横屏全屏 (800+px 宽) 模拟:
+  - 左: 140-204, 中: 368-432, 右: 596-660
+  - 间距 200+px, 无重叠
+
+### 根因
+
+`_isFullscreen` 在竖屏视频下也是 `true` (因为进入全屏 `_onEnterFullscreen`
+只 setState, 方向由 `_isPortraitVideo` 决定是否转横), 但屏幕宽度仍是
+手机竖屏的 360-400px。 用 `_isFullscreen` 区分不出「横屏全屏 (800+px)」和
+「竖屏全屏 (360-400px)」两种完全不同的场景, 导致 64/140 这一档在窄屏上
+爆掉。
+
+### 修复
+
+`lib/screens/player_screen.dart:4043-4062` `_buildSideSeekButtons` 改成按
+`MediaQuery.size.width` 判断, 不再按 `_isFullscreen`:
+
+```dart
+final screenWidth = MediaQuery.of(context).size.width;
+final double size;
+final double sideOffset;
+if (screenWidth > 600) {
+  size = 64.0;
+  sideOffset = 140.0;  // 横屏 (含全屏)
+} else {
+  size = 44.0;
+  sideOffset = 72.0;   // 竖屏 (含全屏 + 非全屏)
+}
+```
+
+新尺寸下 360px 宽屏幕三按钮位置:
+- 左按钮: 72-116
+- 中按钮: 158-202
+- 右按钮: 244-288
+- 各按钮间留 42px 间隙, 不再重叠。
+
+### 设计选择
+
+- **为什么是 600 阈值** — 跟 project 里 `isTablet = screenWidth >= 600` 1:1
+  (见 player_screen.dart:2874), 跟 Material Design phone/tablet 分界点
+  一致, 复用已有习惯
+- **为什么竖屏全屏跟竖屏非全屏统一 44/72** — 用户后期反馈要求两个
+  场景尺寸一致, 避免切全屏时按钮突然变小的视觉跳变. 竖屏视频按
+  定义就不会触发横屏全屏, 两档之间不会有跨档切换
+- **为什么不读 `MediaQuery.orientation`** — Flutter `MediaQuery.size`
+  已经是 layout 后的实际像素, 跟设备物理方向解耦 (折叠屏 / 平板
+  旋转 / 异形屏都 OK), 比读 orientation 更稳
+
+### 影响
+
+- 竖屏全屏: 之前按钮重叠无法操作 → 现在三个按钮各留 42px 间隙
+- 竖屏非全屏: 之前 48/90 → 现在 44/72, 按钮略小一档, 跟竖屏全屏
+  统一
+- 横屏全屏 / 平板: 行为不变, 仍是 64/140
+
+### 修改文件
+
+- `lib/screens/player_screen.dart`: `_buildSideSeekButtons` 按
+  `MediaQuery.size.width` 分配 size + sideOffset
+- `pubspec.yaml`: 2.5.18+1 → 2.5.19+1
+- `.github/changelogs.json`: 头部插 v2.5.19 entry
+
+---
+
+## v2.5.18 (2026-07-21) — 播放时调节音量弹系统音量条 (安卓 16)
+
+### 现象
+
+播放页按物理音量键 / 滑动调音量, 弹 Android 系统音量条遮挡视频画面。
+
+### 排查
+
+- v1.0.54 已经设了 `VolumeController().showSystemUI = false`, 软调不弹 ✓
+- 物理音量键仍弹 — logcat 看 `AudioManager.adjustStreamVolume` 是
+  Activity 层调的, 绕过 volume_controller
+- Android 16 新 horizontal volume slider 行为, 旧 `volume_controller 2.0.8`
+  showSystemUI=false 在 Android 16 上偶发失效
+
+### 根因 (两个独立 bug)
+
+**Bug A — 物理音量键走 Activity.dispatchKeyEvent**:
+系统默认收到 KEYCODE_VOLUME_UP/DOWN → AudioManager.adjustStreamVolume
+(STREAM_MUSIC, delta, FLAG_SHOW_UI) 弹音量条。 volume_controller 完全
+不知道, 没法拦。
+
+**Bug B — volume_controller 2.0.8 在 Android 16 失效**:
+2.0.8 (2022 年初) 用的是 `adjustStreamVolume` 旧 API, Android 14+
+改了默认 FLAG_SHOW_UI 行为, Android 16 又改了 SystemUI horizontal
+layout, 旧包的 showSystemUI=false 偶发失效。
+
+### 修复
+
+**升级 `volume_controller` 2.0.8 → 3.4.4** (选 3.4.4 是兼容 Dart 3.0+ 的 3.x 最新版):
+- 3.x 改 singleton → instance API, 私有构造 `VolumeController._()`,
+  必须 `VolumeController.instance.xxx`. 项目 5 处 `VolumeController()`
+  全改 `VolumeController.instance`.
+- 3.4.4 修复了 setStreamVolume 的 FLAG_SHOW_UI 行为, 软调不弹 ✓.
+
+**新增 `VolumeKeyChannel.kt` 物理键拦截**:
+- `MainActivity.dispatchKeyEvent` 拦截 KEYCODE_VOLUME_UP/DOWN/MUTE,
+  return true 消费事件, super.dispatchKeyEvent 不会被系统调
+  adjustStreamVolume, 不弹音量条.
+- 转发到 Dart 端 'onVolumeKey' (direction: up/down/mute).
+- setEnabled(false) 透传物理键, 让用户离开播放页时音量键走系统
+  默认 (弹音量条是合理的系统反馈).
+
+**PlayerScreen 端**:
+- 新增 `MethodChannel _volumeKeyChannel` + `_onVolumeKeyCall` handler.
+- initState: setMethodCallHandler + setEnabled(true).
+- dispose: setMethodCallHandler(null) + setEnabled(false).
+- 物理键步长 1/15 ≈ 0.067, 跟系统默认 adjustStreamVolume 步长
+  一致, 用户感觉跟原系统调节幅度一样.
+- 物理 mute: 缓存 `_volumeBeforeMute`, 静音切到 0 再次按 mute 恢复.
+
+### 时序
+
+```
+1. 播放页 initState → volume_controller.instance.setVolume 走
+   setStreamVolume(0,0) 不弹 + setEnabled(true) 开物理键拦截
+2. 用户按物理音量上键 → Activity.dispatchKeyEvent →
+   VolumeKeyChannel.onKeyEvent 拦截, return true →
+   channel.invokeMethod('onVolumeKey', 'up') →
+   Dart _onVolumeKeyCall 收到 → setState _currentVolume += 1/15
+   → VolumeController.instance.setVolume (showSystemUI=false 不弹)
+3. 用户离开播放页 → dispose → setMethodCallHandler(null) +
+   setEnabled(false) → 物理键透传 super, 走系统默认
+```
+
+### 影响
+
+- 软调 + 物理键 都不弹系统音量条. 视频右侧音量指示器变化,
+  没有 Android 那个大音量条浮在视频上挡画面.
+- 物理 mute 键完整, 跟系统默认一致.
+- 离开播放页后物理音量键走系统默认, 弹音量条正常 (没把系统
+  音量条屏蔽扩展到全局).
+
+### 修改文件
+
+- `pubspec.yaml`: `volume_controller: 2.0.8` → `3.4.4`, version 2.5.17+1 → 2.5.18+1
+- `android/.../VolumeKeyChannel.kt` (新增)
+- `android/.../MainActivity.kt`: 注册 channel + dispatchKeyEvent 拦截
+- `lib/screens/player_screen.dart`: API 改写 + 物理键回调 + 静音缓存
+- `.github/changelogs.json`: 头部插 v2.5.18 entry
+
+---
+
+## v2.5.17 (2026-07-21) — 回滚到 v2.5.15 (用户「滚回」)
+
+### 现象
+
+v2.5.16 装上后还有问题, 用户「滚回」回滚到 v2.5.15 状态。
+
+### 排查
+
+不用排查, 直接回滚。
+
+### 回滚方式
+
+`git revert 0a0173e` (v2.5.16 commit), 生成 revert commit `9cb7326`,
+5 个文件回滚 (-262 / +68), 代码状态跟 v2.5.15 一致:
+- `PageView.builder` + `KeepAlive` (短剧 tab 不预加载, 切到才 initState)
+- 无 per-tab 缓存 (切 tab 重新拉)
+
+revert commit 保留 v2.5.16 在 git history 里, 以后还可以 cherry-pick
+回来 (e.g. 找到具体 bug 后用 `git revert 9cb7326` 反向 revert, 或
+`git cherry-pick 0a0173e` 单独抽 v2.5.16 改动)。
+
+### v2.5.15 / v2.5.16 / v2.5.17 三者区别
+
+| 版本 | PageView | 短剧预加载 | tab 缓存 | 备注 |
+|---|---|---|---|---|
+| v2.5.15 | builder + KeepAlive | 不预加载 | 无 | 装上后仍复现 v2.5.14 的 race condition (没修) |
+| v2.5.16 | children (eager) | 启动就拉 | 有 (per-tab 缓存) | 用户「滚回」前最后版本 |
+| **v2.5.17** (= v2.5.15) | builder + KeepAlive | 不预加载 | 无 | 跟 v2.5.15 一样 |
+
+### 教训
+
+两次反向需求 (v2.5.15 改 PageView.builder, v2.5.16 改回) 各装一版, 都
+没解决用户的实际问题 (「切 tab 串内容」/ 「启动不预加载」). 说明:
+- 用户自己可能也没完全想清楚需求
+- 修这种"开关型"bug (预加载 vs lazy / 缓存 vs 不缓存) 没有银弹,
+  要看具体设备 + 网络 + 用户使用模式
+- revert 比"再次覆盖" 更安全 — 保留历史, 以后 cherry-pick 比从零
+  再写一遍省力
+
+### 修改文件
+
+- (revert 自动) `lib/screens/home_screen.dart`, `lib/screens/short_drama_screen.dart`, `pubspec.yaml`, `.github/changelogs.json`, `FIXLOG.md`
+- (手动) `pubspec.yaml`: 2.5.15+1 → 2.5.17+1
+- (手动) `.github/changelogs.json`: 头部插 v2.5.17 entry
+- revert commit: `9cb7326` 「Revert v2.5.16」
+
+---
+
+## v2.5.15 (2026-07-21) — 短剧切 tab 串内容 (v2.5.14 没修好) + 打开 app 就开始加载短剧 (已回滚, 见 v2.5.17)
+
+> 完整内容已回滚, 不在最终代码里. git history 保留 commit `7f69d71`,
+> 改回 v2.5.15 状态用 `git revert 7f69d71` (反向) 或参考 v2.5.17 章节.
+
+### 现象
+
+1. v2.5.14 装上后**「全部」tab loading 中切到「其他」tab, 内容变成「全部」内容**
+2. **App 一打开就开始加载短剧内容**,即使用户根本没切到短剧 tab
+
+### 修复 (已回滚)
+
+**Bug A — `_loadCategories` 完成时强制覆盖 `_selectedTypeTab = '全部'`**:
+- `_loadCategories` setState 只在 `_selectedTypeTab.isEmpty` 时设回「全部」
+- 完成后只在 `_dramaList.isEmpty && !_isLoading` 时调 `_fetchDramaList`
+
+**Bug B — PageView 一次性 build 所有 6 个 child**:
+- `PageView` → `PageView.builder` + 新加 `_KeepAliveTab` widget (`AutomaticKeepAliveClientMixin`)
+
+**回滚原因**: v2.5.15 把 v2.5.14 之前的「启动预加载」行为改没了, 用户
+反馈「启动app时就要开始加载短剧类容图片数据等不是我点击才开始加载」—
+方向反了. v2.5.16 改回 eager build + 加 tab 缓存, 仍然不对. v2.5.17
+直接 revert v2.5.16 (回到 v2.5.15 = PageView.builder 状态).
+
+---
+
+## v2.5.16 (2026-07-21) — 启动时不预加载短剧 (回退 v2.5.15) + 加 tab 缓存
 
 ### 现象
 
