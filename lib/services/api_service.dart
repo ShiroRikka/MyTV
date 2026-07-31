@@ -48,6 +48,12 @@ class ApiService {
   //   复用后同 host 的请求走同一个连接池, 省掉 TLS 握手开销.
   static final http.Client _httpClient = http.Client();
 
+  // v2.6.26: 把 _httpClient 公开给 SSE 搜索复用. 共享连接池省掉每次搜索
+  //   冷启首搜的 TCP 握手 + TLS 协商 (200-1000ms). 调用方 (SSESearchService)
+  //   不得 close() 这个 client, 否则会破坏其他请求的 keep-alive. SSE 长连接
+  //   取消 subscription 让流自然结束即可.
+  static http.Client get sharedHttpClient => _httpClient;
+
   // v2.5.25: 分场景超时 — 之前全部 30s, 列表/搜索卡住时用户等太久.
   //   - 普通 GET/POST (列表/收藏/历史): 15s
   //   - 搜索 (fetchSourcesData): 20s (后端聚合多源, 需要更久)
@@ -692,14 +698,22 @@ class ApiService {
   ///   - 重复搜索同关键词直接命中内存, 零网络延迟.
   ///   - 缓存存的是已去重的 List<SearchResult>, 避免重复解析 JSON.
   ///   - sourceKey 用 'server_aggregated' 表示这是后端聚合结果.
+  /// v2.5.77: 在 search 路径上加搜索词归一化:
+  ///   - 全角空格/标点 → 半角
+  ///   - 连续空白 collapse 到单空格
+  ///   - 移除控制字符
+  ///   后端 LunaTV /api/search 接收 q 后用全词匹配 + 模糊, 但搜"ＭＥ！" 跟 "ME!"
+  ///   (全角 vs 半角) 是两个串, 落不到同一条目, 用户体感"搜不到".
+  ///   归一化不改变原 query (UI 显示不变), 只在网络请求时改写.
   static Future<List<SearchResult>> fetchSourcesData(String query) async {
-    final trimmed = query.trim();
-    if (trimmed.isEmpty) return [];
+    final normalized = _normalizeSearchQuery(query);
+    if (normalized.isEmpty) return [];
 
     // v2.5.26: 缓存命中直接返回, 跳过网络请求
+    //   v2.5.77: 缓存 key 用归一化后的 query, 避免 "ME!" 和 "ME! " 走两套缓存.
     const sourceKey = 'server_aggregated';
     final cache = LocalSearchCacheService();
-    final cached = cache.getCachedSearchPage(sourceKey, trimmed, 1);
+    final cached = cache.getCachedSearchPage(sourceKey, normalized, 1);
     if (cached != null && cached.status == CachedPageStatus.ok) {
       // 缓存里存的就是 List<SearchResult>, 直接 cast 返回
       try {
@@ -713,7 +727,7 @@ class ApiService {
       final response = await get<Map<String, dynamic>>(
         '/api/search',
         queryParameters: {
-          'q': trimmed,
+          'q': normalized,
         },
         fromJson: (data) => data as Map<String, dynamic>,
         timeout: _timeoutSearch,
@@ -730,10 +744,11 @@ class ApiService {
         final deduped = _dedupeBySourceKey(parsed);
 
         // v2.5.26: 命中网络后写缓存 (只缓存非空结果, 避免空结果被缓存 10 分钟)
+        //   v2.5.77: 用归一化 key 写缓存, 跟 read 一致.
         if (deduped.isNotEmpty) {
           cache.setCachedSearchPage(
             sourceKey,
-            trimmed,
+            normalized,
             1,
             CachedPageStatus.ok,
             deduped,
@@ -750,22 +765,173 @@ class ApiService {
     }
   }
 
-  /// 按 source key 去重,同一 key 保留集数最多的;空 key 不参与去重
+  /// 跨源不合并, 每个 source 一条结果; 同 source 同 title 同 year 视为
+  /// 同剧多版本, 只保留集数最多的 (处理 "新版"/"重制版" 这种集数变体).
+  ///
+  /// 关键: 跨源同剧的合并交给 SearchResultAggGrid (按 title+year+类型
+  /// 聚合 + sourceNames.join(',') 展示, 跟 web 行为一致).
+  /// api_service.dart 这层不做跨源聚合, 不然 18 个源同剧 (如"凡人修仙传")
+  /// 在 SearchResultAggGrid 那边就只剩 1 条 SearchResult, 卡片上
+  /// sourceNames 只有 1 个源名, 跟 web 18 个源名差很多.
+  ///
+  /// 同源的多版本 ("凡人修仙传" + "凡人修仙传 新版") 不会错误合并,
+  /// 因为 key 含 title, 两个不同 title 走不同 key, 各自保留.
+  /// 真正的"可可影视"重复 (tv 19 集 + movie 1 集) 也由同源多版本
+  /// 去重解决: 集数多的覆盖集数少的.
   static List<SearchResult> _dedupeBySourceKey(List<SearchResult> results) {
     final deduped = <String, SearchResult>{};
     for (final r in results) {
-      if (r.source.isEmpty) {
+      if (r.source.isEmpty || r.title.isEmpty) {
+        // 缺关键字段 → 单独留, 不参与聚合
         deduped['__nokey_${deduped.length}'] = r;
         continue;
       }
-      final existing = deduped[r.source];
+      // v2.6.6: 跟 v2.5.81 一致 — title+year+source, 跨源不合并.
+      //   同 source 的同 title 同 year 才会合并 (同源去重), 跨源分开保留.
+      final key = '${r.title}_${r.year}_${r.source}';
+      final existing = deduped[key];
       if (existing == null) {
-        deduped[r.source] = r;
+        deduped[key] = r;
       } else if (r.episodes.length > existing.episodes.length) {
-        deduped[r.source] = r;
+        // 同源同剧多版本, 集数更多的覆盖 (处理 "新版"/"重制版")
+        deduped[key] = r;
       }
+      // 集数少, 跳过 (同源同剧的次优版本)
     }
     return deduped.values.toList();
+  }
+
+  /// v2.5.77: 搜索词归一化.
+  ///   - 全角字母数字空格标点 → 半角
+  ///   - 移除控制字符
+  ///   - 连续空白 collapse 到单空格
+  ///   - trim 首尾空白
+  ///   不动 UI 显示的原 query, 只在网络请求前改写一次.
+  ///   例: "ＭＥ！" → "me!", "进击  巨人 " → "进击 巨人", "　" → " ".
+  /// v2.5.78: 加 toLowerCase 让大小写不敏感:
+  ///   - 用户输入 "ME" / "me" / "Me" → 都发 "me"
+  ///   - 后端如果存的是 "ME" (大写), 需要后端也做 lowercase 比对
+  ///   - 单前端改: 保证发出的 q 一致, 但后端不做 lowercase 还是匹配不上
+  ///     大写标题 (例如 "ME" vs "me"). 需后端配合.
+  /// v2.5.79: 进一步剥离常见 ASCII 标点, 让"输入干净词也能搜到带符号标题".
+  ///   - 之前 "ME!" → "me!", 后端转发给资源站 `wd=me!`, 资源站子串匹配
+  ///     要求子串完全一致, `me!` 在 `ME!` 里能匹配, 但反过来
+  ///     用户输入 "me" 时, `wd=me` 能不能匹配 `ME!` 取决于资源站
+  ///     是否做大小写不敏感 + 是否把 `!` 当成可忽略的标点.
+  ///   - 多数 vod 资源站对 `wd=me` 是大小写不敏感但保留标点字面量,
+  ///     所以 `wd=me` → 命中 `ME`、`Me`、`me`, 但**不会**自动去掉 `ME!` 里的 `!`
+  ///     来做匹配. 但资源站普遍会把 `wd` 当关键词, 标题里只要含 `me`
+  ///     子串就返回, 所以输入 "me" 实际是能搜到 "ME!" 的.
+  ///   - 真正搜不到的场景是用户输入带符号的 query, 如 "ME!": 资源站
+  ///     `wd=ME!` 不会匹配 `ME` (子串里没有 `!`). 把 query 里的
+  ///     `!` 剥掉变 "me" 就能搜到.
+  ///   - 这里只剥**用户明显会顺手敲出来**的装饰性符号, 不动 `-`(连字符)
+  ///     和 `.`(句点, 可能出现在 "Mr." "Dr." "v2.0" 这种有意义的缩写里),
+  ///     避免误伤.
+  ///   例: "ME!" → "me", "进击的巨人!" → "进击的巨人", "V2.0" → "v2.0" 保留点.
+  static String _normalizeSearchQuery(String query) {
+    if (query.isEmpty) return '';
+    final buf = StringBuffer();
+    for (final rune in query.runes) {
+      // ASCII 跳过
+      if (rune < 0x80) {
+        // 控制字符 (含 \n \t \r 等) 跳过, 但保留普通空格
+        if (rune < 0x20 && rune != 0x20) continue;
+        // v2.5.79: 剥离装饰性符号. 这些是用户顺手敲的、不影响语义.
+        //   不动字母/数字/空格/连字符/句点(可能是标题里有意义的).
+        //   ! ? ' " & + ( ) * # @ ~ ^ ` | \ / < > =
+        if (rune == 0x21 || // !
+            rune == 0x3F || // ?
+            rune == 0x27 || // '
+            rune == 0x22 || // "
+            rune == 0x26 || // &
+            rune == 0x2B || // +
+            rune == 0x28 || // (
+            rune == 0x29 || // )
+            rune == 0x2A || // *
+            rune == 0x23 || // #
+            rune == 0x40 || // @
+            rune == 0x7E || // ~
+            rune == 0x5E || // ^
+            rune == 0x60 || // `
+            rune == 0x7C || // |
+            rune == 0x5C || // \
+            rune == 0x2F || // /
+            rune == 0x3C || // <
+            rune == 0x3E || // >
+            rune == 0x3D) { // =
+          continue; // 跳过符号, 不写入
+        }
+        buf.writeCharCode(rune);
+        continue;
+      }
+      // 全角空格 (U+3000) → 半角空格
+      if (rune == 0x3000) {
+        buf.writeCharCode(0x20);
+        continue;
+      }
+      // 全角 ASCII 可打印区: 0xFF01..0xFF5E → 半角 0x21..0x7E
+      if (rune >= 0xFF01 && rune <= 0xFF5E) {
+        // v2.5.79: 全角符号同样剥掉 (统一行为, 用户敲全角 "！" 跟半角 "!" 等价)
+        final ascii = rune - 0xFEE0;
+        if (ascii == 0x21 || ascii == 0x3F || ascii == 0x27 || ascii == 0x22 ||
+            ascii == 0x26 || ascii == 0x2B || ascii == 0x28 || ascii == 0x29 ||
+            ascii == 0x2A || ascii == 0x23 || ascii == 0x40 || ascii == 0x7E ||
+            ascii == 0x5E || ascii == 0x60 || ascii == 0x7C || ascii == 0x5C ||
+            ascii == 0x2F || ascii == 0x3C || ascii == 0x3E || ascii == 0x3D) {
+          continue;
+        }
+        buf.writeCharCode(ascii);
+        continue;
+      }
+      // 中文标点 → 半角等价 (仅最常见的 6 个, 不全量映射避免误改)
+      // , , . . ? ? ! !
+      if (rune == 0xFF0C) {
+        buf.write(',');
+      } else if (rune == 0x3002) {
+        buf.write('.');
+      } else if (rune == 0xFF1F) {
+        // v2.5.79: 全角 ? 也归到符号里, 不保留
+        continue;
+      } else if (rune == 0xFF01) {
+        // v2.5.79: 全角 ! 也归到符号里, 不保留
+        continue;
+      } else if (rune == 0xFF1A) {
+        buf.write(':');
+      } else if (rune == 0xFF1B) {
+        buf.write(';');
+      } else if (rune == 0x200B || rune == 0x200C || rune == 0x200D ||
+                 rune == 0xFEFF || rune == 0x2060) {
+        // v2.5.81: 剥零宽字符 (用户复制粘贴站名时常带)
+        //   U+200B 零宽空格, U+200C 零宽非连接符, U+200D 零宽连接符
+        //   U+FEFF BOM/零宽无断空格, U+2060 词组连接符
+        continue;
+      } else if (_isEmojiRune(rune)) {
+        // v2.5.81: 剥 emoji — maccms LIKE 一定搜不到, 白占 query 字符
+        //   例: "进击的巨人 🔥" 剥了 emoji 后变 "进击的巨人"
+        //   注: 不剥汉字/假名/谚文 (那是真字符, 不是 emoji)
+        continue;
+      } else {
+        // 中文字符 / 韩文 / 其它非 ASCII 保留
+        buf.writeCharCode(rune);
+      }
+    }
+    // 连续空白 collapse 到单空格 + 全小写 + trim 首尾
+    return buf.toString().replaceAll(RegExp(r'\s+'), ' ').toLowerCase().trim();
+  }
+
+  // v2.5.81: 判断一个 rune 是不是 emoji
+  //   主要 emoji 区间:
+  //     U+1F300..U+1FAFF (Misc Symbols and Pictographs, Emoticons, Transport, Supplemental Symbols and Pictographs, Symbols and Pictographs Extended-A)
+  //     U+2600..U+27BF (Misc Symbols, Dingbats, Misc Symbols and Arrows)
+  //     U+1F000..U+1F1FF (Mahjong, Playing Cards, Enclosed Alphanumeric Supplement — 包含旗帜 U+1F1E6..U+1F1FF)
+  //   这些区间都跟汉字/假名/谚文 (U+4E00..U+9FFF / U+3040..U+30FF / U+AC00..U+D7AF) 互不重叠, 直接 range check 即可
+  static bool _isEmojiRune(int rune) {
+    if (rune >= 0x1F300 && rune <= 0x1FAFF) return true;
+    if (rune >= 0x2600 && rune <= 0x27BF) return true;
+    if (rune >= 0x1F000 && rune <= 0x1F1FF) return true;
+    if (rune >= 0x1F200 && rune <= 0x1F2FF) return true;  // Enclosed Ideographic Supplement
+    return false;
   }
 
   /// 获取搜索资源列表

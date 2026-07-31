@@ -1351,80 +1351,98 @@ class _VideoMenuBottomSheetState extends State<VideoMenuBottomSheet>
 
   /// 构建菜单选项
   Widget _buildMenuOptions(BuildContext context, ThemeService themeService) {
-    // 如果是豆瓣来源，只显示播放和豆瓣详情
+    // 如果是豆瓣来源，显示播放、收藏、豆瓣详情
     if (widget.videoInfo.source == 'douban') {
-      return Column(
-        children: [
-          _buildMenuItem(
-            context,
-            themeService,
-            icon: Icons.play_circle_fill,
-            iconColor: const Color(0xFF27AE60),
-            title: '播放',
-            subtitle: _getEpisodeSubtitle(),
-            onTap: () {
-              widget.onClose();
-              widget.onActionSelected(VideoMenuAction.play);
-            },
-          ),
-          
-          _buildDivider(themeService),
-          
-          _buildMenuItem(
-            context,
-            themeService,
-            icon: Icons.link,
-            iconColor: const Color(0xFF3498DB),
-            title: '豆瓣详情',
-            onTap: () async {
-              widget.onClose();
-              // 从videoInfo中获取doubanId，优先使用doubanId，如果为空或为0则使用id
-              final doubanId = (widget.videoInfo.doubanId != null && widget.videoInfo.doubanId!.isNotEmpty && widget.videoInfo.doubanId != "0") 
-                  ? widget.videoInfo.doubanId! 
-                  : widget.videoInfo.id;
-              await _openDoubanDetail(doubanId);
-            },
-          ),
-        ],
-      );
+      List<Widget> menuItems = [
+        _buildMenuItem(
+          context,
+          themeService,
+          icon: Icons.play_circle_fill,
+          iconColor: const Color(0xFF27AE60),
+          title: '播放',
+          subtitle: _getEpisodeSubtitle(),
+          onTap: () {
+            widget.onClose();
+            widget.onActionSelected(VideoMenuAction.play);
+          },
+        ),
+        _buildDivider(themeService),
+        // ★ 收藏按钮
+        _buildMenuItem(
+          context,
+          themeService,
+          icon: widget.isFavorited ? Icons.favorite : Icons.favorite_border,
+          iconColor: const Color(0xFFE74C3C),
+          title: widget.isFavorited ? '取消收藏' : '收藏',
+          onTap: () {
+            widget.onClose();
+            widget.onActionSelected(widget.isFavorited ? VideoMenuAction.unfavorite : VideoMenuAction.favorite);
+          },
+        ),
+        _buildDivider(themeService),
+        _buildMenuItem(
+          context,
+          themeService,
+          icon: Icons.link,
+          iconColor: const Color(0xFF3498DB),
+          title: '豆瓣详情',
+          onTap: () async {
+            widget.onClose();
+            final doubanId = (widget.videoInfo.doubanId != null && widget.videoInfo.doubanId!.isNotEmpty && widget.videoInfo.doubanId != "0")
+                ? widget.videoInfo.doubanId!
+                : widget.videoInfo.id;
+            await _openDoubanDetail(doubanId);
+          },
+        ),
+      ];
+      return Column(children: menuItems);
     }
-    
-    // 如果是Bangumi来源，只显示播放和Bangumi详情
+
+    // 如果是Bangumi来源，显示播放、收藏、Bangumi详情
     if (widget.videoInfo.source == 'bangumi') {
-      return Column(
-        children: [
-          _buildMenuItem(
-            context,
-            themeService,
-            icon: Icons.play_circle_fill,
-            iconColor: const Color(0xFF27AE60),
-            title: '播放',
-            subtitle: _getEpisodeSubtitle(),
-            onTap: () {
-              widget.onClose();
-              widget.onActionSelected(VideoMenuAction.play);
-            },
-          ),
-          
-          _buildDivider(themeService),
-          
-          _buildMenuItem(
-            context,
-            themeService,
-            icon: Icons.link,
-            iconColor: const Color(0xFF3498DB),
-            title: 'Bangumi 详情',
-            onTap: () async {
-              widget.onClose();
-              // 从videoInfo中获取bangumiId，优先使用bangumiId，如果为空或为0则使用id
-              final bangumiId = (widget.videoInfo.bangumiId != null && widget.videoInfo.bangumiId! > 0) 
-                  ? widget.videoInfo.bangumiId!.toString() 
-                  : widget.videoInfo.id;
-              await _openBangumiDetail(bangumiId);
-            },
-          ),
-        ],
-      );
+      List<Widget> menuItems = [
+        _buildMenuItem(
+          context,
+          themeService,
+          icon: Icons.play_circle_fill,
+          iconColor: const Color(0xFF27AE60),
+          title: '播放',
+          subtitle: _getEpisodeSubtitle(),
+          onTap: () {
+            widget.onClose();
+            widget.onActionSelected(VideoMenuAction.play);
+          },
+        ),
+        _buildDivider(themeService),
+        // ★ 收藏按钮
+        _buildMenuItem(
+          context,
+          themeService,
+          icon: widget.isFavorited ? Icons.favorite : Icons.favorite_border,
+          iconColor: const Color(0xFFE74C3C),
+          title: widget.isFavorited ? '取消收藏' : '收藏',
+          onTap: () {
+            widget.onClose();
+            widget.onActionSelected(widget.isFavorited ? VideoMenuAction.unfavorite : VideoMenuAction.favorite);
+          },
+        ),
+        _buildDivider(themeService),
+        _buildMenuItem(
+          context,
+          themeService,
+          icon: Icons.link,
+          iconColor: const Color(0xFF3498DB),
+          title: 'Bangumi 详情',
+          onTap: () async {
+            widget.onClose();
+            final bangumiId = (widget.videoInfo.bangumiId != null && widget.videoInfo.bangumiId! > 0)
+                ? widget.videoInfo.bangumiId!.toString()
+                : widget.videoInfo.id;
+            await _openBangumiDetail(bangumiId);
+          },
+        ),
+      ];
+      return Column(children: menuItems);
     }
     
     // 如果是收藏场景，只显示播放和取消收藏
@@ -1461,7 +1479,9 @@ class _VideoMenuBottomSheetState extends State<VideoMenuBottomSheet>
       );
     }
     
-    // 如果是聚合场景，显示播放和豆瓣详情（如果有）
+    // 如果是聚合场景，显示播放、收藏/取消收藏，如果有豆瓣ID则显示豆瓣详情
+    // v2.5.77: 之前聚合场景只显示"播放"+"豆瓣详情", 没有收藏按钮, 用户长按聚合卡片
+    //   收藏不上. 现在跟搜索场景一致, 在"播放"下补"收藏/取消收藏"项.
     if (widget.from == 'agg') {
       List<Widget> menuItems = [
         // 播放按钮
@@ -1478,8 +1498,23 @@ class _VideoMenuBottomSheetState extends State<VideoMenuBottomSheet>
             widget.onActionSelected(VideoMenuAction.play);
           },
         ),
+        // v2.5.77: 收藏 / 取消收藏 — 跟搜索场景逻辑一致
+        _buildDivider(themeService),
+        _buildMenuItem(
+          context,
+          themeService,
+          icon: widget.isFavorited ? Icons.favorite : Icons.favorite_border,
+          iconColor:
+              widget.isFavorited ? const Color(0xFFE74C3C) : const Color(0xFFE74C3C),
+          title: widget.isFavorited ? '取消收藏' : '收藏',
+          onTap: () {
+            widget.onClose();
+            widget.onActionSelected(
+                widget.isFavorited ? VideoMenuAction.unfavorite : VideoMenuAction.favorite);
+          },
+        ),
       ];
-      
+
       // 如果有豆瓣ID且不为0，添加豆瓣详情选项
       if (widget.videoInfo.doubanId != null && widget.videoInfo.doubanId!.isNotEmpty && widget.videoInfo.doubanId != "0") {
         menuItems.addAll([
@@ -1497,7 +1532,7 @@ class _VideoMenuBottomSheetState extends State<VideoMenuBottomSheet>
           ),
         ]);
       }
-      
+
       return Column(children: menuItems);
     }
     

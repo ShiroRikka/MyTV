@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:luna_tv/models/short_drama.dart';
 import 'package:luna_tv/models/video_info.dart';
@@ -11,6 +12,9 @@ import 'package:luna_tv/services/short_drama_service.dart';
 import 'package:luna_tv/services/theme_service.dart';
 import 'package:luna_tv/widgets/short_drama_card.dart';
 import 'package:luna_tv/widgets/pulsing_dots_indicator.dart';
+import 'package:luna_tv/widgets/favorites_grid.dart';
+import 'package:luna_tv/services/page_cache_service.dart';
+import 'package:luna_tv/services/theme_service.dart';
 import 'package:luna_tv/widgets/capsule_tab_switcher.dart';
 import 'package:luna_tv/utils/font_utils.dart';
 import 'package:luna_tv/utils/device_utils.dart';
@@ -296,6 +300,131 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
     );
   }
 
+  /// 显示短剧菜单 (长按) — 跟随主题亮色/暗色, 已收藏显示取消收藏
+  void _showDramaMenu(ShortDrama drama) {
+    HapticFeedback.mediumImpact();
+    final themeService = Provider.of<ThemeService>(context, listen: false);
+    final isDark = themeService.isDarkMode;
+    final isFavorited = PageCacheService().isFavoritedSync('shortdrama', drama.id.toString());
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: BoxDecoration(
+          color: isDark ? const Color(0xFF2C2C2C) : Colors.white,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: isDark ? Colors.grey[600] : Colors.grey[400],
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(20),
+                child: Text(
+                  drama.name,
+                  style: TextStyle(
+                    color: isDark ? Colors.white : Colors.black87,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Divider(
+                color: isDark ? const Color(0xFF3A3A3A) : Colors.grey[200],
+                height: 1,
+              ),
+              ListTile(
+                leading: const Icon(Icons.play_arrow, color: Color(0xFF22C55E)),
+                title: Text('播放', style: TextStyle(color: isDark ? Colors.white : Colors.black87)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _onDramaTap(drama);
+                },
+              ),
+              ListTile(
+                leading: Icon(
+                  isFavorited ? Icons.favorite : Icons.favorite_border,
+                  color: const Color(0xFFE74C3C),
+                ),
+                title: Text(
+                  isFavorited ? '取消收藏' : '收藏',
+                  style: TextStyle(color: isDark ? Colors.white : Colors.black87),
+                ),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await _toggleFavorite(drama);
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.info_outline, color: isDark ? Colors.white70 : Colors.grey[600]),
+                title: Text('查看详情', style: TextStyle(color: isDark ? Colors.white : Colors.black87)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _onDramaTap(drama);
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 切换收藏
+  Future<void> _toggleFavorite(ShortDrama drama) async {
+    final videoInfo = VideoInfo(
+      id: drama.id.toString(),
+      source: 'shortdrama',
+      title: drama.name,
+      sourceName: '',
+      year: '',
+      cover: drama.cover,
+      index: 0,
+      totalEpisodes: drama.episodeCount,
+      playTime: 0,
+      totalTime: 0,
+      saveTime: 0,
+      searchTitle: drama.name,
+    );
+    try {
+      final result = await PageCacheService().toggleFavorite(
+        'shortdrama',
+        drama.id.toString(),
+        videoInfo.toJson(),
+        context,
+      );
+      if (result.success) {
+        await FavoritesGrid.refreshFavorites();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('已加入收藏'),
+              duration: Duration(seconds: 1),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('收藏失败: $e')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer<ThemeService>(
@@ -486,6 +615,7 @@ class _ShortDramaScreenState extends State<ShortDramaScreen> {
               drama: drama,
               cardWidth: cardWidth,
               onTap: () => _onDramaTap(drama),
+              onLongPress: () => _showDramaMenu(drama),
             );
           },
           childCount: _dramaList.length,

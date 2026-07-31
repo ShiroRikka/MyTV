@@ -77,6 +77,7 @@ class DoubanMovieDetails {
   final String? imdbId;
   final int? totalEpisodes;
   final List<DoubanRecommendItem> recommends;
+  final List<String> aka; // v2.6.18: 别名列表 (豆瓣 aka 字段)
 
   const DoubanMovieDetails({
     required this.id,
@@ -99,6 +100,7 @@ class DoubanMovieDetails {
     this.imdbId,
     this.totalEpisodes,
     this.recommends = const [],
+    this.aka = const [],
   });
 
   /// 从JSON创建DoubanMovieDetails实例
@@ -267,6 +269,7 @@ class DoubanMovieDetails {
       imdbId: nonEmptyString(json['imdbId'] ?? json['imdb']),
       totalEpisodes: totalEpisodes,
       recommends: recommends,
+      aka: stringList(json['aka']),
     );
   }
 
@@ -293,6 +296,7 @@ class DoubanMovieDetails {
       'imdbId': imdbId,
       'totalEpisodes': totalEpisodes,
       'recommends': recommends.map((r) => r.toJson()).toList(),
+      'aka': aka,
     };
   }
 }
@@ -410,5 +414,58 @@ class DoubanResponse {
         return DoubanMovie.fromJson(item as Map<String, dynamic>);
       }).toList(),
     );
+  }
+}
+
+/// v2.6.16: 豆瓣搜索命中 — 用于多名称搜索.
+class DoubanSearchHit {
+  final String id;
+  final String title;
+  final String year;
+  final String type; // 'movie' | 'tv'
+  final String? coverUrl;
+  final List<String> aka; // 别名, 由 getDoubanDetails 填充
+  final String? rating;
+
+  const DoubanSearchHit({
+    required this.id,
+    required this.title,
+    required this.year,
+    required this.type,
+    this.coverUrl,
+    this.aka = const [],
+    this.rating,
+  });
+
+  DoubanSearchHit copyWith({
+    String? id,
+    String? title,
+    String? year,
+    String? type,
+    String? coverUrl,
+    List<String>? aka,
+    String? rating,
+  }) {
+    return DoubanSearchHit(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      year: year ?? this.year,
+      type: type ?? this.type,
+      coverUrl: coverUrl ?? this.coverUrl,
+      aka: aka ?? this.aka,
+      rating: rating ?? this.rating,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'title': title,
+      'year': year,
+      'type': type,
+      'cover_url': coverUrl,
+      'aka': aka,
+      'rating': rating,
+    };
   }
 }

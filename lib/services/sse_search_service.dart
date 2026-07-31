@@ -10,7 +10,11 @@ import 'package:luna_tv/services/local_mode_storage_service.dart';
 
 /// SSE 搜索服务
 class SSESearchService {
-  http.Client? _client;
+  // http.Client? _client; // v2.6.26: 删除 _client 字段, 改用 ApiService
+  //   共享的 _httpClient (保持 keep-alive 连接池). 之前每次搜索都新建
+  //   http.Client() = 新 IOClient = 新 HttpClient, 每次都要重新建 TCP 握手
+  //   + TLS 协商, 冷启首搜 200-1000ms. 共享 client 后同 host 请求走同连接池,
+  //   首搜省掉这层握手, 体感更跟手.
   StreamSubscription? _subscription;
   StreamController<List<SearchResult>>? _incrementalResultsController;
   StreamController<String>? _errorController;
@@ -23,6 +27,15 @@ class SSESearchService {
   int _completedSources = 0; // 跟踪完成的源数量
   int _totalSources = 0; // 总源数量
   Timer? _timeoutTimer; // 超时定时器
+  // v2.6.16: 每个源的结果数 — 用户反馈「奈飞工厂源app搜不到内容」, 但
+  //   实际是源 API 本身就没数据. 加这个 map 在搜索完成后显示每个源搜出
+  //   多少条, 用户能区分「源没数据 (0 条)」vs 「app 没搜这个源 (缺失)」.
+  //   Map<sourceKey, count>, count = 0 表示源被调用了但 API 返回 0 条.
+  final Map<String, int> _sourceResultCounts = {};
+
+  /// 获取每个源的结果数 (key = source.key, value = 命中结果数)
+  Map<String, int> get sourceResultCounts =>
+      Map<String, int>.from(_sourceResultCounts);
 
   /// 获取增量结果流
   Stream<List<SearchResult>> get incrementalResultsStream =>
@@ -65,6 +78,7 @@ class SSESearchService {
 
       _totalSources = resources.length;
       _completedSources = 0;
+      _sourceResultCounts.clear();
 
       _progressController?.add(SearchProgress(
         totalSources: _totalSources,
@@ -107,6 +121,9 @@ class SSESearchService {
       // 增加完成计数
       _completedSources++;
 
+      // v2.6.16: 记录该源的结果数 (含 0 条, 让用户知道源被调用了但没数据)
+      _sourceResultCounts[resource.key] = results.length;
+
       // 发送结果事件
       if (results.isNotEmpty) {
         _incrementalResultsController?.add(results);
@@ -123,6 +140,8 @@ class SSESearchService {
       // 超时处理
       _completedSources++;
       _sourceErrors[resource.key] = '搜索超时（20秒）';
+      // v2.6.16: 超时也算源完成, 记 0 条
+      _sourceResultCounts[resource.key] ??= 0;
 
       // 发送错误进度更新
       _progressController?.add(SearchProgress(
@@ -136,6 +155,8 @@ class SSESearchService {
       // 其他错误处理
       _completedSources++;
       _sourceErrors[resource.key] = e.toString();
+      // v2.6.16: 错误也算源完成, 记 0 条
+      _sourceResultCounts[resource.key] ??= 0;
 
       // 发送错误进度更新
       _progressController?.add(SearchProgress(
@@ -154,21 +175,27 @@ class SSESearchService {
       throw Exception('搜索查询不能为空');
     }
 
-    // 如果已有连接，先关闭
-    if (_isConnected) {
-      await stopSearch();
-    }
+    // v2.6.32: 快速取消旧连接, 不 await stopSearch(). 之前 await stopSearch()
+    //   等旧 SSE 流完全关闭 + 3 个 StreamController.close() 完成, 如果旧
+    //   搜索还在接收数据, cancel + close 可能需要几十毫秒. 现在直接 cancel
+    //   + 置 null, 新搜索立即开始. 有 generation guard 保证旧结果不混入.
+    _subscription?.cancel();
+    _subscription = null;
+    _timeoutTimer?.cancel();
+    _timeoutTimer = null;
+    _isConnected = false;
 
-    // 关闭之前的流控制器
-    await _incrementalResultsController?.close();
-    await _errorController?.close();
-    await _progressController?.close();
+    // 旧流控制器直接置 null (GC 回收), 不 await close
+    _incrementalResultsController = null;
+    _errorController = null;
+    _progressController = null;
 
     _currentQuery = query.trim();
     _sourceErrors.clear();
+    _sourceResultCounts.clear();
     _completedSources = 0;
 
-    // 初始化流控制器
+    // 创建新的流控制器
     _incrementalResultsController =
         StreamController<List<SearchResult>>.broadcast();
     _errorController = StreamController<String>.broadcast();
@@ -176,30 +203,40 @@ class SSESearchService {
 
     _isConnected = true;
 
-    // 设置15秒超时定时器
-    _timeoutTimer = Timer(const Duration(seconds: 15), () {
+    // v2.6.32: 20s 超时保留作为兜底, 但正常情况下后端 1-3s 就推回结果.
+    _timeoutTimer = Timer(const Duration(seconds: 20), () {
       if (_isConnected) {
         _handleTimeout();
       }
     });
 
-    // 检查是否启用本地搜索或本地模式
-    final isLocalMode = await UserDataService.getIsLocalMode();
+    // v2.6.25: 4 个 await UserDataService.* → 4 个同步读. 之前 4 个串行
+    //   await SharedPreferences.getInstance() (磁盘 IO) 拖慢 SSE 启动
+    //   0.5-2s, 体感比 Selene 慢根因. 现在:
+    //   - getIsLocalModeSync / getLocalSearchSync: 走 _isLocalModeCache /
+    //     _localSearchCache 内存, 0ms
+    //   - _serverUrlCache / _cookiesCache: 走 UserDataService 内部 sync
+    //     getter, 0ms (原代码 line 120-127 已有 _serverUrlCache,
+    //     line 147-154 已有 _cookiesCache)
+    //   warmup 阶段 (UserDataService.warmupUserDataConfig 启动时调一次)
+    //   已经预热这 4 个缓存, 这里同步读全是 0ms.
+    final isLocalMode = UserDataService.getIsLocalModeSync();
     if (isLocalMode) {
       localSearch(query);
       return;
     }
 
-    final isLocalSearch = await UserDataService.getLocalSearch();
+    final isLocalSearch = UserDataService.getLocalSearchSync();
     if (isLocalSearch) {
       localSearch(query);
       return;
     }
 
     try {
-      // 获取服务器地址和认证信息
-      final baseUrl = await UserDataService.getServerUrl();
-      final cookies = await UserDataService.getCookies();
+      // 获取服务器地址和认证信息 — 同步读, 走 _serverUrlCache / _cookiesCache
+      //   (warmup 已预热). 之前 await 是串行, 现在 0ms.
+      final baseUrl = UserDataService.getServerUrlSync();
+      final cookies = UserDataService.getCookiesSync();
 
       if (baseUrl == null) {
         throw Exception('服务器地址未配置，请先登录');
@@ -218,8 +255,13 @@ class SSESearchService {
         },
       );
 
-      // 创建 HTTP 客户端并开始 SSE 连接
-      _client = http.Client();
+      // v2.6.26: 用 ApiService.sharedHttpClient 共享 client 发起 SSE 请求
+      //   (保连接池 + keep-alive). 之前 _client = http.Client() 每次新建
+      //   IOClient → 新 HttpClient → 冷启首搜要重做 TCP 握手 + TLS 协商,
+      //   200-1000ms 延迟, 体感首搜比 Selene 慢 200-1000ms 根因之一. 现在
+      //   跟普通 GET/POST 一样走共享 client, 多次搜索间复用同 host 连接池,
+      //   首搜省 0.2-1s.
+      final client = ApiService.sharedHttpClient;
       final request = http.Request('GET', sseUri);
       request.headers.addAll({
         'Accept': 'text/event-stream',
@@ -227,17 +269,23 @@ class SSESearchService {
         'Cookie': cookies,
       });
 
-      _subscription = _client!.send(request).asStream().listen(
+      _subscription = client.send(request).asStream().listen(
         _handleSSEResponse,
         onError: (error) {
-          // 静默处理连接关闭错误，不显示给用户
+          // v2.6.31: 之前把 connection closed / clientexception / connection
+          //   terminated 全静默 return, SSE 连接失败时用户看不到任何错误,
+          //   只转 20s 超时. 现在: 如果没收到任何结果 (completedSources=0)
+          //   且没收到 complete 事件, 当成真错误报给用户. 如果已经收到了
+          //   结果/complete, 说明是正常关流, 静默忽略.
           final errorString = error.toString().toLowerCase();
-          if (errorString.contains('connection closed') ||
+          final isConnectionClose = errorString.contains('connection closed') ||
               errorString.contains('clientexception') ||
-              errorString.contains('connection terminated')) {
-            // 连接被关闭，这是正常情况，静默处理
+              errorString.contains('connection terminated');
+          if (isConnectionClose && _completedSources > 0) {
+            // 正常关流 (server close 后 Dart http 抛 ClientException), 有结果, 忽略
             return;
           }
+          // 真错误 (连接失败 / 0 结果时断开) — 报给用户
           _handleError(error);
         },
         onDone: _handleDone,
@@ -262,7 +310,19 @@ class SSESearchService {
   /// 处理 SSE 响应
   void _handleSSEResponse(http.StreamedResponse response) async {
     if (response.statusCode != 200) {
+      // v2.6.31: 非 200 时不仅报错, 还要发 complete 事件关掉 loading.
+      //   之前只加 error 不发 complete, search_screen 的 _isLoading
+      //   虽然 errorStream 会关, 但如果 errorStream 监听有 race condition
+      //   (progressStream 先到), 可能漏关. 双保险.
       _errorController?.add('SSE 连接失败: ${response.statusCode}');
+      _isConnected = false;
+      _progressController?.add(SearchProgress(
+        totalSources: _totalSources,
+        completedSources: _totalSources,
+        currentSource: null,
+        isComplete: true,
+        error: 'HTTP ${response.statusCode}',
+      ));
       return;
     }
 
@@ -344,6 +404,9 @@ class SSESearchService {
   void _handleSourceResultEvent(SearchSourceResultEvent event) {
     _completedSources++;
 
+    // v2.6.16: 记录该源的结果数 (后端 SSE 路径)
+    _sourceResultCounts[event.source] = event.results.length;
+
     // 只发送增量结果更新，避免全量重渲染
     if (event.results.isNotEmpty) {
       _incrementalResultsController?.add(List.from(event.results));
@@ -420,31 +483,50 @@ class SSESearchService {
     _isConnected = false;
     _timeoutTimer?.cancel();
     _timeoutTimer = null;
-    _client?.close();
-    _client = null;
+    // v2.6.26: 共享 ApiService._httpClient, 不调 client.close() (会关掉整
+    //   个共享 client 影响其他请求). 取消 subscription 让 SSE 流自然关闭.
   }
 
   /// 处理 SSE 错误
   void _handleError(error) {
     _isConnected = false;
 
-    // 检查是否是连接关闭错误，如果是则忽略
-    final errorString = error.toString().toLowerCase();
-    if (errorString.contains('connection closed') ||
-        errorString.contains('clientexception') ||
-        errorString.contains('connection terminated')) {
-      // 连接被关闭，这是正常情况，不显示错误
-      print('搜索连接已关闭: ${error.toString()}');
-      return;
-    }
+    // v2.6.31: 不再静默吞 connection closed — 如果走到这里说明是真错误
+    //   (onError 里已经过滤了正常关流的情况). 报给用户 + 发 complete 事件
+    //   关掉 loading, 否则 _isLoading 永远 true.
+    _errorController?.add('搜索失败: ${error.toString()}');
 
-    // 其他错误才显示给用户
-    _errorController?.add('SSE 错误: ${error.toString()}');
+    // v2.6.31: 发 complete 事件关掉 loading, 否则 search_screen 的
+    //   _isLoading 永远 true (只有 progress.isComplete 或 error 才关)
+    if (_completedSources < _totalSources) {
+      _completedSources = _totalSources;
+    }
+    _progressController?.add(SearchProgress(
+      totalSources: _totalSources,
+      completedSources: _completedSources,
+      currentSource: null,
+      isComplete: true,
+      error: error.toString(),
+    ));
   }
 
   /// 处理 SSE 关闭
   void _handleDone() {
     _isConnected = false;
+    // v2.6.31: 流关闭时如果还没发 complete 事件, 补发一个. 之前 _handleDone
+    //   只设 _isConnected=false, 不发 progress.isComplete, 如果 server 关流
+    //   但 complete 事件没被处理到 (网络中断 / server crash / Dart http 提前
+    //   关流), search_screen 的 _isLoading 永远 true, 用户卡在"搜索中...".
+    //   现在补发 complete, 确保 _isLoading 一定被关掉.
+    if (_totalSources > 0 && _completedSources < _totalSources) {
+      _completedSources = _totalSources;
+      _progressController?.add(SearchProgress(
+        totalSources: _totalSources,
+        completedSources: _completedSources,
+        currentSource: null,
+        isComplete: true,
+      ));
+    }
   }
 
   /// 停止搜索
@@ -455,8 +537,9 @@ class SSESearchService {
     _timeoutTimer?.cancel();
     _timeoutTimer = null;
 
-    _client?.close();
-    _client = null;
+    // v2.6.26: 共享 ApiService._httpClient, 不调 client.close() (会关掉
+    //   整个共享 client, 影响其他请求). 取消 subscription + 依赖 stream
+    //   onDone 自然结束即可.
 
     _isConnected = false;
     _currentQuery = null;

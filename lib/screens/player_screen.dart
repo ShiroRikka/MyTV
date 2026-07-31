@@ -13,6 +13,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:volume_controller/volume_controller.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:luna_tv/services/api_service.dart';
+import 'package:luna_tv/services/search_result_ranker.dart';
 import 'package:luna_tv/services/diary_service.dart';
 import 'package:luna_tv/services/douban_service.dart';
 import 'package:luna_tv/services/page_cache_service.dart';
@@ -200,10 +201,22 @@ class _PlayerScreenState extends State<PlayerScreen>
   Timer? _progressTimer;
   bool _firstRecordSaved = false;
   String? _lastSavedKey; // 避免重复保存同一条
+  // ★ v2.5.65: 高精度进度条更新定时器 (让白点跟实际位置同步)
+  Timer? _positionPollTimer;
 
   // 视频尺寸（用于判断横竖屏全屏）
   int _videoWidth = 0;
   int _videoHeight = 0;
+  // v2.6.41: 手势缩放 — 有的影片尺寸小, 双指捏拉放大填满屏幕.
+  //   _videoScale 当前缩放倍数 (1.0 = 原始, 4.0 = 4倍), 双击中央复位.
+  //   用 Listener (raw pointer) 而非 GestureDetector.onScale*, 避免跟
+  //   亮度/音量/快进快退的 VerticalDrag/HorizontalDrag 抢手势竞技场.
+  //   Listener 不参与竞技场, 只观察 pointer 事件, 2 指以上才计算缩放.
+  double _videoScale = 1.0;
+  double _baseScale = 1.0; // pinch 手势开始时的 scale
+  // pinch 指针追踪 — 记录当前按下的指针 id → 屏幕坐标
+  final Map<int, Offset> _pinchPointers = {};
+  double _pinchInitialDistance = 0.0; // pinch 开始时两指距离 (像素)
   // v2.2.0: 删 _videoParamsSub (libmpv streams.videoParams 替代)
   //   video size 从 backend.width/height 读 (在 positionStream listener 里同步)
 
@@ -275,8 +288,39 @@ class _PlayerScreenState extends State<PlayerScreen>
   double? _scrubbingValue;
   // v2.5.20: widget 正在销毁中, 阻止所有 stream listener 的副作用 (切集 / autoPlay / setState)
   bool _isDisposing = false;
-  // v2.5.20: 中间区域水平拖动的 seek 节流 (最多 100ms 调一次, 防止 ExoPlayer message queue 堆积)
+  // v2.5.20: 中间区域水平拖动的 seek 节流
+  //   v2.6.2 重写: 之前用 cancel+restart 100ms timer, 长滑动时每帧
+  //   (60-120 次/秒) 都 cancel 同一个 timer, timer 永远不 fire,
+  //   ExoPlayer 一帧都不 seek, 长滑动看起来"不动". 改用"first-fire
+  //   + skip"模式: 第一次立刻 fire, 之后 30ms 内 skip (不 restart),
+  //   30ms 后才允许再 fire. 保证 30ms 至少一次 seek, 用户能实时
+  //   看到进度跟随手指. 短滑动 (30ms 内) 一次 seek 到位, 跟之前一样.
   Timer? _centerSwipeSeekThrottle;
+  bool _centerSwipeThrottleBusy = false;
+  // v2.6.2: 滑动起始 position + 累计 delta, 用绝对位置算 newMs,
+  //   不依赖 _currentPosition (position stream 会用旧值覆盖).
+  //   长滑动时 position stream 跟用户的预期对不上, 用绝对定位就
+  //   不会有"松手后跳回去"的问题.
+  Duration? _swipeStartPosition;
+  double _swipeCumulativeDx = 0;
+  // v2.6.2: 滑动中锁 — position stream 和 100ms 轮询在用户拖动期间
+  //   不能覆盖 _currentPosition, 否则进度条会"来回调" (stream 用
+  //   实际播放位置覆盖了用户拖到的位置, 下一次 update 又从实际位置
+  //   开始算, 累计漂移). end 时解锁.
+  bool _isSwiping = false;
+  // 底部栏水平拖动 (拖进度条) — 起始 progress value + 底部栏宽度, 用来 delta → value 换算
+  //   v2.5.86 新增. 中间区域水平拖动是按"整屏 60s/半屏"算, 底部栏只占屏幕
+  //   60%~85% 宽, 用底部栏宽度算才准. 拖动过程中更新 _scrubbingValue
+  //   (Slider 同步), 节流 seek, end 时 flush.
+  double? _bottomBarDragStartValue;
+  double? _bottomBarDragStartWidth;
+  Timer? _bottomBarSwipeThrottle;
+  // v2.5.90: seek guard 已移除 — 它阻止 position stream 和 100ms 轮询更新
+  //   _currentPosition, 导致进度条不动. 回到 v2.5.86 行为: seek 后立即设
+  //   _currentPosition 为目标值, position stream 正常更新 (即使短暂跳回
+  //   旧位置, ExoPlayer seek 完成后会恢复).
+  // int? _seekGuardMs;
+  // Timer? _seekGuardTimer;
   // v2.5.20: playingStream / completedStream / bufferingStream 的 subscription 字段
   //   之前 v2.3.14 ~ v2.5.19 这 3 个 listener 没存字段, dispose 时没法 cancel,
   //   切集 / 退出时残留 listener 触发业务逻辑 (_autoPlayNextEpisode) 跟新 episode 打架
@@ -342,21 +386,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     // v1.0.50: 监听 AppLifecycleState, 进后台 (home 键) 时立即保存一次,
     // 避免 10s progressTimer 还没触发就被上滑/杀进程, 进度丢
     WidgetsBinding.instance.addObserver(this);
-    // v1.0.54: 关闭系统音量弹窗, 自己接管音量 UI (右侧指示器)
-    // volume_controller 2.0.2+ Android / 2.0.6+ iOS 都支持 showSystemUI 静态字段
-    // 默认 true, 每次 setVolume 都会弹系统音量窗口遮挡视频
-    // mobile_player_controls.dart:110 同模板, 但 player_screen 是另一个 widget
-    // 自己的 _onVolumeSwipeUpdate → setVolume 路径没人设过这个字段, 所以会弹
-    VolumeController.instance.showSystemUI = false;
-    // v2.5.18: 物理音量键拦截 — 物理 KEYCODE_VOLUME_UP/DOWN/MUTE 走
-    //   Activity.dispatchKeyEvent → AudioManager.adjustStreamVolume (默认
-    //   FLAG_SHOW_UI) 弹系统音量条, **绕过 volume_controller**. 必须在
-    //   Kotlin 层 (VolumeKeyChannel) 拦截, 转发到 Dart 端, Dart 端再走
-    //   volume_controller.instance.setVolume (showSystemUI=false 不弹).
-    //   initState 注册 setEnabled(true) 开启拦截, dispose 关掉, 让用户离
-    //   开播放页时物理音量键走系统默认 (弹音量条是合理的系统反馈).
+    // v2.6.42: 音量拦截只在 playing 阶段开启, detail 阶段保留系统音量弹窗.
+    //   initState 只注册 MethodCallHandler (接收 native 回调), 不调
+    //   setEnabled(true) — detail 页物理音量键走系统默认 (弹音量条是合理
+    //   的系统反馈). 进入 playing 阶段时 _enableVolumeInterception() 开,
+    //   退出回 detail 时 _disableVolumeInterception() 关. dispose 兜底清.
     _volumeKeyChannel.setMethodCallHandler(_onVolumeKeyCall);
-    unawaited(_volumeKeyChannel.invokeMethod<bool>('setEnabled', {'enabled': true}));
+    // ★ v2.5.65: 进入播放页时解锁所有方向 (让设备自由旋转, 平板/手机都友好)
+    unawaited(SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]));
     // 注意: volume_controller v2.x / screen_brightness v0.2.x 都是单例 .instance API
     () async {
       try {
@@ -429,7 +471,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     _positionSub = _player!.positionStream.listen((pos) {
       if (_isDisposing) return;
       if (!mounted) return;
+      // v2.6.2: 滑动中不更新 _currentPosition, 否则 position stream
+      //   用"实际播放位置"(旧值)覆盖了用户拖到的位置, 进度条"来回调"
+      if (_isSwiping) return;
       if (_scrubbingValue == null) {
+        // v2.5.90: seek guard 已移除, position stream 直接更新 _currentPosition
         _currentPosition = pos;
         if (pos > Duration.zero) {
           _lastKnownPosition = pos;
@@ -448,6 +494,22 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
         _updateSkipButtonVisibility();
         _maybeAutoPlayNext();
+      }
+    });
+    // ★ v2.5.65: 高精度进度条轮询 (100ms 一次, 让白点跟实际位置同步)
+    _positionPollTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (_isDisposing || !mounted || _scrubbingValue != null) return;
+      // v2.6.2: 滑动中不更新, 同 position stream 处理
+      if (_isSwiping) return;
+      // v2.5.90: 用 _isPlaying 代替 c.value.isPlaying,
+      //   后者在某些情况下跟实际播放状态不一致
+      if (!_isPlaying) return;
+      final c = _player?.controller;
+      if (c == null) return;
+      final newPos = c.value.position;
+      // v2.5.90: seek guard 已移除, 100ms 轮询直接更新
+      if (newPos != _currentPosition) {
+        setState(() => _currentPosition = newPos);
       }
     });
     _durationSub = _player!.durationStream.listen((dur) {
@@ -503,9 +565,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     // 进程上滑杀时 OS 给 grace period, 大概率能完成网络写盘
     unawaited(_disposeAndSave());
     _progressTimer?.cancel();
+    _positionPollTimer?.cancel(); // ★ v2.5.65
     _hideControlsTimer?.cancel();
     _seekHintTimer?.cancel();
     _centerSwipeSeekThrottle?.cancel();
+    _bottomBarSwipeThrottle?.cancel();
+    // v2.5.90: seek guard 已移除
+    // _clearSeekGuard();
     _positionSub?.cancel();
     _durationSub?.cancel();
     // v2.5.20: 之前 dispose 漏 cancel 这 3 个 listener, 切集 / 退出时残留
@@ -518,20 +584,23 @@ class _PlayerScreenState extends State<PlayerScreen>
     _episodesPageController.dispose();
     _pageControllerNotifier.dispose();
     WidgetsBinding.instance.removeObserver(this);
-    // 恢复系统UI,方向交由系统控制
+    // 恢复系统UI, 解锁所有方向 (让系统自由旋转)
     SystemChrome.setEnabledSystemUIMode(
       SystemUiMode.manual,
       overlays: SystemUiOverlay.values,
     );
-    // v1.0.54: 还原 volume_controller 的 showSystemUI 标志
-    // initState 设了 false 屏蔽系统音量弹窗, dispose 要还原成 true
-    // 跟 mobile_player_controls.dart:160 同模板, 否则其他场景 (detail 页面
-    // 之类) 再调 setVolume 也不会弹系统 UI
+    // ★ 解锁方向: 退出播放器后不再强制竖屏, 让系统传感器决定
+    unawaited(SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]));
+    // v2.6.42: dispose 兜底清理音量拦截 — 正常流程 playing→detail 已经
+    //   _disableVolumeInterception() 了, 但 widget 异常销毁 (e.g. build
+    //   抛错) 可能跳过. 这里再清一次: showSystemUI=true + setEnabled(false)
+    //   + 清 handler, 确保离开播放页后系统音量弹窗恢复正常.
     VolumeController.instance.showSystemUI = true;
-    // v2.5.18: 关物理音量键拦截, 让用户离开播放页时物理音量键走系统
-    //   默认 (弹系统音量条). 同时清 MethodCallHandler, 避免下次 push
-    //   播放页重复监听. setEnabled(false) 是 fire-and-forget — dispose
-    //   路径不能 await, 走 unawaited 包一下让 lint 不告警.
     _volumeKeyChannel.setMethodCallHandler(null);
     unawaited(_volumeKeyChannel.invokeMethod<bool>('setEnabled', {'enabled': false}));
     // v2.3.0: 视频加速链路整个删了, 关本地代理 / 状态指示器 / 速度采样 timer
@@ -562,6 +631,25 @@ class _PlayerScreenState extends State<PlayerScreen>
             '[KeepScreenOn] $enable failed: $e');
       }
     });
+  }
+
+  /// v2.6.42: 开启音量拦截 — 进入 playing 阶段调.
+  ///   showSystemUI=false 屏蔽系统音量弹窗, setEnabled(true) 让 Kotlin
+  ///   端拦截物理音量键转发到 Dart (handler 已在 initState 注册).
+  ///   resumed (从后台回来) 也调, 跟 initState 一致.
+  void _enableVolumeInterception() {
+    VolumeController.instance.showSystemUI = false;
+    unawaited(
+        _volumeKeyChannel.invokeMethod<bool>('setEnabled', {'enabled': true}));
+  }
+
+  /// v2.6.42: 关闭音量拦截 — 退出 playing 阶段回 detail 调.
+  ///   showSystemUI=true 恢复系统音量弹窗, setEnabled(false) 让物理音量
+  ///   键走系统默认. 不清 handler (dispose 才清).
+  void _disableVolumeInterception() {
+    VolumeController.instance.showSystemUI = true;
+    unawaited(
+        _volumeKeyChannel.invokeMethod<bool>('setEnabled', {'enabled': false}));
   }
 
   /// 退出时串行: save → stop → dispose
@@ -620,6 +708,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden) {
+      // ★ v2.6.44: 熄屏/锁屏时暂停播放
+      if (_isPlaying) {
+        _player?.pause();
+      }
       // v1.0.65: 先等 _currentPosition > 0 再 save, 避免刚 play 就 home
       // 键时存 0 覆盖之前的真进度. 仍然 0 就跳过 (10s 定时器下次兜底)
       _waitForValidPosition().then((_) {
@@ -629,6 +721,17 @@ class _PlayerScreenState extends State<PlayerScreen>
           unawaited(_saveCurrentProgress(force: true));
         }
       });
+    } else if (state == AppLifecycleState.resumed) {
+      // v2.6.42: 从后台回来时重新注册音量拦截 — Android 后台/前台切换
+      //   时 Flutter 引擎可能重连, 导致 MethodChannel handler 丢失 +
+      //   VolumeController.showSystemUI 被 native 层重置. 症状: 切后台
+      //   再回来, 物理音量键 Kotlin 端仍拦截 (enabled=true 没丢), 但
+      //   invokeMethod 到不了 Dart (handler 丢了), 系统音量条 + 自定义
+      //   音量指示器都不弹. 偶发 (短时间切后台 channel 没断就没事).
+      //   修法: resumed 时重新 setMethodCallHandler + _enableVolumeInterception()
+      //   (showSystemUI=false + setEnabled(true)), 跟进入 playing 阶段一致.
+      _volumeKeyChannel.setMethodCallHandler(_onVolumeKeyCall);
+      _enableVolumeInterception();
     }
   }
 
@@ -1139,7 +1242,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  /// 退出全屏：恢复系统UI + 解除方向锁定
+  /// 退出全屏：恢复系统UI + 解锁方向 (让系统自由旋转)
   Future<void> _onExitFullscreen() async {
     setState(() => _isFullscreen = false);
     // 恢复系统UI
@@ -1147,8 +1250,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       SystemUiMode.manual,
       overlays: SystemUiOverlay.values,
     );
-    // 解除方向锁定,让系统方向(横屏/竖屏)由系统决定
-    await SystemChrome.setPreferredOrientations(const [
+    // ★ 解锁所有方向, 让系统传感器决定 (不再强制竖屏)
+    await SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
       DeviceOrientation.portraitDown,
       DeviceOrientation.landscapeLeft,
@@ -1775,43 +1878,177 @@ class _PlayerScreenState extends State<PlayerScreen>
     _toggleControls();
   }
 
-  // v2.5.20: 水平拖动开始 — 取消未触发的 seek 节流, 防止 stale timer 在 drag 中
-  //   突然 fire 把当前位置 seek 走
+  // v2.5.20: 水平拖动开始 — 记录起始 position + 累计 delta, 取消未触发的 seek
+  //   节流, 防止 stale timer 在 drag 中突然 fire 把当前位置 seek 走.
+  //   v2.6.2: 用 _swipeStartPosition + _swipeCumulativeDx 做绝对定位, 不依赖
+  //   _currentPosition (position stream 会用旧值覆盖, 长滑动会"来回调").
+  //   加 _isSwiping 锁, position stream 和 100ms 轮询期间不能覆盖 _currentPosition.
   void _onCenterSwipeStart(DragStartDetails details) {
     if (_isDisposing) return;
     _centerSwipeSeekThrottle?.cancel();
     _centerSwipeSeekThrottle = null;
+    _centerSwipeThrottleBusy = false;
+    _swipeStartPosition = _currentPosition;
+    _swipeCumulativeDx = 0;
+    _isSwiping = true;
   }
 
+  // v2.5.90: _setSeekGuard / _clearSeekGuard 已移除
+  //   seek guard 阻止 position stream 和 100ms 轮询更新 _currentPosition,
+  //   导致进度条不动. seek 后立即设 _currentPosition 为目标值即可.
+
   // v2.5.20: 水平拖动结束 — flush pending seek 节流, 确保最后 drag 位置 seek 到
-  //   player 上 (drag 中节流可能让最后一次位置还没 seek, 玩家还在旧位置)
+  //   player 上. v2.6.2: 不再依赖节流 timer (可能还没 fire), 直接用
+  //   _currentPosition 调一次 seek. 同步清掉 _swipeStartPosition 和
+  //   _isSwiping 锁 (让 position stream 接管).
   void _onCenterSwipeEnd(DragEndDetails details) {
     if (_isDisposing) return;
     _centerSwipeSeekThrottle?.cancel();
     _centerSwipeSeekThrottle = null;
-    unawaited(_player!.seek(_currentPosition));
+    _centerSwipeThrottleBusy = false;
+    final finalPos = _currentPosition;
+    _swipeStartPosition = null;
+    _swipeCumulativeDx = 0;
+    _isSwiping = false;
+    // v2.5.90: seek guard 已移除
+    unawaited(_player!.seek(finalPos));
   }
 
-  // 中间区域水平拖动 = 快进快退
-  // v2.5.20: 加 100ms 节流. 之前每帧 DragUpdateDetails (60-120 次/秒) 都直接
-  //   _player!.seek(), ExoPlayer message queue 堆积多个 seek, 完成顺序不固定,
-  //   导致 position stream 发射的 position 乱跳 (进度条来回乱跳), ExoPlayer
-  //   进入内部 state 不一致 (再点暂停/退出 audio 还在播).
-  //   现在 100ms 最多调一次 seek, drag 过程中只更新 _currentPosition 跟
-  //   _seekHintText (UI 反馈), drag 结束时 _onCenterSwipeEnd 调一次最终 seek.
+  // v2.5.86: 底部栏水平拖动开始 — 记录起始 value (当前进度) + 底部栏宽度,
+  //   delta.dx / 底部栏宽度 = 进度变化. 顺便取消自动隐藏控件计时器,
+  //   防止拖到一半控件消失了.
+  void _onBottomBarSwipeStart(DragStartDetails details) {
+    if (_isDisposing) return;
+    if (_currentDuration.inMilliseconds <= 0) return;
+    _bottomBarSwipeThrottle?.cancel();
+    _bottomBarSwipeThrottle = null;
+    _hideControlsTimer?.cancel();
+    // 当前进度: 优先用 _scrubbingValue (用户已经在拖 Slider), 否则用 position
+    final dur = _currentDuration.inMilliseconds.toDouble();
+    final startVal = _scrubbingValue ??
+        (_currentPosition.inMilliseconds / dur).clamp(0.0, 1.0);
+    _bottomBarDragStartValue = startVal;
+    // 底部栏宽度 = LayoutBuilder 可以拿到, 但我们已经在 buildLunaBottomBar
+    //   算过 maxW, 这里重新算 (mediaQuery 一致). 用 estimatedContainerWidth:
+    //   ConstrainedBox(maxWidth: maxW), 实际宽度 = min(maxW, 屏幕宽 - 24).
+    final screenW = MediaQuery.of(context).size.width;
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+    final maxW = isLandscape ? screenW * 0.6 : screenW * 0.85;
+    _bottomBarDragStartWidth = (screenW - 24).clamp(0.0, maxW);
+    // 跟中间 swipe 一样保持控件显示
+    setState(() {
+      _isControlsVisible = true;
+      _scrubbingValue = startVal; // 让 Slider 立即响应拖动
+    });
+  }
+
+  // v2.5.86: 底部栏水平拖动更新 — delta.dx / 底部栏宽度 = 进度变化.
+  //   拖动过程中更新 _scrubbingValue (Slider 同步显示), 跟 _onCenterSwipeUpdate
+  //   一样 100ms 节流 seek, 防止 ExoPlayer message queue 堆积.
+  void _onBottomBarSwipeUpdate(DragUpdateDetails details) {
+    if (_isDisposing) return;
+    final startVal = _bottomBarDragStartValue;
+    final width = _bottomBarDragStartWidth;
+    final dur = _currentDuration.inMilliseconds;
+    if (startVal == null || width == null || width <= 0 || dur <= 0) return;
+    // 累积 delta (Listener/DragUpdateDetails 的 delta 是单帧增量, 累加防丢)
+    // 这里没有累积变量, 用 _scrubbingValue 当前值当锚点:
+    //   newVal = startVal + (累计 dx) / width
+    // DragUpdateDetails 的 delta.dx 是单帧, 直接累加到 _scrubbingValue:
+    final current = _scrubbingValue ?? startVal;
+    final newVal = (current + details.delta.dx / width).clamp(0.0, 1.0);
+    setState(() {
+      _scrubbingValue = newVal;
+    });
+    // 100ms 节流 seek (跟 _onCenterSwipeUpdate 一致, 避免 ExoPlayer 乱跳)
+    _bottomBarSwipeThrottle?.cancel();
+    _bottomBarSwipeThrottle = Timer(const Duration(milliseconds: 100), () {
+      if (_isDisposing) return;
+      final newMs = (newVal * dur).toInt();
+      unawaited(_player!.seek(Duration(milliseconds: newMs)));
+      // 同步 _currentPosition, 中间 swipe 节流也是这么做的
+      if (mounted) {
+        setState(() {
+          _currentPosition = Duration(milliseconds: newMs);
+        });
+      }
+    });
+  }
+
+  // v2.5.86: 底部栏水平拖动结束 — flush pending seek, 清理 state.
+  //   跟中间 swipe 不同: 中间 swipe 结束后保持 _currentPosition 让 Slider
+  //   显示; 这里 _scrubbingValue 维持, 让 Slider 停在用户拖到的位置,
+  //   然后 _onScrubEnd 风格的清尾.
+  void _onBottomBarSwipeEnd(DragEndDetails details) {
+    if (_isDisposing) return;
+    _bottomBarSwipeThrottle?.cancel();
+    _bottomBarSwipeThrottle = null;
+    final v = _bottomBarDragStartValue;
+    final dur = _currentDuration.inMilliseconds;
+    _bottomBarDragStartValue = null;
+    _bottomBarDragStartWidth = null;
+    if (v == null || dur <= 0) {
+      // v2.5.90: 即使提前 return 也要清除 _scrubbingValue,
+      //   否则 position stream 和 100ms 轮询永远不更新 _currentPosition
+      if (_scrubbingValue != null) {
+        setState(() => _scrubbingValue = null);
+      }
+      return;
+    }
+    // 用当前 _scrubbingValue 调 seek (跟 _onScrubEnd 一样, 确保 final 位置 seek)
+    final finalVal = (_scrubbingValue ?? v).clamp(0.0, 1.0);
+    final newMs = (finalVal * dur).toInt();
+    unawaited(_player!.seek(Duration(milliseconds: newMs)));
+    // v2.5.90: seek guard 已移除
+    setState(() {
+      _currentPosition = Duration(milliseconds: newMs);
+      _scrubbingValue = null; // 跟 _onScrubEnd 一样, 让 Slider 回到 _currentPosition 驱动
+    });
+    if (_isPlaying) _scheduleHideControls();
+  }
+
+  // v2.6.2: 主流方案 — 整屏滑动 = 60s, 半屏 = 30s. 跟 YouTube/爱奇艺/B站
+  //   体验一致. 之前 v2.6.1 改成 300s/屏太激进, 现在 60s/屏, 横滑小段
+  //   距离调几秒, 整屏滑到底调一分钟, 体感自然.
+  //
+  // 关键修复 (v2.6.2): 节流策略从 cancel+restart 改成 first-fire+skip.
+  //   - 旧: 100ms timer, 每次 update 都 cancel + restart, 长滑动时 timer
+  //     永远不 fire, ExoPlayer 一帧都不 seek, 用户看到"长滑动不动".
+  //   - 新: 30ms "first-fire+skip" — 第一次 fire 立即 seek (短滑动
+  //     一次到位), 之后 30ms 内 skip (不 restart), 30ms 后才允许再
+  //     fire. 保证 30ms 至少一次 seek, 用户能实时看到进度跟随手指.
+  //
+  // 绝对定位 (v2.6.2): 用 _swipeStartPosition + 累计 dx 算 newMs,
+  //   不再 _currentPosition + deltaMs. 因为 position stream 会用
+  //   "实际播放位置" (旧值) 覆盖 _currentPosition, 导致长滑动时
+  //   newMs 累计漂移, 松手后位置"来回调".
   void _onCenterSwipeUpdate(DragUpdateDetails details) {
     if (_isDisposing) return;
+    final startPos = _swipeStartPosition;
+    if (startPos == null) return; // 不是 start 后第一次 update, 防御
     final screenWidth = MediaQuery.of(context).size.width;
-    // 整屏 1:1 映射, 60s/半屏
-    final deltaMs = (details.delta.dx / screenWidth * 60000).round();
-    final newMs = (_currentPosition.inMilliseconds + deltaMs)
+    if (screenWidth <= 0) return;
+    // 整屏滑动 = 60s, 半屏 = 30s (跟 YouTube/爱奇艺 一致)
+    _swipeCumulativeDx += details.delta.dx;
+    final deltaMs = (_swipeCumulativeDx / screenWidth * 60000).round();
+    final newMs = (startPos.inMilliseconds + deltaMs)
         .clamp(0, _currentDuration.inMilliseconds)
         .toInt();
     final isForward = deltaMs >= 0;
+    // 1) UI 立即更新 — 进度条 / 时间标签 / 提示文字跟手 (无延迟)
     setState(() {
       _currentPosition = Duration(milliseconds: newMs);
-      _seekHintText =
-          isForward ? '快进${(deltaMs / 1000).round()}s' : '快退${(-deltaMs / 1000).round()}s';
+      // v2.6.3 改: 之前 (deltaMs / 1000).round() 把 < 500ms 都吃成 0,
+      //   短位移 (1-2px) 提示"快进0s"但实际已经动. 改 1 位小数:
+      //   < 1000ms 显示 "0.Xs", >= 1000ms 显示 "Xs" (去尾 .0)
+      //   短滑动立即看到提示, 长滑动整数位也不拖泥带水.
+      final absMs = deltaMs.abs();
+      final absSec = absMs / 1000.0;
+      final secStr = absSec == absSec.truncate()
+          ? absSec.toInt().toString()
+          : absSec.toStringAsFixed(1);
+      _seekHintText = isForward ? '快进${secStr}s' : '快退${secStr}s';
     });
     _seekHintTimer?.cancel();
     _seekHintTimer = Timer(const Duration(seconds: 1), () {
@@ -1819,12 +2056,105 @@ class _PlayerScreenState extends State<PlayerScreen>
         setState(() => _seekHintText = null);
       }
     });
-    // 100ms 节流: 同一个 timer 多次 cancel + restart, 只在最后一次 100ms 后调 seek
-    _centerSwipeSeekThrottle?.cancel();
-    _centerSwipeSeekThrottle = Timer(const Duration(milliseconds: 100), () {
-      if (_isDisposing) return;
-      unawaited(_player!.seek(Duration(milliseconds: newMs)));
+    // 2) 节流 seek — first-fire+skip 30ms. 第一次 fire, 之后 30ms 内
+    //    skip, 30ms 后才允许再 fire.
+    if (_centerSwipeThrottleBusy) return;
+    _centerSwipeThrottleBusy = true;
+    unawaited(_player!.seek(Duration(milliseconds: newMs)));
+    _centerSwipeSeekThrottle = Timer(const Duration(milliseconds: 30), () {
+      _centerSwipeThrottleBusy = false;
     });
+  }
+
+  // ==================== v2.6.2: 双击快进/快退/播放 全屏监听 ====================
+  // 主流方案 (YouTube/爱奇艺/B站) 双击行为:
+  //   - 双击左半屏 → 快退 10s
+  //   - 双击右半屏 → 快进 10s
+  //   - 双击中央 1/3 → 播放/暂停
+  // 用 globalPosition (屏幕绝对坐标) 判断落点, 不依赖 onDoubleTapDown
+  //   localPosition (相对 GestureDetector 自身, 这里就是相对全屏, 因为
+  //   Positioned.fill 撑满整个播放器). 中间 1/3 区域: x in [W/3, 2W/3].
+  // 双击第二下 (onDoubleTap) 才真正执行 seek/playPause, 第一下
+  //   (onDoubleTapDown) 只记录落点, 防止误触 (用户可能只是快单击).
+  // _pendingDoubleTapSide: -1=左, 0=中, 1=右, null=无 pending.
+  int? _pendingDoubleTapSide;
+
+  void _onGlobalDoubleTapDown(TapDownDetails details) {
+    if (_isDisposing) return;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final x = details.localPosition.dx;
+    int side;
+    if (x < screenWidth / 3) {
+      side = -1; // 左半 (快退)
+    } else if (x > screenWidth * 2 / 3) {
+      side = 1; // 右半 (快进)
+    } else {
+      side = 0; // 中间 (播放/暂停)
+    }
+    _pendingDoubleTapSide = side;
+  }
+
+  void _onGlobalDoubleTap() {
+    if (_isDisposing) return;
+    final side = _pendingDoubleTapSide;
+    _pendingDoubleTapSide = null;
+    if (side == null) return;
+    if (side == 0) {
+      // v2.6.41: 缩放状态下双击中央 = 复位缩放, 否则 = 播放/暂停
+      if (_videoScale > 1.01) {
+        setState(() => _videoScale = 1.0);
+      } else {
+        _togglePlayPause();
+      }
+    } else {
+      // 左右双击 = ±10s (跟主流方案一致, 替代原 ±30s 按钮)
+      _seekBySeconds(side * 10, side > 0 ? '快进10s' : '快退10s');
+    }
+  }
+
+  // ==================== 双指缩放 (v2.6.41) ====================
+
+  /// pointer down — 记录指针, 2 指时算初始距离
+  void _onPinchPointerDown(PointerDownEvent event) {
+    _pinchPointers[event.pointer] = event.position;
+    if (_pinchPointers.length == 2) {
+      final pts = _pinchPointers.values.toList();
+      _pinchInitialDistance = (pts[0] - pts[1]).distance;
+      _baseScale = _videoScale;
+    }
+  }
+
+  /// pointer move — 2 指以上时按距离比更新缩放
+  void _onPinchPointerMove(PointerMoveEvent event) {
+    if (!_pinchPointers.containsKey(event.pointer)) return;
+    _pinchPointers[event.pointer] = event.position;
+    if (_pinchPointers.length >= 2 && _pinchInitialDistance > 0) {
+      final pts = _pinchPointers.values.toList();
+      final currentDist = (pts[0] - pts[1]).distance;
+      if (currentDist > 0) {
+        final newScale =
+            (_baseScale * currentDist / _pinchInitialDistance).clamp(1.0, 4.0);
+        if ((newScale - _videoScale).abs() > 0.01) {
+          setState(() => _videoScale = newScale);
+        }
+      }
+    }
+  }
+
+  /// pointer up — 移除指针, 不足 2 指时结束 pinch
+  void _onPinchPointerUp(PointerUpEvent event) {
+    _pinchPointers.remove(event.pointer);
+    if (_pinchPointers.length < 2) {
+      _pinchInitialDistance = 0.0;
+    }
+  }
+
+  /// pointer cancel — 系统取消触摸 (如来电), 清空所有指针
+  void _onPinchPointerCancel(PointerCancelEvent event) {
+    _pinchPointers.remove(event.pointer);
+    if (_pinchPointers.length < 2) {
+      _pinchInitialDistance = 0.0;
+    }
   }
 
   // ==================== 进度条拖动 ====================
@@ -1849,6 +2179,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (dur > 0) {
       final pos = (value.clamp(0.0, 1.0)) * dur;
       _player!.seek(Duration(milliseconds: pos.toInt()));
+      // v2.5.90: seek guard 已移除
     }
     setState(() {
       _scrubbingValue = null;
@@ -1951,12 +2282,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  /// 启动进度上报定时器(每 10 秒)
+  /// v2.5.88: 定时器已删除. 所有退出路径都保存进度:
+  ///   返回键/返回箭头/切后台/切集/DLNA投屏/dispose兜底
+  ///   不再需要定时器轮询写入, 减少网络请求.
   void _startProgressTimer() {
     _progressTimer?.cancel();
-    _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      _saveCurrentProgress();
-    });
+    // 不再启动定时写入, 退出时统一保存
   }
 
   /// 启动后云记忆里查到的 episode, 准备在 _playEpisode 时 seek 过去
@@ -1989,6 +2320,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     } catch (_) {}
     try {
       await sub.cancel();
+    } catch (_) {}
+  }
+
+  // ★ v2.6.45: 返回键后台异步清理 (不阻塞 UI 响应)
+  Future<void> _cleanupOnBack() async {
+    try {
+      // 等有效位置 (最多 500ms, 比之前 800ms 更快)
+      await _waitForValidPosition(timeout: const Duration(milliseconds: 500));
+      if (_currentPosition > Duration.zero) {
+        await _saveCurrentProgress(force: true);
+      }
+      await _player?.stop();
+      await _onExitFullscreen();
     } catch (_) {}
   }
 
@@ -2034,39 +2378,89 @@ class _PlayerScreenState extends State<PlayerScreen>
         '[History] _pendingResumeAt: ${_pendingResumeAt?.inMilliseconds ?? "null"}ms');
 
     try {
-      final results = await ApiService.fetchSourcesData(title);
+      // v2.5.82: 照 web play/page.tsx 逻辑:
+      //   1) /api/search 已经在后端并行搜了所有 18 个源, 返回的就是各源命中结果
+      //   2) 客户端只做一件事: 按 source 聚合, 同源保留集数最多的一条
+      //   3) 不做标题相似度过滤 (web 也不做, 资源站标题千差万别,
+      //      相似度阈值会把大部分源砍掉, 导致 app 源数远少于 web)
+      //   4) /api/search/resources 拉全源列表, 没命中的源补占位
+      //   最终展示数 = resources 列表长度 (18 个)
+      final resultsFut = ApiService.fetchSourcesData(title);
+      final resourcesFut = ApiService.getSearchResources();
+      final results = await resultsFut;
+      final resources = await resourcesFut;
       if (!mounted) return;
-      if (results.isEmpty) {
-        setState(() {
-          _sourceResults = [];
-          _sourcesLoading = false;
-          _error = '没有找到可用的播放源';
-        });
-        return;
-      }
 
-      // (按 source key 去重已经在 ApiService.fetchSourcesData 里做了,
-      // 这里不用再 dedupe)
-      
-      // 过滤不相关的源：标题相似度 + 年份匹配
-      final searchYear = widget.videoInfo.year;
-      final filteredResults = _filterRelevantSources(title, searchYear, results);
+      // v2.6.14: 播放详情页用「联合去重」 — title substring + year 严格匹配.
+      //   跟搜索页 (search_screen) 不同: 搜索页用子序列匹配 (宽松, 让
+      //   「凡人修仙传」也能命中「凡人修仙传之风起」, 因为用户可能想看
+      //   子系列), 播放详情页必须精确命中用户点的那部剧.
+      //
+      //   联合去重 = 2 个条件 AND:
+      //   1. title 归一化后 substring 包含 query (去符号 + 子序列 -> 严格 substring)
+      //   2. year 完全一致 (排除不同年份版本, e.g. 凡人修仙传 2023 vs 2024)
+      //   搜「凡人修仙传」现在只会匹配:
+      //   - 「凡人修仙传」24集 (真目标)
+      //   - 「凡人修仙传 新版」24集 (同剧不同版本, OK)
+      //   - 「凡人修仙传 第2季」 (同剧, OK)
+      //   不会匹配:
+      //   - 「凡人修仙传之风起」 (不同剧, 虽 title 含「凡人修仙传」但 substring 不连续)
+      //   - 「凡人修仙传」2023 (年份不对)
+      final filteredResults = results
+          .where((r) => SearchResultRanker.resultMatchesQueryStrict(
+                r,
+                title,
+                widget.videoInfo.year,
+              ))
+          .toList();
       DiaryService.add(
-          '[SourceFilter] 原始源数: ${results.length}, 过滤后: ${filteredResults.length}, '
-          '标题: "$title", 年份: "$searchYear"');
-      
+          '[SourceFilter] 联合去重过滤: ${results.length} → ${filteredResults.length} '
+          '(过滤掉 ${results.length - filteredResults.length} 个不相关剧集, query="$title" year="${widget.videoInfo.year}")');
+
+      // 按 source 聚合: 同源保留集数最多的一条 (跟 web 一致)
+      // 注: fetchSourcesData 已按 title_year_source 去重, 同一 source 的多个
+      // 标题版本 (如 "凡人修仙传" + "凡人修仙传 新版") 也只留集数最多的
+      final bySource = <String, SearchResult>{};
+      for (final r in filteredResults) {
+        final k = r.source;
+        if (k.isEmpty) continue;
+        final prev = bySource[k];
+        if (prev == null || r.episodes.length > prev.episodes.length) {
+          bySource[k] = r;
+        }
+      }
+      DiaryService.add(
+          '[SourceFilter] /api/search 命中: ${results.length}, 按源聚合后: ${bySource.length}, '
+          '全源数: ${resources.length}, 标题: "$title"');
+
+      // v2.5.82→: 只展示有真实结果的源, 过滤 0 集 (避免 UI 显示 "共0集" / "待测")
+      //   之前占位 "没命中的源也展示" 的逻辑导致 18 源全显示, 但 16 个是
+      //   0 集占位, 用户体验差. 现在按 bySource 顺序直接展示, 没命中的源
+      //   自然就不会出现, 跟 web 列表页行为一致.
+      final merged = <SearchResult>[];
+      for (final entry in bySource.entries) {
+        if (entry.value.episodes.isEmpty) continue;
+        merged.add(entry.value);
+      }
+      DiaryService.add(
+          '[SourceFilter] 合并后展示源数: ${merged.length} (0 集过滤: ${bySource.length - merged.length})');
+
       setState(() {
-        _sourceResults = filteredResults;
+        _sourceResults = merged;
         _sourcesLoading = false;
+        if (merged.isEmpty) {
+          _error = '没有源匹配 "$title"';
+        }
       });
 
       // 选源优先级:
       // 1. 云记忆里有这个 video 的源 (resume.source)
       // 2. 入口传过来的 preferredSource
-      // 3. 第一个
-      SearchResult toSelect = filteredResults.first;
+      // 3. 第一个 (从 bySource 取, 不用占位)
+      if (bySource.isEmpty) return;
+      SearchResult toSelect = bySource.values.first;
       if (resumeSourceKey.isNotEmpty) {
-        for (final r in results) {
+        for (final r in bySource.values) {
           if (r.source == resumeSourceKey) {
             toSelect = r;
             break;
@@ -2074,7 +2468,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
       }
       if (widget.preferredSource != null && widget.preferredSource!.isNotEmpty) {
-        for (final r in results) {
+        for (final r in bySource.values) {
           if (r.source == widget.preferredSource) {
             toSelect = r;
             break;
@@ -2246,6 +2640,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   都不跳过了").
     _adResetDetected = false;
     _lastPosForAdDetect = -1;
+    // v2.6.41: 切集时重置缩放 — 上一集放大了, 新一集不该沿用.
+    _videoScale = 1.0;
+    _pinchPointers.clear();
+    _pinchInitialDistance = 0.0;
   }
 
   /// 后台测速所有源：并发用 M3U8Service 测速, 并按综合分从高到低排序源列表
@@ -2986,6 +3384,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   不跳 (用户反馈). 新一集可能没广告, 必须重新检测.
     _adResetDetected = false;
     _lastPosForAdDetect = -1;
+    // v2.6.41: 切集时重置缩放 — 上一集放大了, 新一集不该沿用.
+    _videoScale = 1.0;
+    _pinchPointers.clear();
+    _pinchInitialDistance = 0.0;
 
     // 记住这次要 seek 到的位置, 等 player 缓冲到可以 seek 时用
     // 仅在用户主动开新集时且和云记忆吻合的那次才用
@@ -3029,6 +3431,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     //   离开播放页 (detail) 时会 clearFlags. 切集的话 _phase 还是 'playing',
     //   这里 enable=true 多次调无副作用 (addFlags 重复设置是幂等的).
     _setKeepScreenOn(true);
+    // v2.6.42: 进入播放阶段, 开启音量拦截 (屏蔽系统音量弹窗 + 物理键接管).
+    //   切集时 _phase 已经是 'playing', 重复调无副作用.
+    _enableVolumeInterception();
     // v2.0.51: 切集后 PageView 跳到当前 episode 所在页 (用 jumpToPage, 静默切)
     final newPage = (index ~/ _episodesPerPage).clamp(0, 999);
     if (_episodesPageController.hasClients &&
@@ -3228,35 +3633,14 @@ class _PlayerScreenState extends State<PlayerScreen>
           canPop: _phase == 'detail',
           onPopInvoked: (didPop) async {
             if (!didPop && _phase == 'playing') {
-              // v1.0.65: 先等 _currentPosition > 0 再 save, 避免刚 play 就
-              // back 时存 0 覆盖之前的真进度. 仍然 0 就跳过
-              await _waitForValidPosition();
-              if (_currentPosition > Duration.zero) {
-                // v1.0.49: 必须先 save 再 stop, 否则 stop 把 state.position 重置成 0,
-                // _saveCurrentProgress 读到的就是 0, 退出后下次打开从 0 开始.
-                // (之前的顺序是先 stop 再 save, 写盘的 playTime 一直是 0)
-                await _saveCurrentProgress(force: true);
-              }
-              // 从播放页返回详情页: 恢复竖屏, 暂停播放
-              try {
-                await _player!.stop();
-              } catch (_) {}
-              await _onExitFullscreen();
-              if (mounted) {
-                setState(() {
-                  _phase = 'detail';
-                });
-                // v2.2.0+59: 退出播放视图, 解除屏幕常亮, 允许系统屏保
-                _setKeepScreenOn(false);
-              }
-            } else if (didPop && _phase == 'detail') {
-              // v1.0.50: 真正退出页面时不再 save.
-              // 之前这里调 _saveCurrentProgress(force: true), 但 player 在
-              // playing→detail 那次已经 stop 了, state.position 和 _currentPosition
-              // 都是 0, 这次 save 会存 playTime=0 覆盖掉之前存的 12 分钟,
-              // 下次打开云端拉到 playTime=0 又从 0 开始.
-              // 进度已经在 playing→detail 转换时存过了, 这里不需要再存.
+              // ★ v2.6.45: 立即切换 UI 响应返回键, 后台异步清理
+              setState(() => _phase = 'detail');
+              _setKeepScreenOn(false);
+              _disableVolumeInterception();
+              // 后台异步保存进度 + 停止播放器 (不阻塞返回)
+              unawaited(_cleanupOnBack());
             }
+            // didPop && _phase == 'detail' → 真正退出页面, 无需处理
           },
           child: Scaffold(
             backgroundColor:
@@ -4561,9 +4945,12 @@ class _PlayerScreenState extends State<PlayerScreen>
               _iconBtn(
                 icon: Icons.arrow_back,
                 onTap: () {
-                  // 重点:从播放视图点返回箭头时也要先 stop,否则 player
-                  // 还在后台继续播,detail 视图上还能听到声音
+                  // v2.5.88: 返回箭头退出也要先保存进度, 跟返回键路径一致
+                  //   之前直接 stop 没保存, 退出后进度丢失
                   () async {
+                    if (_currentPosition > Duration.zero) {
+                      await _saveCurrentProgress(force: true);
+                    }
                     try {
                       await _player!.stop();
                     } catch (_) {}
@@ -4574,6 +4961,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                       _phase = 'detail';
                       // v2.2.0+59: 返回箭头退出播放, 解除屏幕常亮
                       _setKeepScreenOn(false);
+                      // v2.6.42: 退出播放回 detail, 关音量拦截, 恢复系统音量弹窗
+                      _disableVolumeInterception();
                     });
                   }();
                 },
@@ -4652,53 +5041,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  /// 中央控制区: 左右快退/快进6s 按钮 + 中间播放/暂停
-  /// 跟控件一起显隐, 点击后短暂显示提示文字
+  /// 中央控制区: v2.6.2 主流方案 — 只剩中间播放/暂停按钮, ±30s 按钮
+  ///   全部移除 (左右双击屏幕触发 ±10s, 体感更直接, 跟 YouTube/爱奇艺
+  ///   体验一致). 控件一起显隐, 双击 / 拖动 seek 提示文字还在.
   Widget _buildSideSeekButtons() {
     if (!_isControlsVisible) return const SizedBox.shrink();
-    // 按屏幕宽度算按钮尺寸和偏移, 避免竖屏 (360~400px 宽) 三个按钮挤一起重叠
-    // 横屏全屏 (宽 > 600) 用 64/140; 竖屏 (含竖屏全屏 / 竖屏非全屏) 都用 44/72
+    // 按屏幕宽度算按钮尺寸: 横屏全屏 (宽 > 600) 用 64, 竖屏用 44.
+    //   不再用 sideOffset (左右按钮已删, 不需要算偏移)
     final screenWidth = MediaQuery.of(context).size.width;
-    final double size;
-    final double sideOffset;
-    if (screenWidth > 600) {
-      size = 64.0;
-      sideOffset = 140.0;
-    } else {
-      // 竖屏 (无论全屏 / 非全屏): 统一用 44/72, 360px 宽下左-中-右各留 42px 间隙
-      size = 44.0;
-      sideOffset = 72.0;
-    }
+    final double size = screenWidth > 600 ? 64.0 : 44.0;
     return Positioned.fill(
       child: Stack(
         alignment: Alignment.center,
         children: [
-          // 左: 快退6s 按钮(文字 -6) (v1.0.49: 60 → 6, 60秒跳过太多)
-          Positioned(
-            left: sideOffset,
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: _buildSeekCircleButton(
-                size: size,
-                onTap: () => _seekBySeconds(-6, '快退6s'),
-                child: const _SeekLabel(label: '-6'),
-              ),
-            ),
-          ),
-          // 右: 快进6s 按钮(文字 +6) (v1.0.49: 60 → 6, 60秒跳过太多)
-          Positioned(
-            right: sideOffset,
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: _buildSeekCircleButton(
-                size: size,
-                onTap: () => _seekBySeconds(6, '快进6s'),
-                child: const _SeekLabel(label: '+6'),
-              ),
-            ),
-          ),
           // 中间: 播放/暂停按钮 (v1.0.49: 颜色跟底部 _iconBtn 播控按钮一致用 Colors.white)
           _buildSeekCircleButton(
             size: size,
@@ -4709,7 +5064,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               size: 32,
             ),
           ),
-          // 快进/快退提示文字 (点击后短暂显示)
+          // 快进/快退提示文字 (双击 / 拖动 后短暂显示, 让用户知道生效了)
           if (_seekHintText != null)
             Positioned(
               bottom: 120,
@@ -4738,15 +5093,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// 快进/快退指定秒数, 并显示提示文字
   void _seekBySeconds(int seconds, String hint) {
     final newPos = _currentPosition + Duration(seconds: seconds);
-    if (seconds < 0) {
-      _player!.seek(newPos < Duration.zero ? Duration.zero : newPos);
-    } else {
-      final max = _currentDuration;
-      _player!.seek(newPos > max ? max : newPos);
-    }
+    final clampedPos = seconds < 0
+        ? (newPos < Duration.zero ? Duration.zero : newPos)
+        : (newPos > _currentDuration ? _currentDuration : newPos);
+    _player!.seek(clampedPos);
+    // v2.5.90: seek guard 已移除
     // 显示提示文字, 1秒后消失
     _seekHintTimer?.cancel();
-    setState(() => _seekHintText = hint);
+    setState(() {
+      _seekHintText = hint;
+      _currentPosition = clampedPos;
+    });
     _seekHintTimer = Timer(const Duration(seconds: 1), () {
       if (mounted) setState(() => _seekHintText = null);
     });
@@ -4803,7 +5160,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// 圆弧箭头图标 (已废弃, 快进/快退按钮改用 _SeekLabel 文字)
   // ignore: unused_element
   Widget _buildSeekIcon({required bool forward}) {
-    return _SeekLabel(label: forward ? '+6' : '-6');
+    return _SeekLabel(label: forward ? '+30' : '-30');
   }
 
   /// 圆形小按钮 (40x40, LunaTV Web 控制按钮)
@@ -4990,6 +5347,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         _isCasting = true;
         _currentCastDevice = device as DLNADevice;
       });
+      // v2.5.88: 投屏前先保存本地播放进度, 跟退出路径一致
+      if (_currentPosition > Duration.zero) {
+        await _saveCurrentProgress(force: true);
+      }
       // 停本地 player (TV 已经在播, 避免双声道 / 浪费流量)
       try {
         await _player!.stop();
@@ -5003,6 +5364,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         _isControlsVisible = false;
         // v2.2.0+59: DLNA 接管, 关屏幕常亮 (本地不播了, 屏幕可以省电)
         _setKeepScreenOn(false);
+        // v2.6.42: 退出播放回 detail, 关音量拦截, 恢复系统音量弹窗
+        _disableVolumeInterception();
       });
       // 提示
       ScaffoldMessenger.of(context).showSnackBar(
@@ -5161,9 +5524,28 @@ class _PlayerScreenState extends State<PlayerScreen>
                   borderRadius: BorderRadius.circular(8),
                 ),
                 padding: const EdgeInsets.fromLTRB(8, 0, 8, 5),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
+                // v2.5.86: 底部栏整体接收水平拖动 = 拖进度条.
+                //   中间 Expanded(flex:2) 区域也是水平拖, 但只占屏幕中间
+                //   一条. 用户反馈"屏幕下方"也想要拖动. 这里用 Column
+                //   整层接 horizontal drag, 子级按钮 (InkWell tap) 跟
+                //   HorizontalDragGestureRecognizer 不冲突, button tap
+                //   照常生效. HitTestBehavior.translucent 让 child tap
+                //   透下去.
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onHorizontalDragStart: _onBottomBarSwipeStart,
+                  onHorizontalDragUpdate: _onBottomBarSwipeUpdate,
+                  onHorizontalDragEnd: _onBottomBarSwipeEnd,
+                  // v2.5.90: 手势被取消时也清除 _scrubbingValue,
+                  //   防止 position 更新被永久阻止
+                  onHorizontalDragCancel: () {
+                    if (_scrubbingValue != null) {
+                      setState(() => _scrubbingValue = null);
+                    }
+                  },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
                     // 顶部: 进度条 (5px 矩形, LunaTV Web 风格)
                     _buildLunaProgressBar(),
                     // 底部: 左中右按钮行
@@ -5248,7 +5630,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ],
                       ),
                     ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -5259,44 +5642,74 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   /// 进度条 (5px 矩形, 绿进度, LunaTV Web 风格)
+  // v2.5.74: 修复白点错位 — SliderThemeData 没有 trackHorizontalPadding 属性
+  //   (v2.5.73 用了不存在的属性, 编译必挂). 正确属性是 padding (3.28+).
+  //   padding=horizontal(r) 让 thumb 内缩 r, Positioned 负 left/right 让
+  //   Slider 外扩 r, 两者抵消, thumb 中心 = [0, W] 精确对齐绿条.
+  //   Stack clipBehavior=none 防 thumb 在 0/1 端被裁剪.
+  // v2.5.75: 修"白点挡住绿条上半" — v2.5.74 的 Container.height=5 比
+  //   thumb 直径 12px 小, thumb 圆心被迫对齐 5px 容器中心 (=2.5px),
+  //   thumb 上半浮出容器顶端, 视觉上像"骑在绿条上".
+  //   修法: Container 高度 = thumb 直径 (12) + 上下 4px buffer = 20,
+  //   绿条和灰底色 Container 都用 Align(center) 让 5px 粗条在 20px
+  //   容器里垂直居中, thumb 也居中, 白点圆心 = 绿条中心.
   Widget _buildLunaProgressBar() {
+    const thumbRadius = 6.0;
+    const barHeight = 5.0;          // 绿条 / 灰条粗细
+    const containerHeight = 20.0;   // 必须 >= thumb 直径(12) 才能让 thumb 居中
     final dur = _currentDuration.inMilliseconds.toDouble();
     final pos = _scrubbingValue != null
         ? (_scrubbingValue! * dur).toInt()
         : _currentPosition.inMilliseconds;
     final progress = dur > 0 ? (pos / dur).clamp(0.0, 1.0) : 0.0;
     return Container(
-      height: 5,
+      height: containerHeight,
       margin: const EdgeInsets.symmetric(horizontal: 4),
       child: Stack(
+        clipBehavior: Clip.none,
         children: [
-          // 底色轨道
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(2.5),
-            ),
-          ),
-          // 进度条
-          FractionallySizedBox(
-            widthFactor: progress,
-            child: Container(
-              decoration: BoxDecoration(
-                color: kLunaTheme,
-                borderRadius: BorderRadius.circular(2.5),
+          // 灰底色轨道（居中, 高 5px）
+          Positioned.fill(
+            child: Align(
+              alignment: Alignment.center,
+              child: SizedBox(
+                height: barHeight,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(barHeight / 2),
+                  ),
+                ),
               ),
             ),
           ),
-          // 拖动手柄
+          // 绿色进度条（居中, 高 5px, 宽度按 progress）
+          Positioned.fill(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: FractionallySizedBox(
+                widthFactor: progress,
+                child: Container(
+                  height: barHeight,
+                  decoration: BoxDecoration(
+                    color: kLunaTheme,
+                    borderRadius: BorderRadius.circular(barHeight / 2),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // 拖动手柄 — padding=horizontal(r) 让 thumb 内缩 r,
+          //   Positioned 负 left/right 让 Slider 外扩 r, 两者抵消,
+          //   thumb 中心精确落在 [0, W], 与绿条两端对齐.
+          //   SliderThemeData.trackHeight=barHeight 让透明 track 跟绿条
+          //   高度一致, thumb 圆心 = 容器中心 = 绿条中心.
           if (dur > 0)
-            Positioned(
-              left: 0,
-              right: 0,
-              top: -2,
-              bottom: -2,
+            Positioned.fill(
               child: SliderTheme(
                 data: SliderThemeData(
-                  trackHeight: 5,
+                  trackHeight: barHeight,
+                  padding: const EdgeInsets.symmetric(horizontal: thumbRadius),
                   activeTrackColor: Colors.transparent,
                   inactiveTrackColor: Colors.transparent,
                   thumbColor: Colors.white,
@@ -5304,7 +5717,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   thumbShape:
                       const RoundSliderThumbShape(enabledThumbRadius: 6),
                   overlayShape:
-                      const RoundSliderOverlayShape(overlayRadius: 12),
+                      const RoundSliderOverlayShape(overlayRadius: 20),
                 ),
                 child: Slider(
                   value: progress,
@@ -5392,46 +5805,53 @@ class _PlayerScreenState extends State<PlayerScreen>
       fit: StackFit.expand,
       children: [
         // 视频 (12ce29d 结构: Container+AspectRatio+Stack+Video(NoVideoControls))
+        // v2.6.41: 加 Transform.scale 支持双指缩放, 小尺寸影片能放大填满.
         Positioned.fill(
           child: Container(
             color: Colors.black,
             child: Center(
-              child: AspectRatio(
-                aspectRatio: (_videoWidth > 0 && _videoHeight > 0)
-                    ? _videoWidth / _videoHeight
-                    : 16 / 9,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    // v2.2.0: 卸 libmpv Video() 改 ExoPlayerView.
-                    //   内部 [ExoPlayerView] 走 [VideoPlayer] widget
-                    //   (video_player package) 渲染 ExoPlayer 视频帧.
-                    // v2.3.14: 卸自研 CustomExoPlayer + Flutter [Texture]
-                    //   widget, 回到 v2.3.0 video_player [VideoPlayer] 渲染.
-                    //   UI 控件 (LunaTV 自定义底栏/顶栏/手势) 全部在外层
-                    //   Stack 上, 这里只是个视频画面的薄壳.
-                    ExoPlayerView(backend: _player!),
-                    // v2.5.34: 弹幕浮层 — IgnorePointer 不挡手势, CustomPaint
-                    //   滚动画. positionProvider 从 _currentPosition 读.
-                    if (_danmakuEnabled)
-                      DanmakuOverlay(
-                        key: _danmakuKey,
-                        comments: _danmakuComments,
-                        enabled: _danmakuEnabled,
-                        positionProvider: () => _currentPosition,
-                        pausedProvider: () => !_isPlaying,
-                      ),
-                    if (_isBuffering)
-                      const SizedBox(
-                        width: 36,
-                        height: 36,
-                        child: CircularProgressIndicator(
-                            color: kLunaLoadingColor, strokeWidth: 3),
-                      ),
-                  ],
+              child: Transform.scale(
+                scale: _videoScale,
+                child: AspectRatio(
+                  aspectRatio: (_videoWidth > 0 && _videoHeight > 0)
+                      ? _videoWidth / _videoHeight
+                      : 16 / 9,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      ExoPlayerView(backend: _player!),
+                      if (_danmakuEnabled)
+                        DanmakuOverlay(
+                          key: _danmakuKey,
+                          comments: _danmakuComments,
+                          enabled: _danmakuEnabled,
+                          positionProvider: () => _currentPosition,
+                          pausedProvider: () => !_isPlaying,
+                        ),
+                      if (_isBuffering)
+                        const SizedBox(
+                          width: 36,
+                          height: 36,
+                          child: CircularProgressIndicator(
+                              color: kLunaLoadingColor, strokeWidth: 3),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
+          ),
+        ),
+        // v2.6.41: 双指缩放 Listener 层 — 不参与手势竞技场, 只观察 pointer.
+        //   translucent 让事件穿透到下方 GestureDetector (tap/drag/doubleTap),
+        //   同时 Listener 拿到所有 pointer down/move/up 做 pinch 计算.
+        Positioned.fill(
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: _onPinchPointerDown,
+            onPointerMove: _onPinchPointerMove,
+            onPointerUp: _onPinchPointerUp,
+            onPointerCancel: _onPinchPointerCancel,
           ),
         ),
         // 点击空白区切换控制栏显隐 (始终存在, 控件隐藏时也能点击调出)
@@ -5441,12 +5861,17 @@ class _PlayerScreenState extends State<PlayerScreen>
             onTap: _toggleControls,
           ),
         ),
-        // 亮度/音量/快进 快退 手势层 (v1.0.40 修复: 主播放器之前根本没接)
-        // 左 1/4 上下 = 亮度, 右 1/4 上下 = 音量, 中间 1/2 左右 = 快进快退
+        // 亮度/音量/快进快退 手势层 (v2.6.2 主流方案: 左右半屏上下滑 = 亮度/音量,
+        //   全屏左右滑 = 快进/快退, 双击左半屏 = 快退10s, 双击右半屏 = 快进10s,
+        //   跟 YouTube / 爱奇艺 / Bilibili 体验一致.)
+        // v2.6.1 之前: 左 1/4 上下 = 亮度, 右 1/4 上下 = 音量, 中间 1/2 左右 = 快进快退.
+        //   问题: 1) 快进快退只能拖中间半屏, 全屏拖快进幅度小; 2) 屏幕分割明显
+        //   用户能感觉到; 3) 中间放 30s 按钮, 跟左右滑动抢手势焦点.
+        // v2.6.2: 改为两半屏布局, 快进快退扩到全屏, ±10s 改用双击触发.
         Positioned.fill(
           child: Row(
             children: [
-              // 左: 亮度
+              // 左半屏: 上下 = 亮度, 左右 = 快进/快退
               Expanded(
                 flex: 1,
                 child: GestureDetector(
@@ -5454,19 +5879,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                   onVerticalDragStart: _onBrightnessSwipeStart,
                   onVerticalDragUpdate: _onBrightnessSwipeUpdate,
                   onVerticalDragEnd: _onBrightnessSwipeEnd,
-                ),
-              ),
-              // 中: 快进快退
-              Expanded(
-                flex: 2,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
                   onHorizontalDragStart: _onCenterSwipeStart,
                   onHorizontalDragUpdate: _onCenterSwipeUpdate,
                   onHorizontalDragEnd: _onCenterSwipeEnd,
                 ),
               ),
-              // 右: 音量
+              // 右半屏: 上下 = 音量, 左右 = 快进/快退
               Expanded(
                 flex: 1,
                 child: GestureDetector(
@@ -5474,9 +5892,22 @@ class _PlayerScreenState extends State<PlayerScreen>
                   onVerticalDragStart: _onVolumeSwipeStart,
                   onVerticalDragUpdate: _onVolumeSwipeUpdate,
                   onVerticalDragEnd: _onVolumeSwipeEnd,
+                  onHorizontalDragStart: _onCenterSwipeStart,
+                  onHorizontalDragUpdate: _onCenterSwipeUpdate,
+                  onHorizontalDragEnd: _onCenterSwipeEnd,
                 ),
               ),
             ],
+          ),
+        ),
+        // v2.6.2: 双击快进/快退/播放 全屏监听 (放最上层, 用 globalPosition
+        //   区分左半/中间/右半. 跟下方左右 GestureDetector 不冲突 — onDoubleTap
+        //   在这里优先命中, 不影响 onVerticalDrag/onHorizontalDrag)
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onDoubleTapDown: _onGlobalDoubleTapDown,
+            onDoubleTap: _onGlobalDoubleTap,
           ),
         ),
         // 亮度浮窗指示器 (左侧, 竖屏横屏都显示)

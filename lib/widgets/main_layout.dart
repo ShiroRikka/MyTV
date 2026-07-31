@@ -82,6 +82,11 @@ class _MainLayoutState extends State<MainLayout> {
   Timer? _debounceTimer;
   final LayerLink _layerLink = LayerLink();
   OverlayEntry? _overlayEntry;
+  // v2.6.23: 弹层加 × 按钮, 用户可手动关掉当前弹层. 行为:
+  //   - 输入新 query → 弹层继续弹 (跟改前一样)
+  //   - 点 × → 只关掉当前这次弹层, 下次输入继续弹
+  //   - 点空白 / 点外部 → 弹层消失 (跟改前一样)
+  //   不维护「永久关掉」状态, 候选栏行为完全不变, 只多一个手动 × 入口.
 
   @override
   void dispose() {
@@ -216,52 +221,112 @@ class _MainLayoutState extends State<MainLayout> {
                 : Colors.white,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 320),
-              child: ListView.builder(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                shrinkWrap: true,
-                itemCount: _searchSuggestions.length,
-                itemBuilder: (context, index) {
-                  final suggestion = _searchSuggestions[index];
-                  return InkWell(
-                    onTap: () {
-                      widget.searchController?.text = suggestion;
-                      widget.onSearchSubmitted?.call(suggestion);
-                      _removeOverlay();
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            LucideIcons.search,
-                            size: 16,
-                            color: themeService.isDarkMode
-                                ? const Color(0xFF666666)
-                                : const Color(0xFF95a5a6),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              suggestion,
-                              style: FontUtils.poppins(context,
-                                                                fontSize: 14,
-                                color: themeService.isDarkMode
-                                    ? const Color(0xFFffffff)
-                                    : const Color(0xFF2c3e50),
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
+              // v2.6.23: Column 拆 header + ListView, header 显示「搜索建议」+ ×
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      border: Border(
+                        bottom: BorderSide(
+                          color: themeService.isDarkMode
+                              ? const Color(0xFF2a2a2a)
+                              : const Color(0xFFecf0f1),
+                          width: 1,
+                        ),
                       ),
                     ),
-                  );
-                },
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '搜索建议',
+                            style: FontUtils.poppins(
+                              context,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                              color: themeService.isDarkMode
+                                  ? const Color(0xFF888888)
+                                  : const Color(0xFF95a5a6),
+                            ),
+                          ),
+                        ),
+                        InkWell(
+                          onTap: () {
+                            // v2.6.23: 点 × 只关掉当前这次弹层, 不影响下次输入.
+                            //   候选栏行为不变 (每次新 query 仍弹), 只多一个手动 × 入口.
+                            _removeOverlay();
+                          },
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Icon(
+                              LucideIcons.x,
+                              size: 14,
+                              color: themeService.isDarkMode
+                                  ? const Color(0xFF888888)
+                                  : const Color(0xFF95a5a6),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Flexible(
+                    child: ListView.builder(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      shrinkWrap: true,
+                      itemCount: _searchSuggestions.length,
+                      itemBuilder: (context, index) {
+                        final suggestion = _searchSuggestions[index];
+                        return InkWell(
+                          onTap: () {
+                            widget.searchController?.text = suggestion;
+                            widget.onSearchSubmitted?.call(suggestion);
+                            _removeOverlay();
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 12,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  LucideIcons.search,
+                                  size: 16,
+                                  color: themeService.isDarkMode
+                                      ? const Color(0xFF666666)
+                                      : const Color(0xFF95a5a6),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    suggestion,
+                                    style: FontUtils.poppins(
+                                      context,
+                                      fontSize: 14,
+                                      color: themeService.isDarkMode
+                                          ? const Color(0xFFffffff)
+                                          : const Color(0xFF2c3e50),
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
               ),
             ),
           ),

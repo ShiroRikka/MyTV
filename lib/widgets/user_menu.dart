@@ -39,6 +39,8 @@ class _UserMenuState extends State<UserMenu> {
   String _role = 'user';
   String _doubanDataSource = '直连';
   String _doubanImageSource = '直连';
+  // v2.6.18: 服务器地址 — 设置页可直接查看/修改, 不用退出登录回登录页改
+  String _serverUrl = '';
   // v2.1.42 改: 跟 v2.1.41 TMDB 一样, 字段存 key 值 ('bangumi_proxy' / 'direct'),
   //   UI 显示时调 [getBangumiDataSourceDisplayName] 转. v2.1.40 这里存的是
   //   显示名 ('直连'), 跟新模式不一致, 这次改回 key.
@@ -84,10 +86,6 @@ class _UserMenuState extends State<UserMenu> {
   //   内部用 UserDataService.getTmdbProxyDomainSync() 读.
   String _tmdbProxyDomain = '';
 
-  // v2.1.22: 日记 section 配置 (跟 DiaryService 同步)
-  bool _diaryClearOnExit = true;
-  int _diaryMaxEntries = 500;
-  bool _diaryPersist = false;
 
   @override
   void initState() {
@@ -126,6 +124,8 @@ class _UserMenuState extends State<UserMenu> {
     final githubDataSource = await UserDataService.getGithubDataSourceKey();
     final preferSpeedTest = await UserDataService.getPreferSpeedTest();
     final localSearch = await UserDataService.getLocalSearch();
+    // v2.6.18: 服务器地址
+    final serverUrl = await UserDataService.getServerUrl() ?? '';
     // v2.3.0: 视频加速 (CF Worker 视频代理 + 优选 IP + 视频代理开关 + CF Worker 域名) 整个删了
     //   之前的 _preferIpEnabled / _videoProxyEnabled / _cfWorkerDomain / _cfSummary / _cfBestIp
     //   字段全删, _loadUserInfo 不再读这些 SharedPreferences key.
@@ -142,11 +142,6 @@ class _UserMenuState extends State<UserMenu> {
     // v2.1.41: 代理 URL — 用户在 UI 输入的自部署 worker 地址, 同时
     //   服务 TMDB / Bangumi / GitHub 三套路由 (v2.1.49 合并 GitHub 字段)
     final tmdbProxyDomain = await UserDataService.getTmdbProxyDomain();
-
-    // v2.1.22: 日记 section 配置
-    final diaryClearOnExit = DiaryService.clearOnExit;
-    final diaryMaxEntries = DiaryService.maxEntries;
-    final diaryPersist = DiaryService.persist;
 
     if (mounted) {
       setState(() {
@@ -166,9 +161,7 @@ class _UserMenuState extends State<UserMenu> {
         _tmdbConfigured = tmdbConfigured;
         _tmdbDataSource = tmdbDataSource;
         _tmdbProxyDomain = tmdbProxyDomain;
-        _diaryClearOnExit = diaryClearOnExit;
-        _diaryMaxEntries = diaryMaxEntries;
-        _diaryPersist = diaryPersist;
+        _serverUrl = serverUrl;
       });
     }
   }
@@ -541,6 +534,125 @@ class _UserMenuState extends State<UserMenu> {
     controller.dispose();
   }
 
+  // v2.6.18: 弹出服务器地址输入对话框 — 不用退出登录就能改
+  Future<void> _openServerUrlDialog() async {
+    final controller = TextEditingController(text: _serverUrl);
+    controller.selection =
+        TextSelection(baseOffset: 0, extentOffset: _serverUrl.length);
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor:
+            widget.isDarkMode ? const Color(0xFF2c2c2c) : Colors.white,
+        title: Row(
+          children: [
+            const Icon(LucideIcons.server, size: 20, color: Color(0xFF3b82f6)),
+            const SizedBox(width: 8),
+            Text(
+              '服务器地址',
+              style: FontUtils.poppins(
+                ctx,
+                fontSize: 18,
+                color: widget.isDarkMode
+                    ? const Color(0xFFffffff)
+                    : const Color(0xFF1f2937),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '后端 API 服务器地址, 改完即时生效 (内存缓存自动更新).',
+              style: FontUtils.poppins(
+                ctx,
+                fontSize: 12,
+                color: widget.isDarkMode
+                    ? const Color(0xFF9ca3af)
+                    : const Color(0xFF6b7280),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              maxLines: 1,
+              contextMenuBuilder: chineseTextSelectionToolbarBuilder,
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              style: FontUtils.sourceCodePro(
+                ctx,
+                fontSize: 13,
+                color: widget.isDarkMode
+                    ? const Color(0xFFffffff)
+                    : const Color(0xFF1f2937),
+              ),
+              decoration: InputDecoration(
+                hintText: 'https://your-server.example.com',
+                hintStyle: FontUtils.sourceCodePro(
+                  ctx,
+                  fontSize: 12,
+                  color: widget.isDarkMode
+                      ? const Color(0xFF6b7280)
+                      : const Color(0xFF9ca3af),
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                isDense: true,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(
+              '取消',
+              style: FontUtils.poppins(
+                ctx,
+                fontSize: 14,
+                color: widget.isDarkMode
+                    ? const Color(0xFF9ca3af)
+                    : const Color(0xFF6b7280),
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () async {
+              final input = controller.text.trim();
+              await UserDataService.saveServerUrl(input);
+              if (!ctx.mounted) return;
+              Navigator.of(ctx).pop();
+              if (!mounted) return;
+              setState(() {
+                _serverUrl = input;
+              });
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(input.isEmpty
+                      ? '已清除服务器地址'
+                      : '已保存服务器地址'),
+                ),
+              );
+            },
+            child: Text(
+              '保存',
+              style: FontUtils.poppins(
+                ctx,
+                fontSize: 14,
+                color: const Color(0xFF3b82f6),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // v2.1.41: 弹出 TMDB 代理 URL 输入对话框
   //   用户从 [djsevenx1/tmdb-proxy] 部署到 Cloudflare Pages 拿到的
   //   https://xxx.pages.dev 粘进来. 自动强转 https://, 去尾斜杠 / 空白.
@@ -847,7 +959,9 @@ class _UserMenuState extends State<UserMenu> {
         );
       }
 
-      final versionInfo = await VersionService.checkForUpdate();
+      // v2.5.78: user_menu 是「手动检查」, 走 [checkForUpdateManual]
+      //   跳过节流, 立即打 GitHub API. 启动自动检查路径走 [checkForUpdate].
+      final versionInfo = await VersionService.checkForUpdateManual();
 
       if (!mounted) return;
 
@@ -1527,6 +1641,21 @@ class _UserMenuState extends State<UserMenu> {
         children: [
           // ===== 用户信息头部卡片 =====
           _buildUserHeader(),
+          // ===== 服务器 =====
+          // v2.6.18: 服务器地址配置入口 — 之前只能在登录页填, 进 app 后没法改.
+          //   现在设置页顶部直接显示当前地址, 点开弹窗修改, 即时生效.
+          _buildSectionHeader('服务器'),
+          _buildCard(
+            children: [
+              _buildInputOption(
+                title: '服务器地址',
+                currentValue: _serverUrl,
+                onTap: _openServerUrlDialog,
+                icon: LucideIcons.server,
+                iconColor: const Color(0xFF3b82f6),
+              ),
+            ],
+          ),
           // ===== 数据源 =====
           _buildSectionHeader('数据源'),
           _buildCard(
@@ -1998,80 +2127,6 @@ class _UserMenuState extends State<UserMenu> {
                 icon: LucideIcons.trash2,
                 iconColor: const Color(0xFFf59e0b),
                 onTap: _handleClearDoubanCache,
-              ),
-              _buildDivider(),
-              // v2.0.99.2: 日记 — 跳到 DiaryScreen, 看全流程运行日志
-              //   (TMDB 失败 / 网络错 / 关键事件). 跟 adb logcat 互补,
-              //   不用接电脑. 跟 v2.0.91 删的「log UI」区别: 那个是开发者
-              //   log 实时浮层, 这次是独立日记页 (按时间序, 用户主动点开).
-              _buildActionItem(
-                title: '日记',
-                icon: LucideIcons.fileText,
-                iconColor: const Color(0xFF8b5cf6),
-                onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => const DiaryScreen(),
-                    ),
-                  );
-                },
-              ),
-              // v2.5.52: 弹幕日记 — 只看 [弹幕] 分类的日记, 方便排查弹幕加载问题
-              _buildActionItem(
-                title: '弹幕日记',
-                icon: LucideIcons.film,
-                iconColor: const Color(0xFF22C55E),
-                onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => const DiaryScreen(initialFilter: '弹幕'),
-                    ),
-                  );
-                },
-              ),
-              // v2.1.22: 日记 section 配置 — 退出清空 / 容量上限 / 持久化
-              _buildToggleOption(
-                title: '退出 app 自动清空',
-                subtitle: '关掉后日记会保留, 但重启 app 不会丢',
-                value: _diaryClearOnExit,
-                onChanged: (value) async {
-                  await DiaryService.setClearOnExit(value);
-                  if (!mounted) return;
-                  setState(() {
-                    _diaryClearOnExit = value;
-                  });
-                },
-                icon: LucideIcons.logOut,
-                iconColor: const Color(0xFF8b5cf6),
-              ),
-              _buildOptionSelector(
-                title: '容量上限',
-                currentValue: '${_diaryMaxEntries} 条',
-                options: const ['100 条', '500 条', '1000 条', '2000 条'],
-                onChanged: (s) async {
-                  final n = int.parse(s.split(' ')[0]);
-                  await DiaryService.setMaxEntries(n);
-                  if (!mounted) return;
-                  setState(() {
-                    _diaryMaxEntries = n;
-                  });
-                },
-                icon: LucideIcons.hardDrive,
-                iconColor: const Color(0xFF8b5cf6),
-              ),
-              _buildToggleOption(
-                title: '持久化日记',
-                subtitle: '开启后写进 SharedPreferences, 跨会话保留',
-                value: _diaryPersist,
-                onChanged: (value) async {
-                  await DiaryService.setPersist(value);
-                  if (!mounted) return;
-                  setState(() {
-                    _diaryPersist = value;
-                  });
-                },
-                icon: LucideIcons.save,
-                iconColor: const Color(0xFF8b5cf6),
               ),
               _buildDivider(),
               // 检查更新按钮

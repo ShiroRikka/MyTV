@@ -74,6 +74,10 @@ class UserDataService {
 
   // 内存缓存
   static bool? _isLocalModeCache;
+  // v2.6.25: 跟 _isLocalModeCache 平行, getLocalSearch 也要内存缓存
+  //   (搜索主路径 4 个 await SharedPreferences 之一, 每次冷启动首调
+  //   走磁盘 IO ~50-200ms, 拖慢 SSE 启动, 体感比 Selene 慢 0.5-2s 根因)
+  static bool? _localSearchCache;
   // v2.3.0: 视频加速 (CF Worker 视频代理 + 优选 IP + 视频代理开关) 整个删了
   //   - _cfWorkerEnabledCache  (优选 IP 开关缓存)
   //   - _cfWorkerDomainCache   (视频代理 worker 域名缓存)
@@ -327,16 +331,51 @@ class UserDataService {
     return prefs.getBool(_preferSpeedTestKey) ?? true;
   }
 
+  // v2.6.9: 精确搜索开关 — 跟 web 端 SettingsPanel.tsx 持久化 key "exactSearch"
+  //   (localStorage) 1:1, 跨 app 重启保留用户选择. 搜「凡人修仙传」默认只
+  //   保留 title 含 query 的 result (跟 web 行为一致), 关掉能看到全部结果.
+  static const String _exactSearchKey = 'exact_search';
+
+  static Future<void> saveExactSearch(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_exactSearchKey, enabled);
+  }
+
+  static Future<bool> getExactSearch() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_exactSearchKey) ?? true;
+  }
+
+  // 保存本地搜索设置
   // 保存本地搜索设置
   static Future<void> saveLocalSearch(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_localSearchKey, enabled);
+    // v2.6.25: 同步更新内存缓存, 跟 saveIsLocalMode 一致
+    _localSearchCache = enabled;
   }
 
   // 获取本地搜索设置（默认为 false）
+  // v2.6.25-fix: 加缓存命中分支, 跟 getIsLocalMode 一致. 之前每次都走
+  //   SharedPreferences.getInstance() 磁盘 IO (~50-200ms 冷启首调), 拖慢
+  //   SSE 启动. 命中 _localSearchCache 直接返回, miss 才走 SharedPreferences
+  //   并写回缓存. 跟 getIsLocalMode (line 367-372) 完全一样模式.
   static Future<bool> getLocalSearch() async {
+    if (_localSearchCache != null) return _localSearchCache!;
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_localSearchKey) ?? false;
+    final v = prefs.getBool(_localSearchKey) ?? false;
+    _localSearchCache = v;
+    return v;
+  }
+
+  // v2.6.25-fix: 同步版, 供搜索主路径用, 跟 getIsLocalModeSync 平行.
+  //   v2.6.25 changelog 写了加这个方法但代码漏了, 导致 v2.6.25 编译挂
+  //   (sse_search_service.dart:221 调 UserDataService.getLocalSearchSync()
+  //   报 "Member not found"). warmup 前调用兜底 false (走 SSE 主路, 默认
+  //   安全侧), 跟 async 版未缓存时行为一致 (prefs.getBool(_localSearchKey)
+  //   ?? false), 不影响业务.
+  static bool getLocalSearchSync() {
+    return _localSearchCache ?? false;
   }
 
   // 保存本地模式设置
@@ -1460,6 +1499,19 @@ class UserDataService {
       final prefs = await SharedPreferences.getInstance();
       final v = prefs.getString(_cookiesKey);
       _cookiesCache = (v == null || v.isEmpty) ? null : v;
+    }
+    // v2.6.25: 预热 _isLocalModeCache + _localSearchCache. 搜索主路径
+    //   (SSESearchService.startSearch) 用同步版 (getIsLocalModeSync /
+    //   getLocalSearchSync) 替代 async 版, 彻底消除这俩 await 的磁盘 IO.
+    //   之前 warmup 只预热 serverUrl + cookies, 没预热这俩, 搜索主路径
+    //   每次都 await SharedPreferences.getInstance() 拖慢 SSE 启动.
+    if (_isLocalModeCache == null) {
+      final prefs = await SharedPreferences.getInstance();
+      _isLocalModeCache = prefs.getBool(_isLocalModeKey) ?? false;
+    }
+    if (_localSearchCache == null) {
+      final prefs = await SharedPreferences.getInstance();
+      _localSearchCache = prefs.getBool(_localSearchKey) ?? false;
     }
   }
 }
