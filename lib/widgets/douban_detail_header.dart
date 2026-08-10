@@ -157,20 +157,9 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
       return const SizedBox.shrink();
     }
 
+    // ★ v2.6.47: 全宽直角 (去 margin / 圆角 / 阴影), 背景用渐变替代 TMDB 海报
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        color: isDark ? const Color(0xFF1F2937) : const Color(0xFFE5E7EB),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.18),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
+      width: double.infinity,
       child: isTablet ? _buildTabletLayout(isDark) : _buildPhoneLayout(isDark),
     );
   }
@@ -196,7 +185,7 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // 1) 背景: 横版 coverUrl (有则) / 竖版 cover (无则)
+          // 1) 背景: TMDB 海报 (全宽, 无圆角)
           FutureBuilder<String>(
             future: _backgroundUrl(),
             builder: (context, snapshot) {
@@ -205,7 +194,6 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
               return CachedNetworkImage(
                 imageUrl: imageUrl,
                 // v2.1.33: 走 OkHttp (强制 TLS 1.2), 避开 dart:io TLS 1.3
-                //   cipher 跟 CF edge zone 协商失败 (走 cacheManager 注入)
                 cacheManager: LunaCacheManager.instance,
                 fit: BoxFit.cover,
                 httpHeaders: headers,
@@ -222,6 +210,7 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
               );
             },
           ),
+          // ★ v2.6.47: 边缘渐变淡出 — 底部渐变压暗到页面底色, 左右淡出
           DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -229,10 +218,11 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
                 end: Alignment.bottomCenter,
                 colors: [
                   Colors.black.withOpacity(0.35),
-                  Colors.black.withOpacity(0.65),
-                  Colors.black.withOpacity(0.90),
+                  Colors.black.withOpacity(0.55),
+                  Colors.black.withOpacity(0.85),
+                  isDark ? const Color(0xFF0F1117) : const Color(0xFFF5F7F5),
                 ],
-                stops: const [0.0, 0.55, 1.0],
+                stops: const [0.0, 0.45, 0.75, 1.0],
               ),
             ),
           ),
@@ -332,7 +322,7 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // 1) 背景: 横版 coverUrl (有则) / 竖版 cover (无则)
+          // 1) 背景: TMDB 海报 (全宽, 无圆角)
           FutureBuilder<String>(
             future: _backgroundUrl(),
             builder: (context, snapshot) {
@@ -341,7 +331,6 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
               return CachedNetworkImage(
                 imageUrl: imageUrl,
                 // v2.1.33: 走 OkHttp (强制 TLS 1.2), 避开 dart:io TLS 1.3
-                //   cipher 跟 CF edge zone 协商失败 (走 cacheManager 注入)
                 cacheManager: LunaCacheManager.instance,
                 fit: BoxFit.cover,
                 httpHeaders: headers,
@@ -358,6 +347,7 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
               );
             },
           ),
+          // ★ v2.6.47: 边缘渐变淡出 — 底部渐变压暗到页面底色
           DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -365,10 +355,11 @@ class _DoubanDetailHeaderState extends State<DoubanDetailHeader> {
                 end: Alignment.bottomCenter,
                 colors: [
                   Colors.black.withOpacity(0.35),
-                  Colors.black.withOpacity(0.65),
-                  Colors.black.withOpacity(0.90),
+                  Colors.black.withOpacity(0.55),
+                  Colors.black.withOpacity(0.85),
+                  isDark ? const Color(0xFF0F1117) : const Color(0xFFF5F7F5),
                 ],
-                stops: const [0.0, 0.55, 1.0],
+                stops: const [0.0, 0.45, 0.75, 1.0],
               ),
             ),
           ),
