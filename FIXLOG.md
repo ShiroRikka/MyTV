@@ -1,5 +1,13 @@
 # LunaTV-Mobile 修复日记
 
+## v2.6.61 (2026-08-27) — 登录页与全局 Navigator 双重兜底保障开机 100% 自动检查更新
+
+### 修复
+1. `LoginScreen` 增加 `WidgetsBinding.instance.addPostFrameCallback` 启动更新检测，确保未登录态/首次安装启动时同样 100% 弹出更新。
+2. `MaterialApp` 注入静态全局 `LunaTVApp.navigatorKey`，彻底消除不同路由层级下的弹窗 context 丢失问题。
+
+---
+
 ## v2.6.60 (2026-08-27) — 详情页 UI 沉浸式重构 + 启动检查更新全链路修复
 
 ### 现象
