@@ -4634,18 +4634,32 @@ class _PlayerScreenState extends State<PlayerScreen>
         final childAspectRatio = cardW < 80 ? 1.2 : 1.0;
         final fontSize = cardW < 80 ? 11.0 : 12.0;
 
-        // 每页最多 30 集, 算行数
-        final rows =
-            ((_episodesPerPage + crossAxisCount - 1) ~/ crossAxisCount);
-        final cardH = cardW / childAspectRatio;
-        // 网格高度 = rows * cardH + (rows-1) * spacing
-        final gridHeight = rows * cardH + (rows - 1) * spacing;
-        // 加上底部翻页小圆点的高度 (16dp + 4dp marginTop)
-        final sectionHeight = gridHeight + 20;
-
         final totalEpisodes = source.episodes.length;
         final pageCount =
             (totalEpisodes + _episodesPerPage - 1) ~/ _episodesPerPage;
+
+        // 仅 1 页（如电影 1 集、短剧/动漫 1~30 集）：直接返回自适应高度的 GridView，不留任何多余空白
+        if (pageCount <= 1) {
+          return _buildEpisodesGridPage(
+            source,
+            0,
+            totalEpisodes,
+            isDark,
+            crossAxisCount,
+            childAspectRatio,
+            spacing,
+            cardW,
+            fontSize,
+          );
+        }
+
+        // 多页（30 集以上）：计算每页网格高度与翻页器
+        final rows =
+            ((_episodesPerPage + crossAxisCount - 1) ~/ crossAxisCount);
+        final cardH = cardW / childAspectRatio;
+        final gridHeight = rows * cardH + (rows - 1) * spacing;
+        final sectionHeight = gridHeight + 20;
+
         final initialPage =
             (_currentEpisodeIndex ~/ _episodesPerPage).clamp(0, pageCount - 1);
 
@@ -4656,10 +4670,8 @@ class _PlayerScreenState extends State<PlayerScreen>
               SizedBox(
                 height: gridHeight,
                 child: PageView.builder(
-                  // v2.0.51: PageController 跟着 episode 切换 + 用户滑动更新
                   controller: _episodesPageController,
                   onPageChanged: (page) {
-                    // 通知 badge 数字更新 (ValueListenableBuilder)
                     _pageControllerNotifier.value = _episodesPageController;
                   },
                   itemCount: pageCount,
@@ -4680,31 +4692,29 @@ class _PlayerScreenState extends State<PlayerScreen>
                   },
                 ),
               ),
-              // v2.0.51: 翻页小圆点 (跟 badge 同步)
-              if (pageCount > 1)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: List.generate(pageCount, (i) {
-                      final isActive = i == initialPage;
-                      return AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        margin: const EdgeInsets.symmetric(horizontal: 3),
-                        width: isActive ? 16 : 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          color: isActive
-                              ? const Color(0xFF22C55E)
-                              : (isDark
-                                  ? Colors.white24
-                                  : Colors.black26),
-                          borderRadius: BorderRadius.circular(3),
-                        ),
-                      );
-                    }),
-                  ),
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List.generate(pageCount, (i) {
+                    final isActive = i == initialPage;
+                    return AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      margin: const EdgeInsets.symmetric(horizontal: 3),
+                      width: isActive ? 16 : 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: isActive
+                            ? const Color(0xFF10B981)
+                            : (isDark
+                                ? Colors.white24
+                                : Colors.black26),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    );
+                  }),
                 ),
+              ),
             ],
           ),
         );
