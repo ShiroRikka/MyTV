@@ -3892,12 +3892,6 @@ class _PlayerScreenState extends State<PlayerScreen>
                 //   之前的 110x150 小海报完全不一样 — 现在是大头部视觉, 只是
                 //   背景图走豆瓣兜底).
                 if (widget.videoInfo.cover.isNotEmpty)
-                  // v2.0.84: 传 coverUrl (16:9 横版剧照 l_cover 1280x720)
-                  //   给详情页大头部背景. 平板/横屏缩到 2K 宽不糊.
-                  // v2.0.93: 传 tmdbBackdropUrl (TMDB w1280 16:9 backdrop, 优
-                  //   先级最高, 精准识别结果). 配了 TMDB key + 搜索成功 = 用
-                  //   TMDB backdrop; 否则 = null, 走 coverUrl 兜底 (v2.0.84).
-                  // v2.0.99: tmdbBackdropUrl 不依赖豆瓣登录, 配了 TMDB key 就生效.
                   DoubanDetailHeader(
                     title: widget.videoInfo.title,
                     year: widget.videoInfo.year,
@@ -3906,17 +3900,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                     sourceName: widget.videoInfo.sourceName,
                     coverUrl: widget.videoInfo.coverUrl,
                     tmdbBackdropUrl: _tmdbBackdropUrl,
-                    // v2.1.8: 传 summary, 平板 header 右侧显示简介填满空白.
-                    // v2.1.10: 手机 header 右侧也显示简介 (上面不够写可左滑),
-                    //   下方不再渲染独立 section.
+                    rate: widget.videoInfo.rate,
                     summary: _summary,
-                    // v2.1.17: 平板传演员横向滚动 ListView (浮在背景图下半部
-                    //   空白处). 手机不传 — DoubanDetailHeader 内部忽略, 跟
-                    //   v2.1.16 视觉一致. _cast 为空 (没配 TMDB key / 拉不到
-                    //   演员) 时不传, header 不渲染演员区.
-                    castOverlay: isTablet && _cast != null
-                        ? _buildCastOverlay(_cast!)
+                    castOverlay: _cast != null && _cast!.isNotEmpty
+                        ? _buildCastOverlay(_cast!, isDark)
                         : null,
+                    onPlayPressed: () => _playEpisode(_currentEpisodeIndex),
                   )
                 else
                   _buildPosterHeader(isDark),
@@ -3945,9 +3934,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   //   (DoubanDetailHeader 内部 Positioned 浮在 left:180 right:16 bottom:14).
   //   尺寸 (v2.1.17 微调): 头像 70 + 名字 12pt + 总高 100 — 21:9 大背景图
   //   下半部比例协调, 比 v2.1.17 首发 50/10pt/80 显大 40%.
-  Widget _buildCastOverlay(List<TmdbCast> cast) {
+  Widget _buildCastOverlay(List<TmdbCast> cast, bool isDark) {
     return SizedBox(
-      height: 100,
+      height: 96,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         itemCount: cast.length,
@@ -3960,48 +3949,41 @@ class _PlayerScreenState extends State<PlayerScreen>
               children: [
                 ClipOval(
                   child: SizedBox(
-                    width: 70,
-                    height: 70,
+                    width: 64,
+                    height: 64,
                     child: url != null
                         ? CachedNetworkImage(
                             imageUrl: url,
-                            // v2.1.33: 走 OkHttp (强制 TLS 1.2), 避开 dart:io TLS 1.3
-                            //   cipher 跟 CF edge zone 协商失败 (走 cacheManager 注入)
                             cacheManager: LunaCacheManager.instance,
                             fit: BoxFit.cover,
                             placeholder: (ctx, u) => Container(
-                              color: Colors.white12,
+                              color: isDark ? Colors.white12 : Colors.black12,
                             ),
                             errorWidget: (ctx, u, e) => Container(
-                              color: Colors.white12,
-                              child: const Icon(Icons.person,
-                                  color: Colors.white54, size: 36),
+                              color: isDark ? Colors.white12 : Colors.black12,
+                              child: Icon(Icons.person,
+                                  color: isDark ? Colors.white54 : Colors.black45, size: 32),
                             ),
                           )
                         : Container(
-                            color: Colors.white12,
-                            child: const Icon(Icons.person,
-                                color: Colors.white54, size: 36),
+                            color: isDark ? Colors.white12 : Colors.black12,
+                            child: Icon(Icons.person,
+                                color: isDark ? Colors.white54 : Colors.black45, size: 32),
                           ),
                   ),
                 ),
                 const SizedBox(height: 6),
                 SizedBox(
-                  width: 80,
+                  width: 76,
                   child: Text(
                     c.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.white.withOpacity(0.9),
-                      shadows: const [
-                        Shadow(
-                            color: Colors.black54,
-                            offset: Offset(0, 1),
-                            blurRadius: 3),
-                      ],
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      color: isDark ? Colors.white.withOpacity(0.85) : const Color(0xFF334155),
                     ),
                   ),
                 ),
@@ -4342,63 +4324,96 @@ class _PlayerScreenState extends State<PlayerScreen>
     final selected = _selectedSource?.source == s.source;
     final state = _pingState[s.source] ?? PingState.idle;
     final ms = _pingCache[s.episodes.isNotEmpty ? s.episodes.first : ''];
-    // v1.0.45: 取完整测速信息 (分辨率 + 速度 + ping)
     final speed = _sourceSpeeds[s.source];
+
+    final cardBg = selected
+        ? const Color(0xFF10B981).withOpacity(isDark ? 0.15 : 0.08)
+        : (isDark ? const Color(0xFF1E293B) : Colors.white);
+
+    final borderColor = selected
+        ? const Color(0xFF10B981)
+        : (isDark ? Colors.white.withOpacity(0.08) : Colors.black.withOpacity(0.06));
+
     return InkWell(
       onTap: () {
-        // 切源后只更新选中状态,不自动播放 (由用户点"播放"按钮或集数触发)
         _selectSource(s);
       },
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(12),
       child: Container(
-        margin: const EdgeInsets.only(bottom: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: selected
-              ? const Color(0xFF22C55E).withOpacity(0.15)
-              : (isDark
-                  ? Colors.white.withOpacity(0.05)
-                  : Colors.white.withOpacity(0.6)),
-          borderRadius: BorderRadius.circular(8),
+          color: cardBg,
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: selected
-                ? const Color(0xFF22C55E)
-                : (isDark
-                    ? Colors.white.withOpacity(0.1)
-                    : Colors.black.withOpacity(0.08)),
-            width: selected ? 1.5 : 1,
+            color: borderColor,
+            width: selected ? 1.6 : 1,
           ),
+          boxShadow: [
+            BoxShadow(
+              color: selected
+                  ? const Color(0xFF10B981).withOpacity(0.18)
+                  : Colors.black.withOpacity(isDark ? 0.2 : 0.03),
+              blurRadius: selected ? 10 : 6,
+              offset: const Offset(0, 3),
+            ),
+          ],
         ),
         child: Row(
           children: [
-            // 状态图标
             _buildPingIcon(state, ms),
-            const SizedBox(width: 10),
-            // 名称 + 集数
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    s.sourceName.isNotEmpty ? s.sourceName : s.source,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: isDark ? Colors.white : Colors.black87,
-                    ),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          s.sourceName.isNotEmpty ? s.sourceName : s.source,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: selected
+                                ? const Color(0xFF10B981)
+                                : (isDark ? Colors.white : const Color(0xFF1E293B)),
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (selected) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF10B981).withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            '当前选中',
+                            style: TextStyle(
+                              fontSize: 9.5,
+                              color: Color(0xFF10B981),
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 3),
                   Text(
                     '共 ${s.episodes.length} 集',
                     style: TextStyle(
-                      fontSize: 11,
-                      color: isDark ? Colors.white60 : Colors.black54,
+                      fontSize: 11.5,
+                      color: isDark ? Colors.white60 : const Color(0xFF64748B),
                     ),
                   ),
                 ],
               ),
             ),
-            // v1.0.45: 显示完整测速信息 (分辨率 + 速度 + ping)
             _buildSpeedLabel(state, speed, ms),
           ],
         ),
@@ -4756,34 +4771,44 @@ class _PlayerScreenState extends State<PlayerScreen>
           });
         }
       },
-      borderRadius: BorderRadius.circular(6),
+      borderRadius: BorderRadius.circular(8),
       child: Container(
         decoration: BoxDecoration(
           gradient: isCurrent
               ? const LinearGradient(
                   colors: [
-                    Color(0xFF22C55E),
                     Color(0xFF10B981),
+                    Color(0xFF059669),
                   ],
                 )
               : null,
           color: !isCurrent
               ? (isDark
-                  ? Colors.white.withOpacity(0.06)
-                  : Colors.black.withOpacity(0.04))
+                  ? const Color(0xFF1E293B)
+                  : Colors.white)
               : null,
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(8),
           border: !isCurrent
               ? Border.all(
                   color: isDark
                       ? Colors.white.withOpacity(0.08)
                       : Colors.black.withOpacity(0.06),
+                  width: 1,
                 )
               : null,
+          boxShadow: [
+            BoxShadow(
+              color: isCurrent
+                  ? const Color(0xFF10B981).withOpacity(0.35)
+                  : Colors.black.withOpacity(isDark ? 0.15 : 0.03),
+              blurRadius: isCurrent ? 8 : 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
         ),
         alignment: Alignment.center,
         child: Padding(
-          padding: const EdgeInsets.all(2),
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
           child: Text(
             title,
             maxLines: 2,
@@ -4791,10 +4816,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontSize: fontSize,
-              fontWeight: FontWeight.w600,
+              fontWeight: isCurrent ? FontWeight.w800 : FontWeight.w600,
               color: isCurrent
                   ? Colors.white
-                  : (isDark ? Colors.white70 : Colors.black87),
+                  : (isDark ? Colors.white.withOpacity(0.85) : const Color(0xFF1E293B)),
             ),
           ),
         ),
@@ -4806,13 +4831,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     return Row(
       children: [
         Container(
-          width: 4,
+          width: 3.5,
           height: 14,
           decoration: BoxDecoration(
             gradient: const LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
-              colors: [Color(0xFF22C55E), Color(0xFF10B981)],
+              colors: [Color(0xFF10B981), Color(0xFF059669)],
             ),
             borderRadius: BorderRadius.circular(2),
           ),
@@ -4821,9 +4846,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         Text(
           text,
           style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w700,
-            color: isDark ? Colors.white : Colors.black,
+            fontSize: 15,
+            fontWeight: FontWeight.w800,
+            color: isDark ? Colors.white : const Color(0xFF1E293B),
+            letterSpacing: 0.2,
           ),
         ),
       ],
@@ -4862,15 +4888,17 @@ class _PlayerScreenState extends State<PlayerScreen>
           decoration: BoxDecoration(
             gradient: canPlay
                 ? const LinearGradient(
-                    colors: [Color(0xFF22C55E), Color(0xFF10B981)],
+                    colors: [Color(0xFF10B981), Color(0xFF059669)],
                   )
                 : null,
-            color: !canPlay ? Colors.grey : null,
+            color: !canPlay
+                ? (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1))
+                : null,
             borderRadius: BorderRadius.circular(12),
             boxShadow: canPlay
                 ? [
                     BoxShadow(
-                      color: const Color(0xFF22C55E).withOpacity(0.35),
+                      color: const Color(0xFF10B981).withOpacity(0.35),
                       blurRadius: 12,
                       offset: const Offset(0, 4),
                     ),
