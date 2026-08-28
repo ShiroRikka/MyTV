@@ -82,6 +82,9 @@ void main() async {
 
 class LunaTVApp extends StatelessWidget {
   final ThemeService themeService;
+  static final GlobalKey<NavigatorState> navigatorKey =
+      GlobalKey<NavigatorState>();
+
   const LunaTVApp({super.key, required this.themeService});
 
   @override
@@ -91,6 +94,7 @@ class LunaTVApp extends StatelessWidget {
       child: Consumer<ThemeService>(
         builder: (context, themeService, child) {
           return MaterialApp(
+            navigatorKey: LunaTVApp.navigatorKey,
             title: 'LunaTV',
             debugShowCheckedModeBanner: false,
             theme: themeService.lightTheme,
