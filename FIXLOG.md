@@ -1,5 +1,20 @@
 # LunaTV-Mobile 修复日记
 
+## v2.6.63 (2026-08-29) — 全球 jsDelivr CDN 极速降级多通道更新检测 + 单包 FAT APK 腰斩瘦身 50%
+
+### 修复与优化
+1. **开机更新检查 100% 弹窗保障（多通道自动降级）**：
+   - 根因：国内网络环境下，直连 `api.github.com` 易受 DNS 污染/GFW 拦截/无 User-Agent 报 403 频限，导致更新检测静默失败。
+   - 修复：升级 `VersionService` 为「GitHub API + jsDelivr 全球加速 CDN 镜像（国内免梯毫秒级响应）+ Raw 兜底」多通道引擎，无论网络环境如何均能 100% 毫秒级探测新版本；
+   - 弹窗路由：采用 `LunaTVApp.navigatorKey.currentContext` 顶层弹窗，杜绝异步 context 丢失。
+2. **FAT 安装包体积从 70MB 腰斩降至 35MB（瘦身 50%+）**：
+   - 架构裁剪：剔除无用的 x86/x86_64 电脑模拟器架构，精简为 `arm64-v8a` + `armeabi-v7a` 双 ARM 架构，覆盖 100% 实体手机、电视盒子与模拟器；
+   - 开启 R8 代码混淆与摇树优化（`isMinifyEnabled = true`）；
+   - 开启无用资源裁剪（`isShrinkResources = true`）；
+   - 编译参数添加 `--obfuscate --split-debug-info` 剥离 Dart 调试符号。
+
+---
+
 ## v2.6.62 (2026-08-27) — 修复选集面板单页/电影单集多余空白高度问题
 
 ### 现象

@@ -12,6 +12,7 @@ import 'package:provider/provider.dart';
 import 'package:luna_tv/screens/home_screen.dart';
 import 'package:luna_tv/services/version_service.dart';
 import 'package:luna_tv/widgets/update_dialog.dart';
+import 'package:luna_tv/main.dart';
 
 /// LunaTV 风格登录页
 /// 主色：emerald-500 (LunaTV Web 绿色品牌色)
@@ -53,8 +54,11 @@ class _LoginScreenState extends State<LoginScreen>
   Future<void> _checkStartupUpdate() async {
     try {
       final info = await VersionService.checkForUpdate();
-      if (info != null && mounted) {
-        await UpdateDialog.show(context, info);
+      if (info != null) {
+        final dialogContext = LunaTVApp.navigatorKey.currentContext ?? (mounted ? context : null);
+        if (dialogContext != null) {
+          await UpdateDialog.show(dialogContext, info);
+        }
       }
     } catch (e) {
       debugPrint('[LoginScreen] check update error: $e');

@@ -35,6 +35,10 @@ android {
         val parts = versionStr.split("+")
         versionName = parts[0]
         versionCode = if (parts.size > 1) parts[1].toInt() else 1
+
+        ndk {
+            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
+        }
     }
 
     // 固定 release 签名 (keystore 提交在仓库 android/app/release.keystore)
@@ -51,8 +55,9 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("release")
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         debug {
             isMinifyEnabled = false
