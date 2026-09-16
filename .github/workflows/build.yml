@@ -62,7 +62,7 @@ jobs:
           retry_on: error
           retry_wait_seconds: 60
           timeout_minutes: 60
-          command: flutter build apk --release
+          command: flutter build apk --release --target-platform android-arm,android-arm64 --obfuscate --split-debug-info=build/app/outputs/symbols
 
       # 用 jq 从 changelogs.json 提取当前 tag 的 release notes
       - name: Extract release body from changelogs.json

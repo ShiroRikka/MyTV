@@ -31,6 +31,9 @@ import 'package:luna_tv/screens/anime_screen.dart';
 import 'package:luna_tv/screens/show_screen.dart';
 import 'package:luna_tv/screens/player_screen.dart';
 import 'package:luna_tv/screens/short_drama_screen.dart';
+import 'package:luna_tv/services/version_service.dart';
+import 'package:luna_tv/widgets/update_dialog.dart';
+import 'package:luna_tv/main.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -59,6 +62,25 @@ class _HomeScreenState extends State<HomeScreen> {
     _refreshCacheOnHomeEnter();
     // 加载 Hero Banner 数据
     _loadBannerData();
+    // 启动检查更新（有更新则直接弹窗提醒）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkStartupUpdate();
+    });
+  }
+
+  /// 启动时自动检查更新
+  Future<void> _checkStartupUpdate() async {
+    try {
+      final info = await VersionService.checkForUpdate();
+      if (info != null) {
+        final dialogContext = LunaTVApp.navigatorKey.currentContext ?? (mounted ? context : null);
+        if (dialogContext != null) {
+          await UpdateDialog.show(dialogContext, info);
+        }
+      }
+    } catch (e) {
+      debugPrint('[HomeScreen] check update error: $e');
+    }
   }
 
   @override
